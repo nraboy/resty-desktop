@@ -12,6 +12,10 @@ export default function Input({ label, error, className = "", ...props }: InputP
         <label className="text-sm text-gray-400 font-medium">{label}</label>
       )}
       <input
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        autoComplete="off"
         {...props}
         className={`bg-gray-800 border ${
           error ? "border-red-500" : "border-gray-700"

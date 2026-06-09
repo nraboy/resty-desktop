@@ -80,6 +80,9 @@ export const runBackup = (
 ): Promise<string> =>
   invoke("run_backup", { repoId, paths, tags, excludes });
 
+export const unlockRepo = (repoId: string): Promise<void> =>
+  invoke("unlock_repo", { repoId });
+
 export const forgetByPlan = (
   repoId: string,
   tags: string[],

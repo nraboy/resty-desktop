@@ -19,7 +19,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | State management | URL-based nav (no global store) |
 | Routing | React Router v6 |
 | Rust backend | Tauri v2 `#[tauri::command]` |
-| Settings persistence | `tauri-plugin-store` (`settings.json`) |
+| Settings persistence | SQLite (`app_data.db`) via `AppDb`; `tauri-plugin-store` kept only for legacy migration |
 | File picker | `tauri-plugin-dialog` |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
 | ID generation | `crypto.randomUUID()` (native browser API) |
@@ -54,17 +54,20 @@ src-tauri/
   tauri.conf.json
   src/
     main.rs                   # Calls restic_gui_lib::run()
-    lib.rs                    # Tauri builder; registers all commands; initialises SQLite cache
+    lib.rs                    # Tauri builder; registers all commands; opens app_data.db, initialises schema, manages AppDb + MasterKey as Tauri state
     commands/
       mod.rs                  # shared get_restic_path() helper used by all command modules
-      repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo, check_repo,
-                              #   get_repo_stats, refresh_repo_stats, get/set_restic_path
+      auth.rs                 # is_app_setup, setup_master_password, unlock_app, lock_app,
+                              #   change_master_password, reset_app; migrates legacy settings.json on first setup
+      crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
+      repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
+                              #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
-                              #   run_backup, forget_by_plan; is_remote_repo() helper
+                              #   run_backup, forget_by_plan, unlock_repo
       browse.rs               # list_files, restore_path
-      backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in settings.json under "backup_plans" key
-      cache.rs                # SnapshotCache (SQLite-backed); tables: snapshots_cache, browse_cache, repo_stats_cache;
-                              #   clear_browse_cache command
+      backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
+      cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory); Repository, FullRepository,
+                              #   BackupPlan, RetentionPolicy types; clear_browse_cache command
 ```
 
 ## Routes
@@ -85,12 +88,27 @@ src-tauri/
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
 - `run_backup` returns the raw restic JSON stdout as a `String` (not deserialized).
-- Repos and settings are stored in `settings.json` via `tauri-plugin-store`.
+- Repos, backup plans, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.
+
+## Security Architecture
+
+- App requires a **master password** set on first launch (`setup_master_password`). Subsequent launches call `unlock_app` to load the key into memory.
+- Master password is never stored. Instead: Argon2id derives a 32-byte key from password + random salt; AES-GCM encrypts a known verification plaintext; the salt + nonce + ciphertext are stored in the `master_key` table.
+- All repo passwords are encrypted with the master key (AES-GCM) and stored in the `repositories` table. They are decrypted on-demand via `db.get_full_repo(&repo_id, &key)`.
+- `MasterKey` is an in-memory `Mutex<Option<[u8; 32]>>` managed as `tauri::State`. It is `None` when locked; any command that calls restic will fail with "App is locked" until `unlock_app` succeeds.
+- `change_master_password` re-derives a new key and re-encrypts all repo passwords atomically in a SQLite transaction.
+- `reset_app` wipes all SQLite tables and clears the in-memory key, returning to first-launch state.
+- On first `setup_master_password`, any existing `settings.json` data (repos, backup plans, restic path) is migrated into SQLite and encrypted.
+
+## Persistence Layer
+
+- Single SQLite database (`app_data.db`) in the Tauri app data directory, opened at startup and managed as `tauri::State<AppDb>`.
+- Tables: `master_key`, `repositories` (encrypted passwords), `backup_plans`, `app_settings`, `snapshots_cache`, `browse_cache`, `repo_stats_cache`.
+- `tauri-plugin-store` (`settings.json`) is still registered but only used by `migrate_from_settings_json` during first-time setup. All new reads/writes go through `AppDb`.
 
 ## Caching Layer
 
-- SQLite database (`browse_cache.db`) is stored in the Tauri app data directory; opened at startup in `lib.rs` and managed as a `tauri::State<SnapshotCache>`.
-- Three cache tables: `snapshots_cache` (per-repo snapshot list), `browse_cache` (per-snapshot directory listings keyed by path), `repo_stats_cache` (per-repo stats).
+- Three cache tables in `app_data.db`: `snapshots_cache` (per-repo snapshot list), `browse_cache` (per-snapshot directory listings keyed by path), `repo_stats_cache` (per-repo stats).
 - `list_snapshots` — returns from cache only (fast, no restic call). `refresh_snapshots` — calls restic and updates cache.
 - `SnapshotsPage` uses a stale-while-revalidate pattern: serve cache immediately, then fire `refresh_snapshots` in the background for local repos. Remote repos skip the background refresh to avoid unnecessary network calls.
 - After `run_backup` succeeds: parse the new `snapshot_id` from the restic NDJSON summary line, fetch that single snapshot's metadata (`restic snapshots --json <id>`), and prepend it to the cached list — no full re-fetch needed.
@@ -101,6 +119,7 @@ src-tauri/
 ## Adding a New Feature
 
 1. Add a `#[tauri::command]` function in the appropriate `src-tauri/src/commands/*.rs` file.
+   - If the command needs to call restic, accept `State<'_, AppDb>` and `State<'_, MasterKey>`, call `master_key.get()?` to obtain the key, then `db.get_full_repo(&repo_id, &key)?` to retrieve decrypted credentials.
 2. Register it in the `invoke_handler!` macro in `src-tauri/src/lib.rs`.
 3. Add a typed wrapper in `src/lib/invoke.ts`.
 4. Consume it from a page or hook.

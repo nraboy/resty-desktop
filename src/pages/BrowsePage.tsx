@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listFiles, listRepos, restorePath } from "../lib/invoke";
+import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -34,6 +35,8 @@ const FileIcon = ({ type }: { type: string }) => {
 export default function BrowsePage() {
   const { repoId, snapshotId } = useParams<{ repoId: string; snapshotId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const snapshot = (location.state as { snapshot?: Snapshot } | null)?.snapshot;
   const [repo, setRepo] = useState<Repository | null>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string | undefined>(undefined);
@@ -118,7 +121,20 @@ export default function BrowsePage() {
           ← Snapshots
         </Button>
         <h1 className="text-xl font-semibold text-gray-100 mt-3">Browse Snapshot</h1>
-        {repo && <p className="text-sm text-gray-400 mt-0.5">{repo.name}</p>}
+        {repo && (
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-sm text-gray-400">{repo.name}</p>
+            {snapshot?.tags && snapshot.tags.length > 0 && (
+              <div className="flex items-center gap-1">
+                {snapshot.tags.map((tag) => (
+                  <span key={tag} className="px-1.5 py-0.5 text-xs rounded bg-gray-800 text-gray-400 border border-gray-700">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <p className="text-xs text-gray-600 font-mono mt-0.5">{snapshotId}</p>
       </div>
 

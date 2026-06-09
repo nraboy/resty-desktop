@@ -161,6 +161,19 @@ pub async fn run_backup(
 }
 
 #[tauri::command]
+pub async fn unlock_repo(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+) -> Result<(), String> {
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+    run_restic_with_path(&repo, vec!["unlock"], &restic_path)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn forget_by_plan(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,

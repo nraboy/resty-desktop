@@ -45,6 +45,7 @@ pub fn run() {
             snapshot::tag_snapshot,
             snapshot::run_backup,
             snapshot::forget_by_plan,
+            snapshot::unlock_repo,
             // browse
             browse::list_files,
             browse::restore_path,

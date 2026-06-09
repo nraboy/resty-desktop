@@ -369,6 +369,10 @@ export default function RepositoriesPage() {
                 value={form.path}
                 onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
                 placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
                 autoFocus
               />
             )}
