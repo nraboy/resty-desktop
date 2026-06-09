@@ -11,6 +11,50 @@ import type { BackupPlan, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
+type ExcludeMode = "simple" | "expert";
+
+const EXCLUDE_SUGGESTIONS = [
+  {
+    id: "dev",
+    label: "Development assets",
+    description: "node_modules, build output, caches, lockfiles",
+    patterns: [
+      "node_modules/",
+      ".git/",
+      "__pycache__/",
+      "*.pyc",
+      ".venv/",
+      "venv/",
+      "target/",
+      "vendor/",
+      "build/",
+      "dist/",
+      ".next/",
+      ".nuxt/",
+      ".gradle/",
+      ".cargo/registry/",
+    ],
+  },
+  {
+    id: "system",
+    label: "System files",
+    description: ".DS_Store, Thumbs.db, desktop.ini",
+    patterns: [".DS_Store", "Thumbs.db", "desktop.ini", "ehthumbs.db"],
+  },
+  {
+    id: "logs",
+    label: "Log files",
+    description: "*.log and rotated log variants",
+    patterns: ["*.log", "*.log.*", "logs/"],
+  },
+  {
+    id: "temp",
+    label: "Temporary files",
+    description: "*.tmp, swap files, backups",
+    patterns: ["*.tmp", "*.temp", "*.swp", "*.bak", "~*"],
+  },
+];
+
 export default function BackupPlanEditPage() {
   const { planId } = useParams<{ planId: string }>();
   const navigate = useNavigate();
@@ -27,6 +71,9 @@ export default function BackupPlanEditPage() {
   const [paths, setPaths] = useState<string[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
+  const [excludeMode, setExcludeMode] = useState<ExcludeMode>("simple");
+  const [excludeItems, setExcludeItems] = useState<string[]>([]);
+  const [excludeInput, setExcludeInput] = useState("");
   const [excludeText, setExcludeText] = useState("");
   const [keepLast, setKeepLast] = useState("");
   const [keepDaily, setKeepDaily] = useState("");
@@ -52,6 +99,7 @@ export default function BackupPlanEditPage() {
             }
             setPaths(plan.paths);
             setTags(plan.tags);
+            setExcludeItems(plan.excludes);
             setExcludeText(plan.excludes.join("\n"));
             setKeepLast(plan.retention?.keepLast?.toString() ?? "");
             setKeepDaily(plan.retention?.keepDaily?.toString() ?? "");
@@ -99,6 +147,48 @@ export default function BackupPlanEditPage() {
 
   const removeTag = useCallback((t: string) => setTags((prev) => prev.filter((x) => x !== t)), []);
 
+  const addExclude = useCallback(() => {
+    const v = excludeInput.trim();
+    if (v && !excludeItems.includes(v)) {
+      setExcludeItems((prev) => [...prev, v]);
+      setExcludeInput("");
+    }
+  }, [excludeInput, excludeItems]);
+
+  const removeExclude = useCallback(
+    (p: string) => setExcludeItems((prev) => prev.filter((x) => x !== p)),
+    [],
+  );
+
+  const switchExcludeMode = useCallback(
+    (mode: ExcludeMode) => {
+      if (mode === excludeMode) return;
+      if (mode === "expert") {
+        setExcludeText(excludeItems.join("\n"));
+      } else {
+        const parsed = excludeText
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#"));
+        setExcludeItems([...new Set(parsed)]);
+      }
+      setExcludeMode(mode);
+    },
+    [excludeMode, excludeItems, excludeText],
+  );
+
+  const toggleSuggestion = useCallback(
+    (patterns: string[]) => {
+      const allPresent = patterns.every((p) => excludeItems.includes(p));
+      if (allPresent) {
+        setExcludeItems((prev) => prev.filter((p) => !patterns.includes(p)));
+      } else {
+        setExcludeItems((prev) => [...new Set([...prev, ...patterns])]);
+      }
+    },
+    [excludeItems],
+  );
+
   const handleSave = async () => {
     if (!name.trim()) { setError("Plan name is required."); return; }
     if (!repoId) { setError("Select a target repository."); return; }
@@ -118,16 +208,20 @@ export default function BackupPlanEditPage() {
             keepYearly: toNum(keepYearly),
           }
         : undefined;
+      const excludes =
+        excludeMode === "expert"
+          ? excludeText
+              .split("\n")
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith("#"))
+          : excludeItems;
       const plan: BackupPlan = {
         id: isNew ? crypto.randomUUID() : planId!,
         name: name.trim(),
         repoId,
         paths,
         tags,
-        excludes: excludeText
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l && !l.startsWith("#")),
+        excludes,
         retention,
       };
       await saveBackupPlan(plan);
@@ -293,19 +387,109 @@ export default function BackupPlanEditPage() {
 
       {/* Exclude patterns */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Exclude Patterns (optional)</h2>
-        <p className="text-xs text-gray-500 mb-3">
-          One pattern per line — same syntax as .gitignore. Lines starting with{" "}
-          <code className="text-gray-400">#</code> are comments.
-        </p>
-        <textarea
-          value={excludeText}
-          onChange={(e) => setExcludeText(e.target.value)}
-          placeholder={"*.log\nnode_modules/\n# ignore temp files\n*.tmp"}
-          rows={6}
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-y"
-          spellCheck={false}
-        />
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-medium text-gray-300">Exclude Patterns (optional)</h2>
+          <div className="flex rounded-lg overflow-hidden border border-gray-700">
+            <button
+              type="button"
+              onClick={() => switchExcludeMode("simple")}
+              className={`px-3 py-1 text-xs font-medium transition-colors ${excludeMode === "simple" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
+            >
+              Simple
+            </button>
+            <button
+              type="button"
+              onClick={() => switchExcludeMode("expert")}
+              className={`px-3 py-1 text-xs font-medium transition-colors ${excludeMode === "expert" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
+            >
+              Expert
+            </button>
+          </div>
+        </div>
+
+        {excludeMode === "simple" ? (
+          <>
+            {/* Suggestions */}
+            <div className="mb-3">
+              <p className="text-xs text-gray-500 mb-2">Quick suggestions</p>
+              <div className="flex flex-wrap gap-2">
+                {EXCLUDE_SUGGESTIONS.map((s) => {
+                  const active = s.patterns.every((p) => excludeItems.includes(p));
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      title={s.description}
+                      onClick={() => toggleSuggestion(s.patterns)}
+                      className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                        active
+                          ? "bg-blue-900/50 border-blue-600 text-blue-300"
+                          : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-300"
+                      }`}
+                    >
+                      {active && <span className="text-blue-400">✓</span>}
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Manual add */}
+            <div className="flex gap-2 mb-2">
+              <Input
+                placeholder="e.g. *.log or node_modules/"
+                value={excludeInput}
+                onChange={(e) => setExcludeInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addExclude())}
+                className="flex-1"
+              />
+              <Button variant="secondary" size="sm" onClick={addExclude}>
+                Add
+              </Button>
+            </div>
+
+            {excludeItems.length > 0 && (
+              <ul className="space-y-1.5 mt-2">
+                {excludeItems.map((p) => (
+                  <li
+                    key={p}
+                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
+                  >
+                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                    <button
+                      onClick={() => removeExclude(p)}
+                      className="text-gray-500 hover:text-red-400 transition-colors ml-2 flex-shrink-0"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {excludeItems.length === 0 && (
+              <p className="text-sm text-gray-600 text-center py-3">
+                No exclusions. Files and folders added above will be skipped during backup.
+              </p>
+            )}
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-gray-500 mb-3">
+              One pattern per line — same syntax as .gitignore. Lines starting with{" "}
+              <code className="text-gray-400">#</code> are comments.
+            </p>
+            <textarea
+              value={excludeText}
+              onChange={(e) => setExcludeText(e.target.value)}
+              placeholder={"*.log\nnode_modules/\n# ignore temp files\n*.tmp"}
+              rows={6}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-y"
+              spellCheck={false}
+            />
+          </>
+        )}
       </div>
 
       {/* Retention policy */}
