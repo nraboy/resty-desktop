@@ -135,7 +135,6 @@ export default function SnapshotsPage() {
           <Button variant="secondary" onClick={load} loading={loading}>
             Refresh
           </Button>
-          <Button onClick={() => navigate("/backup-plans")}>+ New Backup</Button>
         </div>
       </div>
 
@@ -149,7 +148,6 @@ export default function SnapshotsPage() {
         <EmptyState
           title="No snapshots"
           description="Run a backup to create the first snapshot."
-          action={<Button onClick={() => navigate("/backup-plans")}>+ New Backup</Button>}
         />
       ) : (
         <div className="rounded-xl border border-gray-800 overflow-hidden">

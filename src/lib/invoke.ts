@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupPlan, FileEntry, Repository, ResticStats, Snapshot } from "./types";
+import type { BackupPlan, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
 
 export const listRepos = (): Promise<Repository[]> =>
   invoke("list_repos");
@@ -10,8 +10,14 @@ export const addRepo = (repo: Repository): Promise<void> =>
 export const removeRepo = (repoId: string): Promise<void> =>
   invoke("remove_repo", { repoId });
 
+export const renameRepo = (repoId: string, newName: string): Promise<void> =>
+  invoke("rename_repo", { repoId, newName });
+
 export const initRepo = (repo: Repository): Promise<void> =>
   invoke("init_repo", { repo });
+
+export const checkRepo = (repo: Repository): Promise<void> =>
+  invoke("check_repo", { repo });
 
 export const getRepoStats = (repo: Repository): Promise<ResticStats> =>
   invoke("get_repo_stats", { repo });
@@ -71,3 +77,11 @@ export const saveBackupPlan = (plan: BackupPlan): Promise<void> =>
 
 export const removeBackupPlan = (planId: string): Promise<void> =>
   invoke("remove_backup_plan", { planId });
+
+export const forgetByPlan = (
+  repo: Repository,
+  tags: string[],
+  paths: string[],
+  retention: RetentionPolicy
+): Promise<string> =>
+  invoke("forget_by_plan", { repo, tags, paths, retention });

@@ -30,6 +30,14 @@ export interface ResticStats {
   snapshots_count: number;
 }
 
+export interface RetentionPolicy {
+  keepLast?: number;
+  keepDaily?: number;
+  keepWeekly?: number;
+  keepMonthly?: number;
+  keepYearly?: number;
+}
+
 export interface BackupPlan {
   id: string;
   name: string;
@@ -37,4 +45,5 @@ export interface BackupPlan {
   paths: string[];
   tags: string[];
   excludes: string[];
+  retention?: RetentionPolicy;
 }

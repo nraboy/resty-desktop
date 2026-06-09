@@ -130,6 +130,36 @@ pub async fn get_repo_stats(app: AppHandle, repo: Repository) -> Result<ResticSt
 }
 
 #[tauri::command]
+pub async fn rename_repo(app: AppHandle, repo_id: String, new_name: String) -> Result<(), String> {
+    let store = app
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
+    let mut repos: Vec<Repository> = store
+        .get("repos")
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if let Some(r) = repos.iter_mut().find(|r| r.id == repo_id) {
+        r.name = new_name;
+    }
+    store.set("repos", serde_json::to_value(&repos).map_err(|e| e.to_string())?);
+    store.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_repo(app: AppHandle, repo: Repository) -> Result<(), String> {
+    let store = app
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
+    let restic_path: String = store
+        .get("restic_path")
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_else(|| "restic".to_string());
+
+    run_restic_with_path(&repo, vec!["check"], &restic_path).map(|_| ())
+}
+
+#[tauri::command]
 pub async fn get_restic_path(app: AppHandle) -> Result<String, String> {
     let store = app
         .store("settings.json")

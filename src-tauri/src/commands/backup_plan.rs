@@ -4,6 +4,16 @@ use tauri_plugin_store::StoreExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RetentionPolicy {
+    pub keep_last: Option<u32>,
+    pub keep_daily: Option<u32>,
+    pub keep_weekly: Option<u32>,
+    pub keep_monthly: Option<u32>,
+    pub keep_yearly: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackupPlan {
     pub id: String,
     pub name: String,
@@ -11,6 +21,7 @@ pub struct BackupPlan {
     pub paths: Vec<String>,
     pub tags: Vec<String>,
     pub excludes: Vec<String>,
+    pub retention: Option<RetentionPolicy>,
 }
 
 #[tauri::command]

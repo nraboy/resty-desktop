@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listBackupPlans, removeBackupPlan, listRepos, runBackup } from "../lib/invoke";
+import { listBackupPlans, removeBackupPlan, listRepos, runBackup, forgetByPlan } from "../lib/invoke";
 import type { BackupPlan, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -79,7 +79,16 @@ export default function BackupPlansPage() {
     setBackupDone(false);
     try {
       const result = await runBackup(repo, backupPlan.paths, backupPlan.tags, backupPlan.excludes);
-      setBackupOutput(result);
+      let output = result;
+      if (backupPlan.retention) {
+        try {
+          const pruneResult = await forgetByPlan(repo, backupPlan.tags, backupPlan.paths, backupPlan.retention);
+          output += "\n\n--- Pruning ---\n" + pruneResult;
+        } catch (pruneErr: any) {
+          output += "\n\n--- Pruning failed ---\n" + String(pruneErr);
+        }
+      }
+      setBackupOutput(output);
       setBackupDone(true);
     } catch (err: any) {
       setBackupError(String(err));

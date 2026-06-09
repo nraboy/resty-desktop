@@ -29,6 +29,11 @@ export default function BackupPlanEditPage() {
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
   const [excludeText, setExcludeText] = useState("");
+  const [keepLast, setKeepLast] = useState("");
+  const [keepDaily, setKeepDaily] = useState("");
+  const [keepWeekly, setKeepWeekly] = useState("");
+  const [keepMonthly, setKeepMonthly] = useState("");
+  const [keepYearly, setKeepYearly] = useState("");
 
   useEffect(() => {
     const init = async () => {
@@ -49,6 +54,11 @@ export default function BackupPlanEditPage() {
             setPaths(plan.paths);
             setTags(plan.tags);
             setExcludeText(plan.excludes.join("\n"));
+            setKeepLast(plan.retention?.keepLast?.toString() ?? "");
+            setKeepDaily(plan.retention?.keepDaily?.toString() ?? "");
+            setKeepWeekly(plan.retention?.keepWeekly?.toString() ?? "");
+            setKeepMonthly(plan.retention?.keepMonthly?.toString() ?? "");
+            setKeepYearly(plan.retention?.keepYearly?.toString() ?? "");
           } else {
             setError("Backup plan not found.");
           }
@@ -98,6 +108,17 @@ export default function BackupPlanEditPage() {
     setSaving(true);
     setError("");
     try {
+      const toNum = (s: string) => s.trim() === "" ? undefined : parseInt(s, 10);
+      const retentionFields = [keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly];
+      const retention = retentionFields.some((s) => s.trim() !== "")
+        ? {
+            keepLast: toNum(keepLast),
+            keepDaily: toNum(keepDaily),
+            keepWeekly: toNum(keepWeekly),
+            keepMonthly: toNum(keepMonthly),
+            keepYearly: toNum(keepYearly),
+          }
+        : undefined;
       const plan: BackupPlan = {
         id: isNew ? uuidv4() : planId!,
         name: name.trim(),
@@ -108,6 +129,7 @@ export default function BackupPlanEditPage() {
           .split("\n")
           .map((l) => l.trim())
           .filter((l) => l && !l.startsWith("#")),
+        retention,
       };
       await saveBackupPlan(plan);
       navigate("/backup-plans");
@@ -183,18 +205,23 @@ export default function BackupPlanEditPage() {
             </button>
           </p>
         ) : (
-          <select
-            value={repoId}
-            onChange={(e) => { setRepoId(e.target.value); setError(""); }}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
-          >
-            <option value="" disabled>Select a repository…</option>
-            {repos.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name} — {r.path}
-              </option>
-            ))}
-          </select>
+          <div className="relative">
+            <select
+              value={repoId}
+              onChange={(e) => { setRepoId(e.target.value); setError(""); }}
+              className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-8"
+            >
+              <option value="" disabled>Select a repository…</option>
+              {repos.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} — {r.path}
+                </option>
+              ))}
+            </select>
+            <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">
+              ▾
+            </div>
+          </div>
         )}
       </div>
 
@@ -266,7 +293,7 @@ export default function BackupPlanEditPage() {
       </div>
 
       {/* Exclude patterns */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Exclude Patterns (optional)</h2>
         <p className="text-xs text-gray-500 mb-3">
           One pattern per line — same syntax as .gitignore. Lines starting with{" "}
@@ -280,6 +307,36 @@ export default function BackupPlanEditPage() {
           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-y"
           spellCheck={false}
         />
+      </div>
+
+      {/* Retention policy */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Retention Policy (optional)</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          After each backup, old snapshots will be pruned. Leave all fields blank to skip pruning.
+        </p>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+          {[
+            { label: "Keep last", unit: "snapshots", value: keepLast, set: setKeepLast },
+            { label: "Keep daily", unit: "days", value: keepDaily, set: setKeepDaily },
+            { label: "Keep weekly", unit: "weeks", value: keepWeekly, set: setKeepWeekly },
+            { label: "Keep monthly", unit: "months", value: keepMonthly, set: setKeepMonthly },
+            { label: "Keep yearly", unit: "years", value: keepYearly, set: setKeepYearly },
+          ].map(({ label, unit, value, set }) => (
+            <div key={label} className="flex items-center gap-3">
+              <label className="text-xs text-gray-400 w-28 flex-shrink-0">{label}</label>
+              <input
+                type="number"
+                min="0"
+                value={value}
+                onChange={(e) => set(e.target.value)}
+                placeholder="—"
+                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+              />
+              <span className="text-xs text-gray-500">{unit}</span>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="flex items-center justify-between">
