@@ -10,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -56,6 +57,7 @@ pub fn run() {
             backup_plan::remove_backup_plan,
             // cache
             cache::clear_browse_cache,
+            cache::list_backup_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

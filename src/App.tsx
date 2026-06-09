@@ -7,6 +7,7 @@ import BrowsePage from "./pages/BrowsePage";
 import BackupPlansPage from "./pages/BackupPlansPage";
 import BackupPlanEditPage from "./pages/BackupPlanEditPage";
 import SettingsPage from "./pages/SettingsPage";
+import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
 import { isAppSetup, setupMasterPassword, unlockApp } from "./lib/invoke";
 
@@ -61,6 +62,7 @@ export default function App() {
             <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
             <Route path="/backup-plans" element={<BackupPlansPage />} />
             <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
+            <Route path="/logs" element={<LogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>

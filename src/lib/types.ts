@@ -34,6 +34,32 @@ export interface ResticStats {
   snapshots_count: number;
 }
 
+export interface BackupHistoryEntry {
+  id: string;
+  repoId: string;
+  repoName?: string;
+  planId?: string;
+  planName?: string;
+  snapshotId?: string;
+  startedAt: number;
+  durationSeconds: number;
+  filesNew: number;
+  filesChanged: number;
+  bytesAdded: number;
+  error?: string;
+}
+
+export interface BackupProgress {
+  percentDone: number;
+  filesDone: number;
+  totalFiles: number;
+  bytesDone: number;
+  totalBytes: number;
+  secondsElapsed: number;
+  secondsRemaining?: number;
+  currentFiles: string[];
+}
+
 export interface CheckResult {
   success: boolean;
   errors: string[];

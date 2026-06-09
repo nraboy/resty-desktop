@@ -1,10 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import { forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
-import type { BackupPlan, Repository } from "../lib/types";
+import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+
+function formatSeconds(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
 
 export default function BackupPlansPage() {
   const navigate = useNavigate();
@@ -18,9 +25,10 @@ export default function BackupPlansPage() {
 
   const [backupPlan, setBackupPlan] = useState<BackupPlan | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
-  const [backupOutput, setBackupOutput] = useState("");
   const [backupError, setBackupError] = useState("");
   const [backupDone, setBackupDone] = useState(false);
+  const [progress, setProgress] = useState<BackupProgress | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -56,13 +64,15 @@ export default function BackupPlansPage() {
 
   const openBackupModal = (plan: BackupPlan) => {
     setBackupPlan(plan);
-    setBackupOutput("");
     setBackupError("");
     setBackupDone(false);
+    setProgress(null);
   };
 
   const closeBackupModal = () => {
     if (backupRunning) return;
+    unlistenRef.current?.();
+    unlistenRef.current = null;
     setBackupPlan(null);
   };
 
@@ -70,24 +80,30 @@ export default function BackupPlansPage() {
     if (!backupPlan) return;
     setBackupRunning(true);
     setBackupError("");
-    setBackupOutput("");
     setBackupDone(false);
+    setProgress(null);
+
+    const unlisten = await listen<BackupProgress>("backup:progress", (event) => {
+      setProgress(event.payload);
+    });
+    unlistenRef.current = unlisten;
+
     try {
-      const result = await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes);
-      let output = result;
+      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.id);
       if (backupPlan.retention) {
         try {
-          const pruneResult = await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention);
-          output += "\n\n--- Pruning ---\n" + pruneResult;
+          await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention);
         } catch (pruneErr: any) {
-          output += "\n\n--- Pruning failed ---\n" + String(pruneErr);
+          setBackupError("Backup succeeded but pruning failed: " + String(pruneErr));
+          return;
         }
       }
-      setBackupOutput(output);
       setBackupDone(true);
     } catch (err: any) {
       setBackupError(String(err));
     } finally {
+      unlisten();
+      unlistenRef.current = null;
       setBackupRunning(false);
     }
   };
@@ -180,25 +196,68 @@ export default function BackupPlansPage() {
       >
         {backupPlan && (
           <div className="space-y-3">
-            <div className="text-sm text-gray-400 space-y-1">
-              <p>
-                <span className="text-gray-500">Repository:</span>{" "}
+            <div className="text-sm space-y-1">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Repository</span>
                 <span className="text-gray-200">{repoName(backupPlan.repoId)}</span>
-              </p>
-              <p>
-                <span className="text-gray-500">Paths:</span>{" "}
-                <span className="text-gray-200 break-all">{backupPlan.paths.join(", ") || "None"}</span>
-              </p>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Paths</span>
+                <span className="text-gray-200">{backupPlan.paths.length} {backupPlan.paths.length === 1 ? "path" : "paths"}</span>
+              </div>
+              {backupPlan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Exclusions</span>
+                  <span className="text-gray-200">{backupPlan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length} rules</span>
+                </div>
+              )}
+              {backupPlan.retention && (
+                <div className="flex justify-between items-start pt-1 border-t border-gray-800 mt-1">
+                  <span className="text-gray-500">Retention</span>
+                  <span className="text-gray-200 text-right space-y-0.5">
+                    {backupPlan.retention.keepLast != null && <div>keep last {backupPlan.retention.keepLast}</div>}
+                    {backupPlan.retention.keepDaily != null && <div>keep {backupPlan.retention.keepDaily} daily</div>}
+                    {backupPlan.retention.keepWeekly != null && <div>keep {backupPlan.retention.keepWeekly} weekly</div>}
+                    {backupPlan.retention.keepMonthly != null && <div>keep {backupPlan.retention.keepMonthly} monthly</div>}
+                    {backupPlan.retention.keepYearly != null && <div>keep {backupPlan.retention.keepYearly} yearly</div>}
+                  </span>
+                </div>
+              )}
             </div>
+
+            {backupRunning && (
+              <div className="space-y-2">
+                <div className="flex justify-between text-xs text-gray-400">
+                  <span>
+                    {progress
+                      ? `${progress.filesDone.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`
+                      : "Starting…"}
+                  </span>
+                  <span>
+                    {progress && progress.secondsRemaining != null
+                      ? `~${formatSeconds(progress.secondsRemaining)} remaining`
+                      : progress
+                      ? `${formatSeconds(progress.secondsElapsed)} elapsed`
+                      : ""}
+                  </span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                    style={{ width: `${((progress?.percentDone ?? 0) * 100).toFixed(1)}%` }}
+                  />
+                </div>
+                {progress && progress.currentFiles.length > 0 && (
+                  <p className="text-xs text-gray-500 font-mono truncate" title={progress.currentFiles[0]}>
+                    {progress.currentFiles[0]}
+                  </p>
+                )}
+              </div>
+            )}
 
             {backupError && (
               <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300 font-mono whitespace-pre-wrap">
                 {backupError}
-              </div>
-            )}
-            {backupOutput && (
-              <div className="p-3 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-300 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
-                {backupOutput}
               </div>
             )}
             {backupDone && (
@@ -208,7 +267,7 @@ export default function BackupPlansPage() {
             )}
 
             <div className="flex justify-end gap-2 pt-1">
-              {backupDone ? (
+              {backupDone || backupError ? (
                 <Button variant="secondary" onClick={closeBackupModal}>Close</Button>
               ) : (
                 <>

@@ -6,7 +6,24 @@ use serde::{Deserialize, Serialize};
 use super::browse::FileEntry;
 use super::crypto;
 
-// ── public types (serialised to frontend) ──────────────────────────────────
+// ── public types (serialised to frontend) ─────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupHistoryEntry {
+    pub id: String,
+    pub repo_id: String,
+    pub repo_name: Option<String>,
+    pub plan_id: Option<String>,
+    pub plan_name: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub started_at: i64,
+    pub duration_seconds: f64,
+    pub files_new: u64,
+    pub files_changed: u64,
+    pub bytes_added: u64,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
@@ -131,6 +148,18 @@ impl AppDb {
                 total_file_count INTEGER NOT NULL,
                 snapshots_count  INTEGER NOT NULL,
                 cached_at        INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS backup_history (
+                id               TEXT PRIMARY KEY,
+                repo_id          TEXT NOT NULL,
+                plan_id          TEXT,
+                snapshot_id      TEXT,
+                started_at       INTEGER NOT NULL,
+                duration_seconds REAL NOT NULL,
+                files_new        INTEGER NOT NULL DEFAULT 0,
+                files_changed    INTEGER NOT NULL DEFAULT 0,
+                bytes_added      INTEGER NOT NULL DEFAULT 0,
+                error            TEXT
             );",
         )
     }
@@ -545,6 +574,76 @@ impl AppDb {
         Ok(())
     }
 
+    // ── backup history ────────────────────────────────────────────────────────
+
+    pub fn list_backup_history(&self) -> Result<Vec<BackupHistoryEntry>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT h.id, h.repo_id, r.name, h.plan_id, p.name,
+                        h.snapshot_id, h.started_at, h.duration_seconds,
+                        h.files_new, h.files_changed, h.bytes_added, h.error
+                 FROM backup_history h
+                 LEFT JOIN repositories r ON r.id = h.repo_id
+                 LEFT JOIN backup_plans p ON p.id = h.plan_id
+                 ORDER BY h.started_at DESC
+                 LIMIT 500",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BackupHistoryEntry {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    repo_name: row.get(2)?,
+                    plan_id: row.get(3)?,
+                    plan_name: row.get(4)?,
+                    snapshot_id: row.get(5)?,
+                    started_at: row.get(6)?,
+                    duration_seconds: row.get(7)?,
+                    files_new: row.get::<_, i64>(8)? as u64,
+                    files_changed: row.get::<_, i64>(9)? as u64,
+                    bytes_added: row.get::<_, i64>(10)? as u64,
+                    error: row.get(11)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    // ── backup history (insert) ───────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_backup(
+        &self,
+        id: &str,
+        repo_id: &str,
+        plan_id: Option<&str>,
+        snapshot_id: Option<&str>,
+        started_at: i64,
+        duration_seconds: f64,
+        files_new: u64,
+        files_changed: u64,
+        bytes_added: u64,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO backup_history
+             (id, repo_id, plan_id, snapshot_id, started_at, duration_seconds,
+              files_new, files_changed, bytes_added, error)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                id, repo_id, plan_id, snapshot_id, started_at, duration_seconds,
+                files_new as i64, files_changed as i64, bytes_added as i64, error
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // ── global clear ─────────────────────────────────────────────────────────
 
     pub fn clear_cache(&self) -> Result<(), String> {
@@ -570,6 +669,7 @@ impl AppDb {
              DELETE FROM browse_cache;
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;
+             DELETE FROM backup_history;
              COMMIT;",
         )
         .map_err(|e| e.to_string())?;
@@ -587,4 +687,9 @@ fn timestamp() -> i64 {
 #[tauri::command]
 pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<(), String> {
     db.clear_cache()
+}
+
+#[tauri::command]
+pub fn list_backup_history(db: tauri::State<'_, AppDb>) -> Result<Vec<BackupHistoryEntry>, String> {
+    db.list_backup_history()
 }

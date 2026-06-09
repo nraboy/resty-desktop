@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -79,9 +79,10 @@ export const runBackup = (
   repoId: string,
   paths: string[],
   tags: string[],
-  excludes: string[]
+  excludes: string[],
+  planId?: string,
 ): Promise<string> =>
-  invoke("run_backup", { repoId, paths, tags, excludes });
+  invoke("run_backup", { repoId, paths, tags, excludes, planId: planId ?? null });
 
 export const unlockRepo = (repoId: string): Promise<void> =>
   invoke("unlock_repo", { repoId });
@@ -122,3 +123,6 @@ export const removeBackupPlan = (planId: string): Promise<void> =>
 
 export const clearBrowseCache = (): Promise<void> =>
   invoke("clear_browse_cache");
+
+export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>
+  invoke("list_backup_history");
