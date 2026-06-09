@@ -143,6 +143,59 @@ fn fetch_and_cache_stats(
     Ok(stats)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub success: bool,
+    pub errors: Vec<String>,
+    pub duration_seconds: f64,
+}
+
+#[tauri::command]
+pub async fn check_repo(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+) -> Result<CheckResult, String> {
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    let started = std::time::Instant::now();
+    let output = std::process::Command::new(&restic_path)
+        .args(["check", "--json"])
+        .env("RESTIC_REPOSITORY", &repo.path)
+        .env("RESTIC_PASSWORD", &repo.password)
+        .output()
+        .map_err(|e| format!("Failed to run restic: {e}"))?;
+    let duration_seconds = started.elapsed().as_secs_f64();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut errors: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v["message_type"].as_str() == Some("error") {
+                if let Some(msg) = v["error"]["message"].as_str() {
+                    errors.push(msg.to_string());
+                }
+            }
+        }
+    }
+
+    if !output.status.success() && errors.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            errors.push(stderr);
+        }
+    }
+
+    Ok(CheckResult {
+        success: output.status.success(),
+        errors,
+        duration_seconds,
+    })
+}
+
 #[tauri::command]
 pub fn get_restic_path(db: State<'_, AppDb>) -> Result<String, String> {
     db.get_setting("restic_path", "restic")

@@ -38,6 +38,7 @@ pub fn run() {
             repo::refresh_repo_stats,
             repo::get_restic_path,
             repo::set_restic_path,
+            repo::check_repo,
             // snapshots
             snapshot::list_snapshots,
             snapshot::refresh_snapshots,

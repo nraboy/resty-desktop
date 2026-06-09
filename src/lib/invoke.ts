@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupPlan, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
+import type { BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,9 @@ export const getResticPath = (): Promise<string> =>
 
 export const setResticPath = (path: string): Promise<void> =>
   invoke("set_restic_path", { path });
+
+export const checkRepo = (repoId: string): Promise<CheckResult> =>
+  invoke("check_repo", { repoId });
 
 // ── snapshots ─────────────────────────────────────────────────────────────
 

@@ -39,11 +39,11 @@ src/
     Modal.tsx                 # Overlay modal dialog
     Sidebar.tsx               # Left nav with active repo indicator
   lib/
-    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats; isRemoteRepo() helper
+    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, CheckResult; isRemoteRepo() helper
     invoke.ts                 # Typed wrappers over tauri invoke()
   pages/
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.)
-    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern
+    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes); planId="new" for creation
@@ -61,7 +61,8 @@ src-tauri/
                               #   change_master_password, reset_app; migrates legacy settings.json on first setup
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
-                              #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path
+                              #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
+                              #   check_repo
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   run_backup, forget_by_plan, unlock_repo
       browse.rs               # list_files, restore_path
@@ -88,6 +89,7 @@ src-tauri/
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
 - `run_backup` returns the raw restic JSON stdout as a `String` (not deserialized).
+- `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
 - Repos, backup plans, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.
 
 ## Security Architecture

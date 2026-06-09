@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, tagSnapshot, unlockRepo } from "../lib/invoke";
-import type { Repository, Snapshot } from "../lib/types";
+import { checkRepo, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, tagSnapshot, unlockRepo } from "../lib/invoke";
+import type { CheckResult, Repository, Snapshot } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -29,6 +29,8 @@ export default function SnapshotsPage() {
   const [filter, setFilter] = useState("");
   const [unlockConfirm, setUnlockConfirm] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
 
   useEffect(() => {
     if (!repoId) return;
@@ -99,6 +101,20 @@ export default function SnapshotsPage() {
       setUnlockConfirm(false);
     } finally {
       setUnlocking(false);
+    }
+  };
+
+  const handleCheck = async () => {
+    if (!repoId) return;
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const result = await checkRepo(repoId);
+      setCheckResult(result);
+    } catch (err: any) {
+      setError(String(err));
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -173,6 +189,9 @@ export default function SnapshotsPage() {
           {refreshing && <span className="text-xs text-gray-500">Updating…</span>}
           <Button variant="secondary" onClick={refresh} loading={refreshing}>
             Refresh
+          </Button>
+          <Button variant="secondary" onClick={handleCheck} loading={checking}>
+            Check
           </Button>
           <Button variant="secondary" onClick={() => setUnlockConfirm(true)}>
             Unlock
@@ -303,6 +322,49 @@ export default function SnapshotsPage() {
           <Button variant="secondary" onClick={() => setUnlockConfirm(false)}>Cancel</Button>
           <Button variant="danger" loading={unlocking} onClick={handleUnlock}>Unlock</Button>
         </div>
+      </Modal>
+
+      <Modal
+        title="Repository Check"
+        open={checkResult !== null}
+        onClose={() => setCheckResult(null)}
+      >
+        {checkResult && (
+          <>
+            <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
+              {checkResult.success ? (
+                <>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                  </svg>
+                  No errors found
+                </>
+              ) : (
+                <>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                  </svg>
+                  Errors found
+                </>
+              )}
+            </div>
+            {checkResult.errors.length > 0 && (
+              <div className="mb-4 space-y-2">
+                {checkResult.errors.map((err, i) => (
+                  <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 break-all">
+                    {err}
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-gray-500">
+              Completed in {checkResult.duration_seconds.toFixed(1)}s
+            </p>
+            <div className="flex justify-end mt-4">
+              <Button variant="secondary" onClick={() => setCheckResult(null)}>Close</Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal

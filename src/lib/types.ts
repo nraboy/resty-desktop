@@ -34,6 +34,12 @@ export interface ResticStats {
   snapshots_count: number;
 }
 
+export interface CheckResult {
+  success: boolean;
+  errors: string[];
+  duration_seconds: number;
+}
+
 export interface RetentionPolicy {
   keepLast?: number;
   keepDaily?: number;
