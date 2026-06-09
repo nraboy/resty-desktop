@@ -2,7 +2,6 @@ export interface Repository {
   id: string;
   name: string;
   path: string;
-  password: string;
 }
 
 const REMOTE_PREFIXES = ["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];

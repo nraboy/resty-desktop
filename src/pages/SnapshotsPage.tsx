@@ -37,47 +37,46 @@ export default function SnapshotsPage() {
   }, [repoId]);
 
   const refresh = useCallback(async () => {
-    if (!repo) return;
+    if (!repoId) return;
     setRefreshing(true);
     setError("");
     try {
-      const data = await refreshSnapshots(repo);
+      const data = await refreshSnapshots(repoId);
       setSnapshots(data.reverse());
     } catch (err: any) {
       setError(String(err));
     } finally {
       setRefreshing(false);
     }
-  }, [repo]);
+  }, [repoId]);
 
   const load = useCallback(async () => {
-    if (!repo) return;
+    if (!repoId || !repo) return;
     const willRefresh = !isRemoteRepo(repo.path);
     setLoading(true);
     if (willRefresh) setRefreshing(true);
     try {
-      const cached = await listSnapshots(repo);
+      const cached = await listSnapshots(repoId);
       setSnapshots(cached.reverse());
     } finally {
       setLoading(false);
     }
     if (!willRefresh) return;
-    // background revalidation for local repos only
-    refreshSnapshots(repo)
+    refreshSnapshots(repoId)
       .then((data) => setSnapshots(data.reverse()))
       .catch(() => {})
       .finally(() => setRefreshing(false));
-  }, [repo]);
+  }, [repoId, repo]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const handleDelete = async () => {
-    if (!repo || !deleteTarget) return;
+    if (!repoId || !deleteTarget) return;
     setDeleting(true);
     try {
-      await deleteSnapshot(repo, deleteTarget.id, pruneOnDelete);
+      await deleteSnapshot(repoId, deleteTarget.id, pruneOnDelete);
       setDeleteTarget(null);
       await refresh();
     } catch (err: any) {
@@ -88,10 +87,10 @@ export default function SnapshotsPage() {
   };
 
   const handleAddTag = async () => {
-    if (!repo || !tagTarget || !newTag.trim()) return;
+    if (!repoId || !tagTarget || !newTag.trim()) return;
     setTagging(true);
     try {
-      await tagSnapshot(repo, tagTarget.id, [newTag.trim()], []);
+      await tagSnapshot(repoId, tagTarget.id, [newTag.trim()], []);
       setNewTag("");
       setTagTarget(null);
       await refresh();
@@ -103,24 +102,26 @@ export default function SnapshotsPage() {
   };
 
   const handleRemoveTag = useCallback(async (snapshot: Snapshot, tag: string) => {
-    if (!repo) return;
+    if (!repoId) return;
     try {
-      await tagSnapshot(repo, snapshot.id, [], [tag]);
+      await tagSnapshot(repoId, snapshot.id, [], [tag]);
       await refresh();
     } catch (err: any) {
       setError(String(err));
     }
-  }, [repo, refresh]);
+  }, [repoId, refresh]);
 
-  const filtered = useMemo(() => filter
-    ? snapshots.filter(
-        (s) =>
-          s.short_id.includes(filter) ||
-          s.hostname.toLowerCase().includes(filter.toLowerCase()) ||
-          (s.tags ?? []).some((t) => t.toLowerCase().includes(filter.toLowerCase())) ||
-          s.paths.some((p) => p.toLowerCase().includes(filter.toLowerCase()))
-      )
-    : snapshots, [snapshots, filter]);
+  const filtered = useMemo(() =>
+    filter
+      ? snapshots.filter(
+          (s) =>
+            s.short_id.includes(filter) ||
+            s.hostname.toLowerCase().includes(filter.toLowerCase()) ||
+            (s.tags ?? []).some((t) => t.toLowerCase().includes(filter.toLowerCase())) ||
+            s.paths.some((p) => p.toLowerCase().includes(filter.toLowerCase()))
+        )
+      : snapshots,
+    [snapshots, filter]);
 
   if (!repoId || (!repo && !loading)) {
     return (
@@ -153,9 +154,7 @@ export default function SnapshotsPage() {
             onChange={(e) => setFilter(e.target.value)}
             className="w-56"
           />
-          {refreshing && (
-            <span className="text-xs text-gray-500">Updating…</span>
-          )}
+          {refreshing && <span className="text-xs text-gray-500">Updating…</span>}
           <Button variant="secondary" onClick={refresh} loading={refreshing}>
             Refresh
           </Button>
@@ -188,21 +187,12 @@ export default function SnapshotsPage() {
             </thead>
             <tbody className="divide-y divide-gray-800">
               {filtered.map((snap) => (
-                <tr
-                  key={snap.id}
-                  className="hover:bg-gray-900/50 transition-colors"
-                >
-                  <td className="px-4 py-3 font-mono text-blue-400 text-xs">
-                    {snap.short_id}
-                  </td>
-                  <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
-                    {formatDate(snap.time)}
-                  </td>
+                <tr key={snap.id} className="hover:bg-gray-900/50 transition-colors">
+                  <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
+                  <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
                   <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
                   <td className="px-4 py-3 text-gray-400 max-w-xs">
-                    <div className="truncate text-xs font-mono">
-                      {snap.paths.join(", ")}
-                    </div>
+                    <div className="truncate text-xs font-mono">{snap.paths.join(", ")}</div>
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1">
@@ -254,7 +244,6 @@ export default function SnapshotsPage() {
         </div>
       )}
 
-      {/* Delete confirmation */}
       <Modal
         title="Delete Snapshot"
         open={deleteTarget !== null}
@@ -274,16 +263,11 @@ export default function SnapshotsPage() {
           Also run <span className="font-mono text-xs">restic prune</span> after forget
         </label>
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button variant="danger" loading={deleting} onClick={handleDelete}>
-            Delete
-          </Button>
+          <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+          <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
         </div>
       </Modal>
 
-      {/* Tag modal */}
       <Modal
         title="Add Tag"
         open={tagTarget !== null}
@@ -300,9 +284,7 @@ export default function SnapshotsPage() {
             onKeyDown={(e) => e.key === "Enter" && handleAddTag()}
             className="flex-1"
           />
-          <Button loading={tagging} onClick={handleAddTag}>
-            Add
-          </Button>
+          <Button loading={tagging} onClick={handleAddTag}>Add</Button>
         </div>
       </Modal>
     </div>

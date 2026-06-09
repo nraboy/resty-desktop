@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { clearBrowseCache, getResticPath, setResticPath } from "../lib/invoke";
+import { changeMasterPassword, clearBrowseCache, getResticPath, setResticPath } from "../lib/invoke";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
@@ -11,6 +11,14 @@ export default function SettingsPage() {
   const [error, setError] = useState("");
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheCleared, setCacheCleared] = useState(false);
+
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordChanged, setPasswordChanged] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
+
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
   }, []);
@@ -41,6 +49,33 @@ export default function SettingsPage() {
     }
   };
 
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError("");
+    setPasswordChanged(false);
+    if (newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("New passwords do not match.");
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      await changeMasterPassword(oldPassword, newPassword);
+      setPasswordChanged(true);
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setTimeout(() => setPasswordChanged(false), 3000);
+    } catch (err: any) {
+      setPasswordError(String(err));
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
   return (
     <div className="p-6">
       <div className="mb-6">
@@ -62,15 +97,9 @@ export default function SettingsPage() {
             placeholder="/usr/local/bin/restic"
           />
         </div>
-
-        {error && (
-          <p className="text-sm text-red-400">{error}</p>
-        )}
-
+        {error && <p className="text-sm text-red-400">{error}</p>}
         <div className="flex items-center gap-3">
-          <Button onClick={handleSave} loading={saving}>
-            Save Settings
-          </Button>
+          <Button onClick={handleSave} loading={saving}>Save Settings</Button>
           {saved && (
             <span className="text-sm text-green-400 flex items-center gap-1">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -83,7 +112,50 @@ export default function SettingsPage() {
       </div>
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <h2 className="text-sm font-medium text-gray-300 mb-2">Install Restic</h2>
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Master Password</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Change the master password used to encrypt your repository credentials.
+          All stored passwords are re-encrypted immediately.
+        </p>
+        <form onSubmit={handleChangePassword} className="space-y-3">
+          <Input
+            label="Current Password"
+            type="password"
+            placeholder="Enter current master password"
+            value={oldPassword}
+            onChange={(e) => setOldPassword(e.target.value)}
+          />
+          <Input
+            label="New Password"
+            type="password"
+            placeholder="At least 8 characters"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <Input
+            label="Confirm New Password"
+            type="password"
+            placeholder="Re-enter new password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+          />
+          {passwordError && <p className="text-sm text-red-400">{passwordError}</p>}
+          <div className="flex items-center gap-3 pt-1">
+            <Button type="submit" loading={changingPassword}>Change Password</Button>
+            {passwordChanged && (
+              <span className="text-sm text-green-400 flex items-center gap-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Password changed
+              </span>
+            )}
+          </div>
+        </form>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Install Restic</h2>
         <p className="text-xs text-gray-500 leading-relaxed">
           Restic must be installed separately. Visit{" "}
           <span className="font-mono text-blue-400">restic.net</span> or install via your package
@@ -104,6 +176,7 @@ export default function SettingsPage() {
           ))}
         </div>
       </div>
+
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Browse Cache</h2>
         <p className="text-xs text-gray-500 mb-3">

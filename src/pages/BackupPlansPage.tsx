@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listBackupPlans, removeBackupPlan, listRepos, runBackup, forgetByPlan } from "../lib/invoke";
+import { forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
 import type { BackupPlan, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -68,21 +68,16 @@ export default function BackupPlansPage() {
 
   const startBackup = async () => {
     if (!backupPlan) return;
-    const repo = repos.find((r) => r.id === backupPlan.repoId);
-    if (!repo) {
-      setBackupError("Repository not found. Check the plan configuration.");
-      return;
-    }
     setBackupRunning(true);
     setBackupError("");
     setBackupOutput("");
     setBackupDone(false);
     try {
-      const result = await runBackup(repo, backupPlan.paths, backupPlan.tags, backupPlan.excludes);
+      const result = await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes);
       let output = result;
       if (backupPlan.retention) {
         try {
-          const pruneResult = await forgetByPlan(repo, backupPlan.tags, backupPlan.paths, backupPlan.retention);
+          const pruneResult = await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention);
           output += "\n\n--- Pruning ---\n" + pruneResult;
         } catch (pruneErr: any) {
           output += "\n\n--- Pruning failed ---\n" + String(pruneErr);
@@ -112,9 +107,7 @@ export default function BackupPlansPage() {
           <h1 className="text-xl font-semibold text-gray-100">Backup Plans</h1>
           <p className="text-sm text-gray-500 mt-0.5">Define and run backup configurations.</p>
         </div>
-        <Button onClick={() => navigate("/backup-plans/new")}>
-          New Plan
-        </Button>
+        <Button onClick={() => navigate("/backup-plans/new")}>New Plan</Button>
       </div>
 
       {error && (
@@ -127,9 +120,7 @@ export default function BackupPlansPage() {
         <EmptyState
           title="No backup plans"
           description="Create a backup plan to define what to back up and where."
-          action={
-            <Button onClick={() => navigate("/backup-plans/new")}>Create a Plan</Button>
-          }
+          action={<Button onClick={() => navigate("/backup-plans/new")}>Create a Plan</Button>}
         />
       ) : (
         <div className="space-y-3">
@@ -149,18 +140,11 @@ export default function BackupPlansPage() {
                   {plan.tags.length > 0 && ` · ${plan.tags.join(", ")}`}
                 </p>
               </div>
-
               <div className="flex items-center gap-2 flex-shrink-0">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => navigate(`/backup-plans/${plan.id}`)}
-                >
+                <Button variant="secondary" size="sm" onClick={() => navigate(`/backup-plans/${plan.id}`)}>
                   Edit
                 </Button>
-                <Button size="sm" onClick={() => openBackupModal(plan)}>
-                  Backup Now
-                </Button>
+                <Button size="sm" onClick={() => openBackupModal(plan)}>Backup Now</Button>
                 <button
                   onClick={() => setDeleteTarget(plan)}
                   className="text-gray-500 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded hover:bg-red-900/20"
@@ -173,7 +157,6 @@ export default function BackupPlansPage() {
         </div>
       )}
 
-      {/* Delete confirmation modal */}
       <Modal
         title="Delete Backup Plan"
         open={!!deleteTarget}
@@ -185,16 +168,11 @@ export default function BackupPlansPage() {
           This only removes the plan definition — existing snapshots are not affected.
         </p>
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
-            Cancel
-          </Button>
-          <Button variant="danger" loading={deleting} onClick={handleDelete}>
-            Delete
-          </Button>
+          <Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>Cancel</Button>
+          <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
         </div>
       </Modal>
 
-      {/* Backup now modal */}
       <Modal
         title={backupPlan ? `Backup: ${backupPlan.name}` : "Backup"}
         open={!!backupPlan}
@@ -209,9 +187,7 @@ export default function BackupPlansPage() {
               </p>
               <p>
                 <span className="text-gray-500">Paths:</span>{" "}
-                <span className="text-gray-200 break-all">
-                  {backupPlan.paths.join(", ") || "None"}
-                </span>
+                <span className="text-gray-200 break-all">{backupPlan.paths.join(", ") || "None"}</span>
               </p>
             </div>
 
@@ -220,13 +196,11 @@ export default function BackupPlansPage() {
                 {backupError}
               </div>
             )}
-
             {backupOutput && (
               <div className="p-3 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-300 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
                 {backupOutput}
               </div>
             )}
-
             {backupDone && (
               <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
                 Backup completed successfully.
@@ -238,13 +212,7 @@ export default function BackupPlansPage() {
                 <Button variant="secondary" onClick={closeBackupModal}>Close</Button>
               ) : (
                 <>
-                  <Button
-                    variant="secondary"
-                    onClick={closeBackupModal}
-                    disabled={backupRunning}
-                  >
-                    Cancel
-                  </Button>
+                  <Button variant="secondary" onClick={closeBackupModal} disabled={backupRunning}>Cancel</Button>
                   <Button onClick={startBackup} loading={backupRunning}>
                     {backupRunning ? "Running…" : "Start Backup"}
                   </Button>

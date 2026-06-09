@@ -1,7 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addRepo, checkRepo, getRepoStats, initRepo, listRepos, refreshRepoStats, refreshSnapshots, removeRepo, renameRepo } from "../lib/invoke";
+import {
+  addRepo,
+  getRepoStats,
+  initRepo,
+  listRepos,
+  refreshRepoStats,
+  refreshSnapshots,
+  removeRepo,
+  renameRepo,
+  testRepoConnection,
+} from "../lib/invoke";
 import type { Repository, ResticStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
@@ -36,12 +46,15 @@ export default function RepositoriesPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  const load = () => listRepos().then((r) => { setRepos(r); return r; }).catch(() => [] as Repository[]);
+  const load = () =>
+    listRepos()
+      .then((r) => { setRepos(r); return r; })
+      .catch(() => [] as Repository[]);
 
   const fetchStatsForLocal = (repoList: Repository[]) => {
     for (const repo of repoList) {
       if (isRemoteRepo(repo.path)) continue;
-      getRepoStats(repo)
+      getRepoStats(repo.id)
         .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
         .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })));
     }
@@ -55,7 +68,7 @@ export default function RepositoriesPage() {
     e.stopPropagation();
     setRefreshingRow(repo.id);
     try {
-      const s = await refreshRepoStats(repo);
+      const s = await refreshRepoStats(repo.id);
       setStatsMap((prev) => ({ ...prev, [repo.id]: s }));
     } catch {
       setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
@@ -72,19 +85,20 @@ export default function RepositoriesPage() {
     }
     setLoading(true);
     setError("");
-    const repo: Repository = { id: crypto.randomUUID(), ...form };
+    const id = crypto.randomUUID();
     try {
       if (modalMode === "init") {
-        await initRepo(repo);
+        await initRepo(id, form.name, form.path, form.password);
+      } else {
+        await addRepo(id, form.name, form.path, form.password);
       }
-      await addRepo(repo);
       await load();
       setModalMode(null);
       setForm({ name: "", path: "", password: "" });
-      if (!isRemoteRepo(repo.path)) {
-        refreshSnapshots(repo).catch(() => {});
-        refreshRepoStats(repo)
-          .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+      if (!isRemoteRepo(form.path)) {
+        refreshSnapshots(id).catch(() => {});
+        refreshRepoStats(id)
+          .then((s) => setStatsMap((prev) => ({ ...prev, [id]: s })))
           .catch(() => {});
       }
     } catch (err: any) {
@@ -134,9 +148,8 @@ export default function RepositoriesPage() {
     }
     setTesting(true);
     setTestResult(null);
-    const tempRepo = { id: "test", name: "", path: form.path, password: form.password };
     try {
-      await checkRepo(tempRepo);
+      await testRepoConnection(form.path, form.password);
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -171,9 +184,7 @@ export default function RepositoriesPage() {
         <EmptyState
           title="No repositories yet"
           description="Create a new repository or open an existing one."
-          action={
-            <Button onClick={() => openModal("init")}>+ New Repository</Button>
-          }
+          action={<Button onClick={() => openModal("init")}>+ New Repository</Button>}
           icon={
             <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1}
@@ -229,37 +240,37 @@ export default function RepositoriesPage() {
                     </Button>
                   )}
                 </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditTarget(repo);
-                    setEditName(repo.name);
-                  }}
-                  className="text-gray-500 hover:text-blue-400"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                  </svg>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteTarget(repo);
-                  }}
-                  className="text-gray-500 hover:text-red-400"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </Button>
-              </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditTarget(repo);
+                      setEditName(repo.name);
+                    }}
+                    className="text-gray-500 hover:text-blue-400"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteTarget(repo);
+                    }}
+                    className="text-gray-500 hover:text-red-400"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </Button>
+                </div>
               </div>
             </div>
           ))}

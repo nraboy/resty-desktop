@@ -1,15 +1,8 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::State;
 
-use super::backup_plan::RetentionPolicy;
-use super::cache::SnapshotCache;
-use super::repo::{run_restic_with_path, Repository};
-
-const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
-
-fn is_remote_repo(repo: &Repository) -> bool {
-    REMOTE_PREFIXES.iter().any(|p| repo.path.starts_with(p))
-}
+use super::cache::{AppDb, MasterKey, RetentionPolicy};
+use super::repo::run_restic_with_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -24,10 +17,10 @@ pub struct Snapshot {
 
 #[tauri::command]
 pub async fn list_snapshots(
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    repo_id: String,
 ) -> Result<Vec<Snapshot>, String> {
-    if let Some(json) = cache.get_snapshots(&repo.id)? {
+    if let Some(json) = db.get_snapshots(&repo_id)? {
         if let Ok(cached) = serde_json::from_str::<Vec<Snapshot>>(&json) {
             return Ok(cached);
         }
@@ -37,45 +30,52 @@ pub async fn list_snapshots(
 
 #[tauri::command]
 pub async fn refresh_snapshots(
-    app: AppHandle,
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
 ) -> Result<Vec<Snapshot>, String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
     let stdout = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)?;
-    let _ = cache.set_snapshots(&repo.id, &stdout);
+    let _ = db.set_snapshots(&repo_id, &stdout);
     let snapshots: Vec<Snapshot> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
     Ok(snapshots)
 }
 
 #[tauri::command]
 pub async fn delete_snapshot(
-    app: AppHandle,
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     snapshot_id: String,
     prune: bool,
 ) -> Result<(), String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
     let mut args = vec!["forget", snapshot_id.as_str()];
     if prune {
         args.push("--prune");
     }
     run_restic_with_path(&repo, args, &restic_path)?;
-    let _ = cache.evict(&snapshot_id);
-    let _ = cache.evict_snapshots(&repo.id);
+    let _ = db.evict(&snapshot_id);
+    let _ = db.evict_snapshots(&repo_id);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn tag_snapshot(
-    app: AppHandle,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     snapshot_id: String,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
 ) -> Result<(), String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
 
     if !add_tags.is_empty() {
         let tag_str = add_tags.join(",");
@@ -85,7 +85,6 @@ pub async fn tag_snapshot(
             &restic_path,
         )?;
     }
-
     if !remove_tags.is_empty() {
         let tag_str = remove_tags.join(",");
         run_restic_with_path(
@@ -94,20 +93,21 @@ pub async fn tag_snapshot(
             &restic_path,
         )?;
     }
-
     Ok(())
 }
 
 #[tauri::command]
 pub async fn run_backup(
-    app: AppHandle,
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
 ) -> Result<String, String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -127,12 +127,10 @@ pub async fn run_backup(
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
-    if let Ok(ref stdout) = result {
-        if is_remote_repo(&repo) {
-            let _ = cache.evict_stats(&repo.id);
-        }
 
-        // Parse the snapshot_id from the NDJSON summary line and append to cache.
+    if let Ok(ref stdout) = result {
+        let _ = db.evict_stats(&repo_id);
+
         let new_id = stdout
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -140,10 +138,11 @@ pub async fn run_backup(
             .and_then(|v| v["snapshot_id"].as_str().map(str::to_string));
 
         let appended = new_id.and_then(|id| {
-            let new_json = run_restic_with_path(&repo, vec!["snapshots", "--json", &id], &restic_path).ok()?;
-            let mut new_snaps: Vec<Snapshot> = serde_json::from_str(&new_json).ok()?;
-            let existing: Vec<Snapshot> = cache
-                .get_snapshots(&repo.id)
+            let new_json =
+                run_restic_with_path(&repo, vec!["snapshots", "--json", &id], &restic_path).ok()?;
+            let mut new_snaps: Vec<serde_json::Value> = serde_json::from_str(&new_json).ok()?;
+            let existing: Vec<serde_json::Value> = db
+                .get_snapshots(&repo_id)
                 .ok()
                 .flatten()
                 .and_then(|j| serde_json::from_str(&j).ok())
@@ -153,9 +152,9 @@ pub async fn run_backup(
         });
 
         if let Some(json) = appended {
-            let _ = cache.set_snapshots(&repo.id, &json);
+            let _ = db.set_snapshots(&repo_id, &json);
         } else {
-            let _ = cache.evict_snapshots(&repo.id);
+            let _ = db.evict_snapshots(&repo_id);
         }
     }
     result
@@ -163,16 +162,19 @@ pub async fn run_backup(
 
 #[tauri::command]
 pub async fn forget_by_plan(
-    app: AppHandle,
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     tags: Vec<String>,
     paths: Vec<String>,
     retention: RetentionPolicy,
 ) -> Result<String, String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
 
-    let mut args: Vec<String> = vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
+    let mut args: Vec<String> =
+        vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
 
     if !tags.is_empty() {
         args.push("--tag".to_string());
@@ -208,13 +210,13 @@ pub async fn forget_by_plan(
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
     if result.is_ok() {
-        if is_remote_repo(&repo) {
-            let _ = cache.evict_stats(&repo.id);
-        }
-        if let Ok(json) = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path) {
-            let _ = cache.set_snapshots(&repo.id, &json);
+        let _ = db.evict_stats(&repo_id);
+        if let Ok(json) =
+            run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
+        {
+            let _ = db.set_snapshots(&repo_id, &json);
         } else {
-            let _ = cache.evict_snapshots(&repo.id);
+            let _ = db.evict_snapshots(&repo_id);
         }
     }
     result

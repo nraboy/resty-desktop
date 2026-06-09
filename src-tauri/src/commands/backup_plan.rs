@@ -1,71 +1,18 @@
-use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
+use tauri::State;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RetentionPolicy {
-    pub keep_last: Option<u32>,
-    pub keep_daily: Option<u32>,
-    pub keep_weekly: Option<u32>,
-    pub keep_monthly: Option<u32>,
-    pub keep_yearly: Option<u32>,
-}
+use super::cache::{AppDb, BackupPlan};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackupPlan {
-    pub id: String,
-    pub name: String,
-    pub repo_id: String,
-    pub paths: Vec<String>,
-    pub tags: Vec<String>,
-    pub excludes: Vec<String>,
-    pub retention: Option<RetentionPolicy>,
+#[tauri::command]
+pub fn list_backup_plans(db: State<'_, AppDb>) -> Result<Vec<BackupPlan>, String> {
+    db.list_backup_plans()
 }
 
 #[tauri::command]
-pub async fn list_backup_plans(app: AppHandle) -> Result<Vec<BackupPlan>, String> {
-    let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    let plans: Vec<BackupPlan> = store
-        .get("backup_plans")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    Ok(plans)
+pub fn save_backup_plan(db: State<'_, AppDb>, plan: BackupPlan) -> Result<(), String> {
+    db.save_backup_plan(&plan)
 }
 
 #[tauri::command]
-pub async fn save_backup_plan(app: AppHandle, plan: BackupPlan) -> Result<(), String> {
-    let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    let mut plans: Vec<BackupPlan> = store
-        .get("backup_plans")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    if let Some(idx) = plans.iter().position(|p| p.id == plan.id) {
-        plans[idx] = plan;
-    } else {
-        plans.push(plan);
-    }
-    store.set(
-        "backup_plans",
-        serde_json::to_value(&plans).map_err(|e| e.to_string())?,
-    );
-    store.save().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn remove_backup_plan(app: AppHandle, plan_id: String) -> Result<(), String> {
-    let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    let mut plans: Vec<BackupPlan> = store
-        .get("backup_plans")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    plans.retain(|p| p.id != plan_id);
-    store.set(
-        "backup_plans",
-        serde_json::to_value(&plans).map_err(|e| e.to_string())?,
-    );
-    store.save().map_err(|e| e.to_string())?;
-    Ok(())
+pub fn remove_backup_plan(db: State<'_, AppDb>, plan_id: String) -> Result<(), String> {
+    db.remove_backup_plan(&plan_id)
 }

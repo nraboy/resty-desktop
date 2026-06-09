@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::State;
 
-use super::cache::SnapshotCache;
-use super::repo::{run_restic_with_path, Repository};
+use super::cache::{AppDb, MasterKey};
+use super::repo::run_restic_with_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -19,9 +19,8 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
     let clean = entry_path.trim_end_matches('/');
     match parent {
         None | Some("") | Some("/") => {
-            // Root: path must have exactly one component, e.g. "/Users"
             let mut parts = clean.splitn(3, '/');
-            parts.next(); // leading empty string before first '/'
+            parts.next();
             let name = parts.next().unwrap_or("");
             !name.is_empty() && parts.next().is_none()
         }
@@ -38,17 +37,19 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
 
 #[tauri::command]
 pub async fn list_files(
-    app: AppHandle,
-    cache: State<'_, SnapshotCache>,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     snapshot_id: String,
     path: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
-    if let Some(cached) = cache.get(&snapshot_id, path.as_deref())? {
+    if let Some(cached) = db.get(&snapshot_id, path.as_deref())? {
         return Ok(cached);
     }
 
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
 
     let mut args = vec!["ls", "--json", snapshot_id.as_str()];
     let path_str;
@@ -59,7 +60,6 @@ pub async fn list_files(
 
     let stdout = run_restic_with_path(&repo, args, &restic_path)?;
 
-    // restic ls --json outputs one JSON object per line; first line is snapshot info
     let mut entries: Vec<FileEntry> = Vec::new();
     for (i, line) in stdout.lines().enumerate() {
         if i == 0 {
@@ -72,22 +72,33 @@ pub async fn list_files(
         }
     }
 
-    let _ = cache.set(&snapshot_id, path.as_deref(), &entries);
+    let _ = db.set(&snapshot_id, path.as_deref(), &entries);
     Ok(entries)
 }
 
 #[tauri::command]
 pub async fn restore_path(
-    app: AppHandle,
-    repo: Repository,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
     snapshot_id: String,
     include_path: String,
     target_dir: String,
 ) -> Result<(), String> {
-    let restic_path = super::get_restic_path(&app);
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
     run_restic_with_path(
         &repo,
-        vec!["restore", &snapshot_id, "--include", &include_path, "--target", &target_dir],
+        vec![
+            "restore",
+            &snapshot_id,
+            "--include",
+            &include_path,
+            "--target",
+            &target_dir,
+        ],
         &restic_path,
-    ).map(|_| ())
+    )
+    .map(|_| ())
 }

@@ -54,12 +54,12 @@ export default function BrowsePage() {
 
   const load = useCallback(
     async (path?: string) => {
-      if (!repo || !snapshotId) return;
+      if (!repoId || !snapshotId) return;
       setLoading(true);
       setError("");
       setCurrentPath(path);
       try {
-        const data = await listFiles(repo, snapshotId, path);
+        const data = await listFiles(repoId, snapshotId, path);
         setEntries(data);
       } catch (err: any) {
         setError(String(err));
@@ -67,7 +67,7 @@ export default function BrowsePage() {
         setLoading(false);
       }
     },
-    [repo, snapshotId]
+    [repoId, snapshotId]
   );
 
   useEffect(() => {
@@ -78,12 +78,6 @@ export default function BrowsePage() {
     setPathStack((s) => [...s, currentPath ?? ""]);
     load(entry.path);
   }, [currentPath, load]);
-
-  const goBack = useCallback(() => {
-    const prev = pathStack[pathStack.length - 1];
-    setPathStack((s) => s.slice(0, -1));
-    load(prev || undefined);
-  }, [pathStack, load]);
 
   const visibleEntries = useMemo(() =>
     entries
@@ -96,10 +90,10 @@ export default function BrowsePage() {
   [entries, showHidden]);
 
   const handleRestore = async () => {
-    if (!repo || !snapshotId || !restoreTarget) return;
+    if (!repoId || !snapshotId || !restoreTarget) return;
     setRestoring(true);
     try {
-      await restorePath(repo, snapshotId, restoreTarget.path, targetDir);
+      await restorePath(repoId, snapshotId, restoreTarget.path, targetDir);
       setRestoreTarget(null);
     } catch (err: any) {
       setError(String(err));
@@ -128,7 +122,6 @@ export default function BrowsePage() {
         <p className="text-xs text-gray-600 font-mono mt-0.5">{snapshotId}</p>
       </div>
 
-      {/* Breadcrumb + toolbar */}
       <div className="flex items-center gap-1 mb-4 text-sm text-gray-400 justify-between">
         <button onClick={() => { setPathStack([]); load(); }} className="hover:text-gray-200 transition-colors">
           root
