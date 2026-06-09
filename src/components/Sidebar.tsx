@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
+import { getVersion } from "@tauri-apps/api/app";
 
 const navItems = [
   {
@@ -38,6 +40,12 @@ const navItems = [
 ];
 
 export default function Sidebar() {
+  const [appVersion, setAppVersion] = useState("");
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
+
   return (
     <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
       <div className="px-4 py-4 border-b border-gray-800">
@@ -64,6 +72,12 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {appVersion && (
+        <div className="px-4 py-3 border-t border-gray-800">
+          <p className="text-xs text-gray-600 text-center">v{appVersion}</p>
+        </div>
+      )}
     </aside>
   );
 }

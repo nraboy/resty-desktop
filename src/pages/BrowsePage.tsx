@@ -57,10 +57,10 @@ export default function BrowsePage() {
       if (!repo || !snapshotId) return;
       setLoading(true);
       setError("");
+      setCurrentPath(path);
       try {
         const data = await listFiles(repo, snapshotId, path);
         setEntries(data);
-        setCurrentPath(path);
       } catch (err: any) {
         setError(String(err));
       } finally {
@@ -135,15 +135,23 @@ export default function BrowsePage() {
       {/* Breadcrumb */}
       <div className="flex items-center gap-1 mb-4 text-sm text-gray-400">
         <button onClick={() => { setPathStack([]); load(); }} className="hover:text-gray-200 transition-colors">
-          /
+          root
         </button>
-        {pathStack.filter(Boolean).map((p, i) => (
-          // eslint-disable-next-line react/no-array-index-key
-          <span key={i} className="contents">
-            <span className="text-gray-700">/</span>
-            <span className="text-gray-500">{p.split("/").pop() || "/"}</span>
-          </span>
-        ))}
+        {pathStack.map((p, i) => {
+          if (!p) return null;
+          return (
+            // eslint-disable-next-line react/no-array-index-key
+            <span key={i} className="contents">
+              <span className="text-gray-700">/</span>
+              <button
+                className="hover:text-gray-200 transition-colors"
+                onClick={() => { setPathStack(pathStack.slice(0, i)); load(p); }}
+              >
+                {p.split("/").pop() || "/"}
+              </button>
+            </span>
+          );
+        })}
         {currentPath && (
           <>
             <span className="text-gray-700">/</span>
@@ -190,7 +198,14 @@ export default function BrowsePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {entries.filter((entry) => showHidden || !entry.name.startsWith(".")).map((entry) => (
+              {entries
+                .filter((entry) => showHidden || !entry.name.startsWith("."))
+                .sort((a, b) => {
+                  if (a.type === "dir" && b.type !== "dir") return -1;
+                  if (a.type !== "dir" && b.type === "dir") return 1;
+                  return a.name.localeCompare(b.name);
+                })
+                .map((entry) => (
                 <tr key={entry.path} className="hover:bg-gray-900/50 transition-colors">
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">

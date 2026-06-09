@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-shell";
 import { getResticPath, setResticPath } from "../lib/invoke";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -8,7 +9,6 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
-
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
   }, []);
@@ -90,6 +90,18 @@ export default function SettingsPage() {
             </div>
           ))}
         </div>
+      </div>
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5 text-center">
+        <p className="text-xs text-gray-400">
+          Made with love by{" "}
+          <button
+            onClick={() => open("https://www.nraboy.com")}
+            className="text-blue-400 hover:underline"
+          >
+            Nic Raboy
+          </button>{" "}
+          in the United States.
+        </p>
       </div>
     </div>
   );
