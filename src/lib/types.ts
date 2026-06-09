@@ -5,6 +5,11 @@ export interface Repository {
   password: string;
 }
 
+const REMOTE_PREFIXES = ["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
+export function isRemoteRepo(path: string): boolean {
+  return REMOTE_PREFIXES.some((p) => path.startsWith(p));
+}
+
 export interface Snapshot {
   id: string;
   short_id: string;

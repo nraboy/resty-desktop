@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, tagSnapshot } from "../lib/invoke";
 import type { Repository, Snapshot } from "../lib/types";
+import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -16,7 +17,7 @@ export default function SnapshotsPage() {
   const { repoId } = useParams<{ repoId: string }>();
   const [repo, setRepo] = useState<Repository | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Snapshot | null>(null);
@@ -51,15 +52,17 @@ export default function SnapshotsPage() {
 
   const load = useCallback(async () => {
     if (!repo) return;
+    const willRefresh = !isRemoteRepo(repo.path);
     setLoading(true);
+    if (willRefresh) setRefreshing(true);
     try {
       const cached = await listSnapshots(repo);
       setSnapshots(cached.reverse());
     } finally {
       setLoading(false);
     }
-    // background revalidation — silent errors since we already have cached data
-    setRefreshing(true);
+    if (!willRefresh) return;
+    // background revalidation for local repos only
     refreshSnapshots(repo)
       .then((data) => setSnapshots(data.reverse()))
       .catch(() => {})

@@ -24,6 +24,7 @@ pub fn run() {
             repo::remove_repo,
             repo::init_repo,
             repo::get_repo_stats,
+            repo::refresh_repo_stats,
             repo::rename_repo,
             repo::check_repo,
             repo::get_restic_path,

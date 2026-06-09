@@ -119,31 +119,17 @@ export default function BrowsePage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center gap-3 mb-6">
+      <div className="mb-6">
         <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>
           ← Snapshots
         </Button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-gray-100">Browse Snapshot</h1>
-          <p className="text-sm text-gray-500 font-mono mt-0.5">{snapshotId}</p>
-        </div>
+        <h1 className="text-xl font-semibold text-gray-100 mt-3">Browse Snapshot</h1>
+        {repo && <p className="text-sm text-gray-400 mt-0.5">{repo.name}</p>}
+        <p className="text-xs text-gray-600 font-mono mt-0.5">{snapshotId}</p>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex items-center justify-end mb-4">
-        <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={showHidden}
-            onChange={(e) => setShowHidden(e.target.checked)}
-            className="w-4 h-4 accent-blue-500"
-          />
-          Show hidden files
-        </label>
-      </div>
-
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-1 mb-4 text-sm text-gray-400">
+      {/* Breadcrumb + toolbar */}
+      <div className="flex items-center gap-1 mb-4 text-sm text-gray-400 justify-between">
         <button onClick={() => { setPathStack([]); load(); }} className="hover:text-gray-200 transition-colors">
           root
         </button>
@@ -168,19 +154,16 @@ export default function BrowsePage() {
             <span className="text-gray-300">{currentPath.split("/").pop()}</span>
           </>
         )}
+        <label className="flex items-center gap-2 cursor-pointer select-none ml-auto pl-4">
+          <input
+            type="checkbox"
+            checked={showHidden}
+            onChange={(e) => setShowHidden(e.target.checked)}
+            className="w-4 h-4 accent-blue-500"
+          />
+          Show hidden files
+        </label>
       </div>
-
-      {pathStack.length > 0 && (
-        <button
-          onClick={goBack}
-          className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200 transition-colors mb-2"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          ..
-        </button>
-      )}
 
       {error && (
         <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
@@ -188,27 +171,31 @@ export default function BrowsePage() {
         </div>
       )}
 
-      {loading ? (
-        <div className="flex items-center justify-center py-20 text-gray-500">
-          <svg className="animate-spin w-6 h-6 mr-2" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-          </svg>
-          Loading…
-        </div>
-      ) : (
-        <div className="rounded-xl border border-gray-800 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-900 border-b border-gray-800 text-left">
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24">Actions</th>
+      <div className="rounded-xl border border-gray-800 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-900 border-b border-gray-800 text-left">
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800">
+            {loading ? (
+              <tr>
+                <td colSpan={4}>
+                  <div className="flex items-center justify-center py-20 text-gray-500">
+                    <svg className="animate-spin w-6 h-6 mr-2" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    Loading…
+                  </div>
+                </td>
               </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {visibleEntries.map((entry) => (
+            ) : (
+              visibleEntries.map((entry) => (
                 <tr key={entry.path} className="hover:bg-gray-900/50 transition-colors">
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
@@ -241,14 +228,14 @@ export default function BrowsePage() {
                     </Button>
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          {entries.length === 0 && (
-            <div className="py-10 text-center text-gray-500 text-sm">Empty directory</div>
-          )}
-        </div>
-      )}
+              ))
+            )}
+          </tbody>
+        </table>
+        {!loading && entries.length === 0 && (
+          <div className="py-10 text-center text-gray-500 text-sm">Empty directory</div>
+        )}
+      </div>
 
       <Modal
         title="Restore"

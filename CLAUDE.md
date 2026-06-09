@@ -39,12 +39,12 @@ src/
     Modal.tsx                 # Overlay modal dialog
     Sidebar.tsx               # Left nav with active repo indicator
   lib/
-    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats
+    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats; isRemoteRepo() helper
     invoke.ts                 # Typed wrappers over tauri invoke()
   pages/
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.)
-    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option
-    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore
+    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern
+    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes); planId="new" for creation
     SettingsPage.tsx          # Restic binary path override; install instructions
@@ -54,13 +54,17 @@ src-tauri/
   tauri.conf.json
   src/
     main.rs                   # Calls restic_gui_lib::run()
-    lib.rs                    # Tauri builder; registers all commands
+    lib.rs                    # Tauri builder; registers all commands; initialises SQLite cache
     commands/
       mod.rs                  # shared get_restic_path() helper used by all command modules
-      repo.rs                 # list_repos, add_repo, remove_repo, init_repo, get_repo_stats, get/set_restic_path
-      snapshot.rs             # list_snapshots, delete_snapshot, tag_snapshot, run_backup, forget_by_plan
+      repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo, check_repo,
+                              #   get_repo_stats, refresh_repo_stats, get/set_restic_path
+      snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
+                              #   run_backup, forget_by_plan; is_remote_repo() helper
       browse.rs               # list_files, restore_path
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in settings.json under "backup_plans" key
+      cache.rs                # SnapshotCache (SQLite-backed); tables: snapshots_cache, browse_cache, repo_stats_cache;
+                              #   clear_browse_cache command
 ```
 
 ## Routes
@@ -82,6 +86,17 @@ src-tauri/
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
 - `run_backup` returns the raw restic JSON stdout as a `String` (not deserialized).
 - Repos and settings are stored in `settings.json` via `tauri-plugin-store`.
+
+## Caching Layer
+
+- SQLite database (`browse_cache.db`) is stored in the Tauri app data directory; opened at startup in `lib.rs` and managed as a `tauri::State<SnapshotCache>`.
+- Three cache tables: `snapshots_cache` (per-repo snapshot list), `browse_cache` (per-snapshot directory listings keyed by path), `repo_stats_cache` (per-repo stats).
+- `list_snapshots` — returns from cache only (fast, no restic call). `refresh_snapshots` — calls restic and updates cache.
+- `SnapshotsPage` uses a stale-while-revalidate pattern: serve cache immediately, then fire `refresh_snapshots` in the background for local repos. Remote repos skip the background refresh to avoid unnecessary network calls.
+- After `run_backup` succeeds: parse the new `snapshot_id` from the restic NDJSON summary line, fetch that single snapshot's metadata (`restic snapshots --json <id>`), and prepend it to the cached list — no full re-fetch needed.
+- After `forget_by_plan` succeeds: run `restic snapshots --json` to repopulate the snapshot cache with the post-prune list.
+- Stats cache (`get_repo_stats` / `refresh_repo_stats`): for remote repos, stats are evicted after backup/forget rather than auto-repopulated, since `restic stats` reads pack indexes which can be large on remote storage.
+- `clear_browse_cache` command wipes all three cache tables (exposed to frontend for manual cache clearing).
 
 ## Adding a New Feature
 

@@ -5,6 +5,12 @@ use super::backup_plan::RetentionPolicy;
 use super::cache::SnapshotCache;
 use super::repo::{run_restic_with_path, Repository};
 
+const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
+
+fn is_remote_repo(repo: &Repository) -> bool {
+    REMOTE_PREFIXES.iter().any(|p| repo.path.starts_with(p))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
@@ -121,8 +127,36 @@ pub async fn run_backup(
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
-    if result.is_ok() {
-        let _ = cache.evict_snapshots(&repo.id);
+    if let Ok(ref stdout) = result {
+        if is_remote_repo(&repo) {
+            let _ = cache.evict_stats(&repo.id);
+        }
+
+        // Parse the snapshot_id from the NDJSON summary line and append to cache.
+        let new_id = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|v| v.get("message_type").and_then(|t| t.as_str()) == Some("summary"))
+            .and_then(|v| v["snapshot_id"].as_str().map(str::to_string));
+
+        let appended = new_id.and_then(|id| {
+            let new_json = run_restic_with_path(&repo, vec!["snapshots", "--json", &id], &restic_path).ok()?;
+            let mut new_snaps: Vec<Snapshot> = serde_json::from_str(&new_json).ok()?;
+            let existing: Vec<Snapshot> = cache
+                .get_snapshots(&repo.id)
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default();
+            new_snaps.extend(existing);
+            serde_json::to_string(&new_snaps).ok()
+        });
+
+        if let Some(json) = appended {
+            let _ = cache.set_snapshots(&repo.id, &json);
+        } else {
+            let _ = cache.evict_snapshots(&repo.id);
+        }
     }
     result
 }
@@ -174,7 +208,14 @@ pub async fn forget_by_plan(
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
     if result.is_ok() {
-        let _ = cache.evict_snapshots(&repo.id);
+        if is_remote_repo(&repo) {
+            let _ = cache.evict_stats(&repo.id);
+        }
+        if let Ok(json) = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path) {
+            let _ = cache.set_snapshots(&repo.id, &json);
+        } else {
+            let _ = cache.evict_snapshots(&repo.id);
+        }
     }
     result
 }

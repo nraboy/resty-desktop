@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addRepo, checkRepo, initRepo, listRepos, removeRepo, renameRepo } from "../lib/invoke";
-import type { Repository } from "../lib/types";
+import { addRepo, checkRepo, getRepoStats, initRepo, listRepos, refreshRepoStats, refreshSnapshots, removeRepo, renameRepo } from "../lib/invoke";
+import type { Repository, ResticStats } from "../lib/types";
+import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -10,9 +11,18 @@ import EmptyState from "../components/EmptyState";
 
 type ModalMode = "add" | "init" | null;
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
 export default function RepositoriesPage() {
   const navigate = useNavigate();
   const [repos, setRepos] = useState<Repository[]>([]);
+  const [statsMap, setStatsMap] = useState<Record<string, ResticStats | null>>({});
+  const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -26,11 +36,33 @@ export default function RepositoriesPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  const load = () => listRepos().then(setRepos).catch(() => {});
+  const load = () => listRepos().then((r) => { setRepos(r); return r; }).catch(() => [] as Repository[]);
+
+  const fetchStatsForLocal = (repoList: Repository[]) => {
+    for (const repo of repoList) {
+      if (isRemoteRepo(repo.path)) continue;
+      getRepoStats(repo)
+        .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+        .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })));
+    }
+  };
 
   useEffect(() => {
-    load();
+    load().then(fetchStatsForLocal);
   }, []);
+
+  const handleRefreshRow = async (e: React.MouseEvent, repo: Repository) => {
+    e.stopPropagation();
+    setRefreshingRow(repo.id);
+    try {
+      const s = await refreshRepoStats(repo);
+      setStatsMap((prev) => ({ ...prev, [repo.id]: s }));
+    } catch {
+      setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
+    } finally {
+      setRefreshingRow(null);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,6 +81,12 @@ export default function RepositoriesPage() {
       await load();
       setModalMode(null);
       setForm({ name: "", path: "", password: "" });
+      if (!isRemoteRepo(repo.path)) {
+        refreshSnapshots(repo).catch(() => {});
+        refreshRepoStats(repo)
+          .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+          .catch(() => {});
+      }
     } catch (err: any) {
       setError(String(err));
     } finally {
@@ -157,6 +195,40 @@ export default function RepositoriesPage() {
                   <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
                 </div>
               </div>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <div className="text-right min-w-[80px]">
+                    {repo.id in statsMap ? (
+                      statsMap[repo.id] ? (
+                        <>
+                          <p className="text-sm font-medium text-gray-300">{formatBytes(statsMap[repo.id]!.total_size)}</p>
+                          <p className="text-xs text-gray-600">{statsMap[repo.id]!.snapshots_count} snapshot{statsMap[repo.id]!.snapshots_count !== 1 ? "s" : ""}</p>
+                        </>
+                      ) : (
+                        <p className="text-xs text-gray-600">unavailable</p>
+                      )
+                    ) : isRemoteRepo(repo.path) ? (
+                      <p className="text-xs text-gray-600">—</p>
+                    ) : (
+                      <p className="text-xs text-gray-600 animate-pulse">loading…</p>
+                    )}
+                  </div>
+                  {isRemoteRepo(repo.path) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      loading={refreshingRow === repo.id}
+                      onClick={(e) => handleRefreshRow(e, repo)}
+                      className="text-gray-500 hover:text-blue-400"
+                      title="Refresh stats"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </Button>
+                  )}
+                </div>
               <div className="flex items-center gap-2">
                 <Button
                   variant="ghost"
@@ -187,6 +259,7 @@ export default function RepositoriesPage() {
                       d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                   </svg>
                 </Button>
+              </div>
               </div>
             </div>
           ))}

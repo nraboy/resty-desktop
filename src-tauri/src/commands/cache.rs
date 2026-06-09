@@ -28,6 +28,13 @@ impl SnapshotCache {
                 repo_id        TEXT PRIMARY KEY,
                 snapshots_json TEXT NOT NULL,
                 cached_at      INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS repo_stats_cache (
+                repo_id          TEXT PRIMARY KEY,
+                total_size       INTEGER NOT NULL,
+                total_file_count INTEGER NOT NULL,
+                snapshots_count  INTEGER NOT NULL,
+                cached_at        INTEGER NOT NULL
             );",
         )
     }
@@ -109,11 +116,48 @@ impl SnapshotCache {
         Ok(())
     }
 
+    // --- repo stats cache ---
+
+    pub fn get_stats(&self, repo_id: &str) -> Result<Option<(u64, u64, u64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT total_size, total_file_count, snapshots_count FROM repo_stats_cache WHERE repo_id = ?1",
+            params![repo_id],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64, row.get::<_, i64>(2)? as u64)),
+        ) {
+            Ok(stats) => Ok(Some(stats)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn set_stats(&self, repo_id: &str, total_size: u64, total_file_count: u64, snapshots_count: u64) -> Result<(), String> {
+        let now = timestamp();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO repo_stats_cache (repo_id, total_size, total_file_count, snapshots_count, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![repo_id, total_size as i64, total_file_count as i64, snapshots_count as i64, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn evict_stats(&self, repo_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM repo_stats_cache WHERE repo_id = ?1",
+            params![repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // --- global clear ---
 
     pub fn clear(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute_batch("DELETE FROM browse_cache; DELETE FROM snapshots_cache;")
+        conn.execute_batch("DELETE FROM browse_cache; DELETE FROM snapshots_cache; DELETE FROM repo_stats_cache;")
             .map_err(|e| e.to_string())?;
         Ok(())
     }

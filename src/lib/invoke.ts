@@ -22,6 +22,9 @@ export const checkRepo = (repo: Repository): Promise<void> =>
 export const getRepoStats = (repo: Repository): Promise<ResticStats> =>
   invoke("get_repo_stats", { repo });
 
+export const refreshRepoStats = (repo: Repository): Promise<ResticStats> =>
+  invoke("refresh_repo_stats", { repo });
+
 export const getResticPath = (): Promise<string> =>
   invoke("get_restic_path");
 
