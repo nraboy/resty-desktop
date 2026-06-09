@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { v4 as uuidv4 } from "uuid";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   listBackupPlans,
@@ -74,31 +73,31 @@ export default function BackupPlanEditPage() {
     init();
   }, [planId, isNew]);
 
-  const pickFolder = async () => {
+  const pickFolder = useCallback(async () => {
     const selected = await open({ directory: true, multiple: true });
     if (!selected) return;
     const arr = Array.isArray(selected) ? selected : [selected];
     setPaths((prev) => [...new Set([...prev, ...arr])]);
-  };
+  }, []);
 
-  const pickFile = async () => {
+  const pickFile = useCallback(async () => {
     const selected = await open({ multiple: true });
     if (!selected) return;
     const arr = Array.isArray(selected) ? selected : [selected];
     setPaths((prev) => [...new Set([...prev, ...arr])]);
-  };
+  }, []);
 
-  const removePath = (p: string) => setPaths((prev) => prev.filter((x) => x !== p));
+  const removePath = useCallback((p: string) => setPaths((prev) => prev.filter((x) => x !== p)), []);
 
-  const addTag = () => {
+  const addTag = useCallback(() => {
     const t = tagInput.trim();
     if (t && !tags.includes(t)) {
       setTags((prev) => [...prev, t]);
       setTagInput("");
     }
-  };
+  }, [tagInput, tags]);
 
-  const removeTag = (t: string) => setTags((prev) => prev.filter((x) => x !== t));
+  const removeTag = useCallback((t: string) => setTags((prev) => prev.filter((x) => x !== t)), []);
 
   const handleSave = async () => {
     if (!name.trim()) { setError("Plan name is required."); return; }
@@ -120,7 +119,7 @@ export default function BackupPlanEditPage() {
           }
         : undefined;
       const plan: BackupPlan = {
-        id: isNew ? uuidv4() : planId!,
+        id: isNew ? crypto.randomUUID() : planId!,
         name: name.trim(),
         repoId,
         paths,

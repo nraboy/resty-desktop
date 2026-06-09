@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { listFiles, listRepos, restorePath } from "../lib/invoke";
 import type { FileEntry, Repository } from "../lib/types";
@@ -74,16 +74,26 @@ export default function BrowsePage() {
     load();
   }, [load]);
 
-  const enterDir = (entry: FileEntry) => {
+  const enterDir = useCallback((entry: FileEntry) => {
     setPathStack((s) => [...s, currentPath ?? ""]);
     load(entry.path);
-  };
+  }, [currentPath, load]);
 
-  const goBack = () => {
+  const goBack = useCallback(() => {
     const prev = pathStack[pathStack.length - 1];
     setPathStack((s) => s.slice(0, -1));
     load(prev || undefined);
-  };
+  }, [pathStack, load]);
+
+  const visibleEntries = useMemo(() =>
+    entries
+      .filter((entry) => showHidden || !entry.name.startsWith("."))
+      .sort((a, b) => {
+        if (a.type === "dir" && b.type !== "dir") return -1;
+        if (a.type !== "dir" && b.type === "dir") return 1;
+        return a.name.localeCompare(b.name);
+      }),
+  [entries, showHidden]);
 
   const handleRestore = async () => {
     if (!repo || !snapshotId || !restoreTarget) return;
@@ -198,14 +208,7 @@ export default function BrowsePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {entries
-                .filter((entry) => showHidden || !entry.name.startsWith("."))
-                .sort((a, b) => {
-                  if (a.type === "dir" && b.type !== "dir") return -1;
-                  if (a.type !== "dir" && b.type === "dir") return 1;
-                  return a.name.localeCompare(b.name);
-                })
-                .map((entry) => (
+              {visibleEntries.map((entry) => (
                 <tr key={entry.path} className="hover:bg-gray-900/50 transition-colors">
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">

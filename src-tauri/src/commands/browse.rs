@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
 
-use super::repo::Repository;
+use super::repo::{run_restic_with_path, Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -36,14 +35,6 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
     }
 }
 
-fn get_restic_path(app: &AppHandle) -> String {
-    app.store("settings.json")
-        .ok()
-        .and_then(|s| s.get("restic_path"))
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_else(|| "restic".to_string())
-}
-
 #[tauri::command]
 pub async fn list_files(
     app: AppHandle,
@@ -51,7 +42,7 @@ pub async fn list_files(
     snapshot_id: String,
     path: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
-    let restic_path = get_restic_path(&app);
+    let restic_path = super::get_restic_path(&app);
 
     let mut args = vec!["ls", "--json", snapshot_id.as_str()];
     let path_str;
@@ -60,18 +51,8 @@ pub async fn list_files(
         args.push(&path_str);
     }
 
-    let output = std::process::Command::new(&restic_path)
-        .args(&args)
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
+    let stdout = run_restic_with_path(&repo, args, &restic_path)?;
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     // restic ls --json outputs one JSON object per line; first line is snapshot info
     let mut entries: Vec<FileEntry> = Vec::new();
     for (i, line) in stdout.lines().enumerate() {
@@ -95,25 +76,10 @@ pub async fn restore_path(
     include_path: String,
     target_dir: String,
 ) -> Result<(), String> {
-    let restic_path = get_restic_path(&app);
-
-    let output = std::process::Command::new(&restic_path)
-        .args([
-            "restore",
-            &snapshot_id,
-            "--include",
-            &include_path,
-            "--target",
-            &target_dir,
-        ])
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    let restic_path = super::get_restic_path(&app);
+    run_restic_with_path(
+        &repo,
+        vec!["restore", &snapshot_id, "--include", &include_path, "--target", &target_dir],
+        &restic_path,
+    ).map(|_| ())
 }

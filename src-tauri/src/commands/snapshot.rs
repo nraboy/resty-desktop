@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
 
 use super::backup_plan::RetentionPolicy;
-use super::repo::Repository;
+use super::repo::{run_restic_with_path, Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -16,40 +15,13 @@ pub struct Snapshot {
     pub tags: Option<Vec<String>>,
 }
 
-fn get_restic_path(app: &AppHandle) -> String {
-    app.store("settings.json")
-        .ok()
-        .and_then(|s| s.get("restic_path"))
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_else(|| "restic".to_string())
-}
-
-fn run_restic(
-    repo: &Repository,
-    args: Vec<&str>,
-    restic_path: &str,
-) -> Result<String, String> {
-    let output = std::process::Command::new(restic_path)
-        .args(args)
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
 #[tauri::command]
 pub async fn list_snapshots(
     app: AppHandle,
     repo: Repository,
 ) -> Result<Vec<Snapshot>, String> {
-    let restic_path = get_restic_path(&app);
-    let stdout = run_restic(&repo, vec!["snapshots", "--json"], &restic_path)?;
+    let restic_path = super::get_restic_path(&app);
+    let stdout = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)?;
     let snapshots: Vec<Snapshot> =
         serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
     Ok(snapshots)
@@ -62,12 +34,12 @@ pub async fn delete_snapshot(
     snapshot_id: String,
     prune: bool,
 ) -> Result<(), String> {
-    let restic_path = get_restic_path(&app);
+    let restic_path = super::get_restic_path(&app);
     let mut args = vec!["forget", snapshot_id.as_str()];
     if prune {
         args.push("--prune");
     }
-    run_restic(&repo, args, &restic_path)?;
+    run_restic_with_path(&repo, args, &restic_path)?;
     Ok(())
 }
 
@@ -79,11 +51,11 @@ pub async fn tag_snapshot(
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
 ) -> Result<(), String> {
-    let restic_path = get_restic_path(&app);
+    let restic_path = super::get_restic_path(&app);
 
     if !add_tags.is_empty() {
         let tag_str = add_tags.join(",");
-        run_restic(
+        run_restic_with_path(
             &repo,
             vec!["tag", "--add", &tag_str, &snapshot_id],
             &restic_path,
@@ -92,7 +64,7 @@ pub async fn tag_snapshot(
 
     if !remove_tags.is_empty() {
         let tag_str = remove_tags.join(",");
-        run_restic(
+        run_restic_with_path(
             &repo,
             vec!["tag", "--remove", &tag_str, &snapshot_id],
             &restic_path,
@@ -110,7 +82,7 @@ pub async fn run_backup(
     tags: Vec<String>,
     excludes: Vec<String>,
 ) -> Result<String, String> {
-    let restic_path = get_restic_path(&app);
+    let restic_path = super::get_restic_path(&app);
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -129,19 +101,7 @@ pub async fn run_backup(
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let output = std::process::Command::new(&restic_path)
-        .args(&args_refs)
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    run_restic_with_path(&repo, args_refs, &restic_path)
 }
 
 #[tauri::command]
@@ -152,7 +112,7 @@ pub async fn forget_by_plan(
     paths: Vec<String>,
     retention: RetentionPolicy,
 ) -> Result<String, String> {
-    let restic_path = get_restic_path(&app);
+    let restic_path = super::get_restic_path(&app);
 
     let mut args: Vec<String> = vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
 
@@ -188,5 +148,5 @@ pub async fn forget_by_plan(
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_restic(&repo, args_refs, &restic_path)
+    run_restic_with_path(&repo, args_refs, &restic_path)
 }

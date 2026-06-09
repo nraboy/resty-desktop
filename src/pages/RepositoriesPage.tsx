@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { v4 as uuidv4 } from "uuid";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addRepo, checkRepo, initRepo, listRepos, removeRepo, renameRepo } from "../lib/invoke";
 import type { Repository } from "../lib/types";
@@ -41,7 +40,7 @@ export default function RepositoriesPage() {
     }
     setLoading(true);
     setError("");
-    const repo: Repository = { id: uuidv4(), ...form };
+    const repo: Repository = { id: crypto.randomUUID(), ...form };
     try {
       if (modalMode === "init") {
         await initRepo(repo);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { deleteSnapshot, listRepos, listSnapshots, tagSnapshot } from "../lib/invoke";
 import type { Repository, Snapshot } from "../lib/types";
@@ -81,7 +81,7 @@ export default function SnapshotsPage() {
     }
   };
 
-  const handleRemoveTag = async (snapshot: Snapshot, tag: string) => {
+  const handleRemoveTag = useCallback(async (snapshot: Snapshot, tag: string) => {
     if (!repo) return;
     try {
       await tagSnapshot(repo, snapshot.id, [], [tag]);
@@ -89,9 +89,9 @@ export default function SnapshotsPage() {
     } catch (err: any) {
       setError(String(err));
     }
-  };
+  }, [repo, load]);
 
-  const filtered = filter
+  const filtered = useMemo(() => filter
     ? snapshots.filter(
         (s) =>
           s.short_id.includes(filter) ||
@@ -99,7 +99,7 @@ export default function SnapshotsPage() {
           (s.tags ?? []).some((t) => t.toLowerCase().includes(filter.toLowerCase())) ||
           s.paths.some((p) => p.toLowerCase().includes(filter.toLowerCase()))
       )
-    : snapshots;
+    : snapshots, [snapshots, filter]);
 
   if (!repoId || (!repo && !loading)) {
     return (

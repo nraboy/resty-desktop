@@ -16,13 +16,13 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Frontend | React 19 + TypeScript |
 | Styling | Tailwind CSS v3 |
 | Build tool | Vite |
-| State management | Zustand |
+| State management | URL-based nav (no global store) |
 | Routing | React Router v6 |
 | Rust backend | Tauri v2 `#[tauri::command]` |
 | Settings persistence | `tauri-plugin-store` (`settings.json`) |
 | File picker | `tauri-plugin-dialog` |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
-| ID generation | `uuid` v4 (frontend, for new repo IDs) |
+| ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag |
 
 ## Project Structure
@@ -48,8 +48,6 @@ src/
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes); planId="new" for creation
     SettingsPage.tsx          # Restic binary path override; install instructions
-  store/
-    appStore.ts               # Zustand store: activeRepo, activeSnapshot
 
 src-tauri/
   Cargo.toml
@@ -58,9 +56,9 @@ src-tauri/
     main.rs                   # Calls restic_gui_lib::run()
     lib.rs                    # Tauri builder; registers all commands
     commands/
-      mod.rs
+      mod.rs                  # shared get_restic_path() helper used by all command modules
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, get_repo_stats, get/set_restic_path
-      snapshot.rs             # list_snapshots, delete_snapshot, tag_snapshot, run_backup
+      snapshot.rs             # list_snapshots, delete_snapshot, tag_snapshot, run_backup, forget_by_plan
       browse.rs               # list_files, restore_path
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in settings.json under "backup_plans" key
 ```
