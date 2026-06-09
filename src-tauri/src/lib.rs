@@ -1,6 +1,6 @@
 mod commands;
 
-use commands::{browse, repo, snapshot};
+use commands::{backup_plan, browse, repo, snapshot};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,6 +22,9 @@ pub fn run() {
             snapshot::run_backup,
             browse::list_files,
             browse::restore_path,
+            backup_plan::list_backup_plans,
+            backup_plan::save_backup_plan,
+            backup_plan::remove_backup_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

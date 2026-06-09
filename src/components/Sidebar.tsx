@@ -1,5 +1,4 @@
 import { NavLink } from "react-router-dom";
-import { useAppStore } from "../store/appStore";
 
 const navItems = [
   {
@@ -15,22 +14,12 @@ const navItems = [
     ),
   },
   {
-    to: "/snapshots",
-    label: "Snapshots",
+    to: "/backup-plans",
+    label: "Backup Plans",
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-  },
-  {
-    to: "/backup",
-    label: "Backup",
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
       </svg>
     ),
   },
@@ -49,8 +38,6 @@ const navItems = [
 ];
 
 export default function Sidebar() {
-  const { activeRepo, setActiveRepo } = useAppStore();
-
   return (
     <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
       <div className="px-4 py-4 border-b border-gray-800">
@@ -77,22 +64,6 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
-
-      {activeRepo && (
-        <div className="px-3 py-3 border-t border-gray-800">
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Active Repo</p>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-            <span className="text-sm text-gray-300 truncate">{activeRepo.name}</span>
-          </div>
-          <button
-            onClick={() => setActiveRepo(null)}
-            className="mt-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            Disconnect
-          </button>
-        </div>
-      )}
     </aside>
   );
 }

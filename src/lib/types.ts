@@ -29,3 +29,12 @@ export interface ResticStats {
   total_file_count: number;
   snapshots_count: number;
 }
+
+export interface BackupPlan {
+  id: string;
+  name: string;
+  repoId: string;
+  paths: string[];
+  tags: string[];
+  excludes: string[];
+}

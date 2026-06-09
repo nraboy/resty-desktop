@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { listFiles, restorePath } from "../lib/invoke";
-import type { FileEntry } from "../lib/types";
-import { useAppStore } from "../store/appStore";
+import { listFiles, listRepos, restorePath } from "../lib/invoke";
+import type { FileEntry, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -33,9 +32,9 @@ const FileIcon = ({ type }: { type: string }) => {
 };
 
 export default function BrowsePage() {
-  const { snapshotId } = useParams<{ snapshotId: string }>();
+  const { repoId, snapshotId } = useParams<{ repoId: string; snapshotId: string }>();
   const navigate = useNavigate();
-  const { activeRepo } = useAppStore();
+  const [repo, setRepo] = useState<Repository | null>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string | undefined>(undefined);
   const [pathStack, setPathStack] = useState<string[]>([]);
@@ -46,13 +45,20 @@ export default function BrowsePage() {
   const [restoring, setRestoring] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
 
+  useEffect(() => {
+    if (!repoId) return;
+    listRepos().then((repos) => {
+      setRepo(repos.find((r) => r.id === repoId) ?? null);
+    });
+  }, [repoId]);
+
   const load = useCallback(
     async (path?: string) => {
-      if (!activeRepo || !snapshotId) return;
+      if (!repo || !snapshotId) return;
       setLoading(true);
       setError("");
       try {
-        const data = await listFiles(activeRepo, snapshotId, path);
+        const data = await listFiles(repo, snapshotId, path);
         setEntries(data);
         setCurrentPath(path);
       } catch (err: any) {
@@ -61,7 +67,7 @@ export default function BrowsePage() {
         setLoading(false);
       }
     },
-    [activeRepo, snapshotId]
+    [repo, snapshotId]
   );
 
   useEffect(() => {
@@ -80,10 +86,10 @@ export default function BrowsePage() {
   };
 
   const handleRestore = async () => {
-    if (!activeRepo || !snapshotId || !restoreTarget) return;
+    if (!repo || !snapshotId || !restoreTarget) return;
     setRestoring(true);
     try {
-      await restorePath(activeRepo, snapshotId, restoreTarget.path, targetDir);
+      await restorePath(repo, snapshotId, restoreTarget.path, targetDir);
       setRestoreTarget(null);
     } catch (err: any) {
       setError(String(err));
@@ -92,11 +98,11 @@ export default function BrowsePage() {
     }
   };
 
-  if (!activeRepo || !snapshotId) {
+  if (!snapshotId || (!repo && !repoId)) {
     return (
       <EmptyState
-        title="No snapshot selected"
-        action={<Button variant="secondary" onClick={() => navigate("/snapshots")}>Back to Snapshots</Button>}
+        title="Snapshot not found"
+        action={<Button variant="secondary" onClick={() => navigate("/")}>Go to Repositories</Button>}
       />
     );
   }
@@ -104,7 +110,7 @@ export default function BrowsePage() {
   return (
     <div className="p-6">
       <div className="flex items-center gap-3 mb-6">
-        <Button variant="ghost" size="sm" onClick={() => navigate("/snapshots")}>
+        <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>
           ← Snapshots
         </Button>
         <div className="flex-1">

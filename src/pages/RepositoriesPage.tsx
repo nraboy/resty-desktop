@@ -4,7 +4,6 @@ import { v4 as uuidv4 } from "uuid";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addRepo, initRepo, listRepos, removeRepo } from "../lib/invoke";
 import type { Repository } from "../lib/types";
-import { useAppStore } from "../store/appStore";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -14,7 +13,6 @@ type ModalMode = "add" | "init" | null;
 
 export default function RepositoriesPage() {
   const navigate = useNavigate();
-  const { activeRepo, setActiveRepo } = useAppStore();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [loading, setLoading] = useState(false);
@@ -53,7 +51,6 @@ export default function RepositoriesPage() {
 
   const handleRemove = async (id: string) => {
     await removeRepo(id);
-    if (activeRepo?.id === id) setActiveRepo(null);
     await load();
   };
 
@@ -104,33 +101,16 @@ export default function RepositoriesPage() {
           {repos.map((repo) => (
             <div
               key={repo.id}
-              className={`flex items-center justify-between p-4 rounded-xl border transition-colors cursor-pointer ${
-                activeRepo?.id === repo.id
-                  ? "bg-blue-600/10 border-blue-600/40"
-                  : "bg-gray-900 border-gray-800 hover:border-gray-700"
-              }`}
-              onClick={() => {
-                setActiveRepo(repo);
-                navigate("/snapshots");
-              }}
+              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors cursor-pointer"
+              onClick={() => navigate(`/snapshots/${repo.id}`)}
             >
               <div className="flex items-center gap-3">
-                <div
-                  className={`w-3 h-3 rounded-full flex-shrink-0 ${
-                    activeRepo?.id === repo.id ? "bg-green-400" : "bg-gray-600"
-                  }`}
-                />
                 <div>
                   <p className="text-sm font-medium text-gray-100">{repo.name}</p>
                   <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {activeRepo?.id === repo.id && (
-                  <span className="text-xs text-blue-400 px-2 py-0.5 bg-blue-500/20 rounded-full">
-                    Active
-                  </span>
-                )}
                 <Button
                   variant="ghost"
                   size="sm"

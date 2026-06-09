@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { FileEntry, Repository, ResticStats, Snapshot } from "./types";
+import type { BackupPlan, FileEntry, Repository, ResticStats, Snapshot } from "./types";
 
 export const listRepos = (): Promise<Repository[]> =>
   invoke("list_repos");
@@ -62,3 +62,12 @@ export const restorePath = (
   targetDir: string
 ): Promise<void> =>
   invoke("restore_path", { repo, snapshotId, includePath, targetDir });
+
+export const listBackupPlans = (): Promise<BackupPlan[]> =>
+  invoke("list_backup_plans");
+
+export const saveBackupPlan = (plan: BackupPlan): Promise<void> =>
+  invoke("save_backup_plan", { plan });
+
+export const removeBackupPlan = (planId: string): Promise<void> =>
+  invoke("remove_backup_plan", { planId });

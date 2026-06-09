@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { deleteSnapshot, listSnapshots, tagSnapshot } from "../lib/invoke";
-import type { Snapshot } from "../lib/types";
-import { useAppStore } from "../store/appStore";
+import { useNavigate, useParams } from "react-router-dom";
+import { deleteSnapshot, listRepos, listSnapshots, tagSnapshot } from "../lib/invoke";
+import type { Repository, Snapshot } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -14,7 +13,8 @@ function formatDate(iso: string) {
 
 export default function SnapshotsPage() {
   const navigate = useNavigate();
-  const { activeRepo, setActiveSnapshot } = useAppStore();
+  const { repoId } = useParams<{ repoId: string }>();
+  const [repo, setRepo] = useState<Repository | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -26,29 +26,37 @@ export default function SnapshotsPage() {
   const [tagging, setTagging] = useState(false);
   const [filter, setFilter] = useState("");
 
+  useEffect(() => {
+    if (!repoId) return;
+    listRepos().then((repos) => {
+      const found = repos.find((r) => r.id === repoId) ?? null;
+      setRepo(found);
+    });
+  }, [repoId]);
+
   const load = useCallback(async () => {
-    if (!activeRepo) return;
+    if (!repo) return;
     setLoading(true);
     setError("");
     try {
-      const data = await listSnapshots(activeRepo);
+      const data = await listSnapshots(repo);
       setSnapshots(data.reverse());
     } catch (err: any) {
       setError(String(err));
     } finally {
       setLoading(false);
     }
-  }, [activeRepo]);
+  }, [repo]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const handleDelete = async () => {
-    if (!activeRepo || !deleteTarget) return;
+    if (!repo || !deleteTarget) return;
     setDeleting(true);
     try {
-      await deleteSnapshot(activeRepo, deleteTarget.id, pruneOnDelete);
+      await deleteSnapshot(repo, deleteTarget.id, pruneOnDelete);
       setDeleteTarget(null);
       await load();
     } catch (err: any) {
@@ -59,10 +67,10 @@ export default function SnapshotsPage() {
   };
 
   const handleAddTag = async () => {
-    if (!activeRepo || !tagTarget || !newTag.trim()) return;
+    if (!repo || !tagTarget || !newTag.trim()) return;
     setTagging(true);
     try {
-      await tagSnapshot(activeRepo, tagTarget.id, [newTag.trim()], []);
+      await tagSnapshot(repo, tagTarget.id, [newTag.trim()], []);
       setNewTag("");
       setTagTarget(null);
       await load();
@@ -74,9 +82,9 @@ export default function SnapshotsPage() {
   };
 
   const handleRemoveTag = async (snapshot: Snapshot, tag: string) => {
-    if (!activeRepo) return;
+    if (!repo) return;
     try {
-      await tagSnapshot(activeRepo, snapshot.id, [], [tag]);
+      await tagSnapshot(repo, snapshot.id, [], [tag]);
       await load();
     } catch (err: any) {
       setError(String(err));
@@ -93,11 +101,11 @@ export default function SnapshotsPage() {
       )
     : snapshots;
 
-  if (!activeRepo) {
+  if (!repoId || (!repo && !loading)) {
     return (
       <EmptyState
-        title="No repository selected"
-        description="Select a repository from the Repositories page first."
+        title="Repository not found"
+        description="This repository no longer exists."
         action={
           <Button variant="secondary" onClick={() => navigate("/")}>
             Go to Repositories
@@ -111,8 +119,11 @@ export default function SnapshotsPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Snapshots</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{activeRepo.name}</p>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/")}>
+            ← Repositories
+          </Button>
+          <h1 className="text-xl font-semibold text-gray-100 mt-2">Snapshots</h1>
+          {repo && <p className="text-sm text-gray-500 mt-0.5">{repo.name}</p>}
         </div>
         <div className="flex items-center gap-3">
           <Input
@@ -124,7 +135,7 @@ export default function SnapshotsPage() {
           <Button variant="secondary" onClick={load} loading={loading}>
             Refresh
           </Button>
-          <Button onClick={() => navigate("/backup")}>+ New Backup</Button>
+          <Button onClick={() => navigate("/backup-plans")}>+ New Backup</Button>
         </div>
       </div>
 
@@ -138,7 +149,7 @@ export default function SnapshotsPage() {
         <EmptyState
           title="No snapshots"
           description="Run a backup to create the first snapshot."
-          action={<Button onClick={() => navigate("/backup")}>+ New Backup</Button>}
+          action={<Button onClick={() => navigate("/backup-plans")}>+ New Backup</Button>}
         />
       ) : (
         <div className="rounded-xl border border-gray-800 overflow-hidden">
@@ -200,10 +211,7 @@ export default function SnapshotsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => {
-                          setActiveSnapshot(snap);
-                          navigate(`/snapshots/${snap.id}/browse`);
-                        }}
+                        onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/browse`)}
                       >
                         Browse
                       </Button>

@@ -45,7 +45,8 @@ src/
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.)
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore
-    BackupPage.tsx            # Native file/folder picker; optional tags; exclude patterns (one per line, gitignore syntax); runs restic backup
+    BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
+    BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes); planId="new" for creation
     SettingsPage.tsx          # Restic binary path override; install instructions
   store/
     appStore.ts               # Zustand store: activeRepo, activeSnapshot
@@ -61,6 +62,7 @@ src-tauri/
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, get_repo_stats, get/set_restic_path
       snapshot.rs             # list_snapshots, delete_snapshot, tag_snapshot, run_backup
       browse.rs               # list_files, restore_path
+      backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in settings.json under "backup_plans" key
 ```
 
 ## Routes
@@ -68,9 +70,10 @@ src-tauri/
 | Path | Page |
 |---|---|
 | `/` | RepositoriesPage |
-| `/snapshots` | SnapshotsPage |
-| `/snapshots/:snapshotId/browse` | BrowsePage |
-| `/backup` | BackupPage |
+| `/snapshots/:repoId` | SnapshotsPage |
+| `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
+| `/backup-plans` | BackupPlansPage |
+| `/backup-plans/:planId` | BackupPlanEditPage (`planId="new"` for creation) |
 | `/settings` | SettingsPage |
 
 ## Restic Integration
