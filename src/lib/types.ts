@@ -60,6 +60,15 @@ export interface BackupProgress {
   currentFiles: string[];
 }
 
+export interface RestoreProgress {
+  percentDone: number;
+  filesRestored: number;
+  totalFiles: number;
+  bytesRestored: number;
+  totalBytes: number;
+  secondsElapsed: number;
+}
+
 export interface CheckResult {
   success: boolean;
   errors: string[];

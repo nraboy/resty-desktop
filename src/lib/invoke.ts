@@ -53,6 +53,9 @@ export const getResticPath = (): Promise<string> =>
 export const setResticPath = (path: string): Promise<void> =>
   invoke("set_restic_path", { path });
 
+export const getResticVersion = (): Promise<string> =>
+  invoke("get_restic_version");
+
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 
@@ -107,6 +110,13 @@ export const restorePath = (
   targetDir: string
 ): Promise<void> =>
   invoke("restore_path", { repoId, snapshotId, includePath, targetDir });
+
+export const restoreSnapshot = (
+  repoId: string,
+  snapshotId: string,
+  targetDir: string
+): Promise<void> =>
+  invoke("restore_snapshot", { repoId, snapshotId, targetDir });
 
 // ── backup plans ──────────────────────────────────────────────────────────
 

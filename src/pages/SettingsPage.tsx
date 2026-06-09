@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { changeMasterPassword, clearBrowseCache, getResticPath, setResticPath } from "../lib/invoke";
+import { changeMasterPassword, clearBrowseCache, getResticPath, getResticVersion, setResticPath } from "../lib/invoke";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
 export default function SettingsPage() {
   const [resticPath, setResticPathLocal] = useState("restic");
+  const [resticVersion, setResticVersion] = useState<string | null>(null);
+  const [versionError, setVersionError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -21,6 +23,9 @@ export default function SettingsPage() {
 
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
+    getResticVersion()
+      .then((v) => { setResticVersion(v); setVersionError(""); })
+      .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
   }, []);
 
   const handleSave = async () => {
@@ -31,6 +36,9 @@ export default function SettingsPage() {
       await setResticPath(resticPath);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+      getResticVersion()
+        .then((v) => { setResticVersion(v); setVersionError(""); })
+        .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
     } catch (err: any) {
       setError(String(err));
     } finally {
@@ -96,6 +104,12 @@ export default function SettingsPage() {
             onChange={(e) => setResticPathLocal(e.target.value)}
             placeholder="/usr/local/bin/restic"
           />
+          {resticVersion && (
+            <p className="mt-2 text-xs text-green-400 font-mono">{resticVersion}</p>
+          )}
+          {versionError && (
+            <p className="mt-2 text-xs text-red-400">{versionError}</p>
+          )}
         </div>
         {error && <p className="text-sm text-red-400">{error}</p>}
         <div className="flex items-center gap-3">
@@ -154,7 +168,7 @@ export default function SettingsPage() {
         </form>
       </div>
 
-      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+      {!resticVersion && <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Install Restic</h2>
         <p className="text-xs text-gray-500 leading-relaxed">
           Restic must be installed separately. Visit{" "}
@@ -175,7 +189,7 @@ export default function SettingsPage() {
             </div>
           ))}
         </div>
-      </div>
+      </div>}
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Browse Cache</h2>

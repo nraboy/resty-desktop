@@ -39,6 +39,7 @@ pub fn run() {
             repo::refresh_repo_stats,
             repo::get_restic_path,
             repo::set_restic_path,
+            repo::get_restic_version,
             repo::check_repo,
             // snapshots
             snapshot::list_snapshots,
@@ -51,6 +52,7 @@ pub fn run() {
             // browse
             browse::list_files,
             browse::restore_path,
+            browse::restore_snapshot,
             // backup plans
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,

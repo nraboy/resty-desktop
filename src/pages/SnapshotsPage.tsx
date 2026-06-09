@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { checkRepo, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, tagSnapshot, unlockRepo } from "../lib/invoke";
-import type { CheckResult, Repository, Snapshot } from "../lib/types";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { checkRepo, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import type { CheckResult, Repository, RestoreProgress, Snapshot } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -10,6 +12,14 @@ import EmptyState from "../components/EmptyState";
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString();
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 export default function SnapshotsPage() {
@@ -31,6 +41,12 @@ export default function SnapshotsPage() {
   const [unlocking, setUnlocking] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<Snapshot | null>(null);
+  const [restoreDir, setRestoreDir] = useState("");
+  const [restoring, setRestoring] = useState(false);
+  const [restoreDone, setRestoreDone] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
+  const restoreUnlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!repoId) return;
@@ -142,6 +158,34 @@ export default function SnapshotsPage() {
       setError(String(err));
     }
   }, [repoId, refresh]);
+
+  const handlePickRestoreDir = async () => {
+    const dir = await openDialog({ directory: true, multiple: false });
+    if (typeof dir === "string") setRestoreDir(dir);
+  };
+
+  const handleRestore = async () => {
+    if (!repoId || !restoreTarget || !restoreDir) return;
+    setRestoring(true);
+    setRestoreDone(false);
+    setRestoreProgress(null);
+    const unlisten = await listen<RestoreProgress>("restore:progress", (e) => {
+      setRestoreProgress(e.payload);
+    });
+    restoreUnlistenRef.current = unlisten;
+    try {
+      await restoreSnapshot(repoId, restoreTarget.id, restoreDir);
+      setRestoreDone(true);
+    } catch (err: any) {
+      setError(String(err));
+      setRestoreTarget(null);
+    } finally {
+      unlisten();
+      restoreUnlistenRef.current = null;
+      setRestoring(false);
+      setRestoreProgress(null);
+    }
+  };
 
   const filtered = useMemo(() =>
     filter
@@ -268,6 +312,16 @@ export default function SnapshotsPage() {
                         </svg>
                       </button>
                       <button
+                        title="Restore snapshot"
+                        onClick={() => { setRestoreTarget(snap); setRestoreDir(""); setRestoreDone(false); }}
+                        className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                          <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
+                          <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
+                        </svg>
+                      </button>
+                      <button
                         title="Delete snapshot"
                         onClick={() => setDeleteTarget(snap)}
                         className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-gray-800 transition-colors"
@@ -331,36 +385,43 @@ export default function SnapshotsPage() {
       >
         {checkResult && (
           <>
-            <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
-              {checkResult.success ? (
-                <>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-                  </svg>
-                  No errors found
-                </>
-              ) : (
-                <>
+            {checkResult.errors.length === 0 ? (
+              <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
+                {checkResult.success ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                    </svg>
+                    No errors found
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                    </svg>
+                    Errors found
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
                   </svg>
                   Errors found
-                </>
-              )}
-            </div>
-            {checkResult.errors.length > 0 && (
-              <div className="mb-4 space-y-2">
-                {checkResult.errors.map((err, i) => (
-                  <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 break-all">
-                    {err}
-                  </div>
-                ))}
-              </div>
+                </div>
+                <div className="mb-4 space-y-2">
+                  {checkResult.errors.map((err, i) => (
+                    <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 break-all">
+                      {err}
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
-            <p className="text-xs text-gray-500">
-              Completed in {checkResult.duration_seconds.toFixed(1)}s
-            </p>
-            <div className="flex justify-end mt-4">
+            <div className="flex items-center justify-between mt-4">
+              <span className="text-xs text-gray-500">Completed in {checkResult.duration_seconds.toFixed(1)}s</span>
               <Button variant="secondary" onClick={() => setCheckResult(null)}>Close</Button>
             </div>
           </>
@@ -385,6 +446,75 @@ export default function SnapshotsPage() {
           />
           <Button loading={tagging} onClick={handleAddTag}>Add</Button>
         </div>
+      </Modal>
+
+      <Modal
+        title="Restore Snapshot"
+        open={restoreTarget !== null}
+        onClose={() => { if (!restoring) { setRestoreTarget(null); setRestoreDone(false); } }}
+      >
+        {restoreDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              Restore complete
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Snapshot <span className="font-mono text-blue-400">{restoreTarget?.short_id}</span> was restored to{" "}
+              <span className="font-mono text-gray-300 break-all">{restoreDir}</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setRestoreTarget(null); setRestoreDone(false); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Restore all files from snapshot{" "}
+              <span className="font-mono text-blue-400">{restoreTarget?.short_id}</span> to a target directory.
+              Existing files in the target will be overwritten.
+            </p>
+            <div className="flex gap-2 mb-4">
+              <div className="flex-1">
+                <Input
+                  placeholder="Select a target directory…"
+                  value={restoreDir}
+                  onChange={(e) => setRestoreDir(e.target.value)}
+                  className="w-full"
+                />
+              </div>
+              <Button variant="secondary" onClick={handlePickRestoreDir}>Browse</Button>
+            </div>
+            {restoring && (
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>
+                    {restoreProgress
+                      ? `${restoreProgress.filesRestored.toLocaleString()} / ${restoreProgress.totalFiles.toLocaleString()} files`
+                      : "Starting…"}
+                  </span>
+                  {restoreProgress && (
+                    <span>{formatBytes(restoreProgress.bytesRestored)} / {formatBytes(restoreProgress.totalBytes)}</span>
+                  )}
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((restoreProgress?.percentDone ?? 0) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
+              <Button onClick={handleRestore} loading={restoring} disabled={!restoreDir}>
+                Restore
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
     </div>
   );

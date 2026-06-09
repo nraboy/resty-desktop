@@ -22,6 +22,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Settings persistence | SQLite (`app_data.db`) via `AppDb`; `tauri-plugin-store` kept only for legacy migration |
 | File picker | `tauri-plugin-dialog` |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
+| Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag |
 
@@ -29,7 +30,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 
 ```
 src/
-  App.tsx                     # Router + layout shell
+  App.tsx                     # Router + layout shell; handles auth state machine (loading/setup/locked/unlocked)
   main.tsx                    # React entry point
   index.css                   # Tailwind directives + global styles
   components/
@@ -39,15 +40,20 @@ src/
     Modal.tsx                 # Overlay modal dialog
     Sidebar.tsx               # Left nav with active repo indicator
   lib/
-    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, CheckResult; isRemoteRepo() helper
+    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, CheckResult,
+                              #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper
     invoke.ts                 # Typed wrappers over tauri invoke()
   pages/
+    AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.)
-    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check
+    SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
+                              #   full-snapshot restore modal with streaming progress bar (restore:progress events)
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
-    BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes); planId="new" for creation
-    SettingsPage.tsx          # Restic binary path override; install instructions
+    BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation
+    LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows
+    SettingsPage.tsx          # Restic binary path override; shows detected restic version below path input;
+                              #   install instructions section hidden when restic is found
 
 src-tauri/
   Cargo.toml
@@ -62,13 +68,14 @@ src-tauri/
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
-                              #   check_repo
+                              #   get_restic_version, check_repo
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   run_backup, forget_by_plan, unlock_repo
-      browse.rs               # list_files, restore_path
+      browse.rs               # list_files, restore_path, restore_snapshot
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
       cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory); Repository, FullRepository,
-                              #   BackupPlan, RetentionPolicy types; clear_browse_cache command
+                              #   BackupPlan, RetentionPolicy, BackupHistoryEntry types;
+                              #   clear_browse_cache, list_backup_history commands
 ```
 
 ## Routes
@@ -80,6 +87,7 @@ src-tauri/
 | `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
 | `/backup-plans` | BackupPlansPage |
 | `/backup-plans/:planId` | BackupPlanEditPage (`planId="new"` for creation) |
+| `/logs` | LogsPage |
 | `/settings` | SettingsPage |
 
 ## Restic Integration
@@ -88,8 +96,10 @@ src-tauri/
 - All commands set both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
-- `run_backup` returns the raw restic JSON stdout as a `String` (not deserialized).
+- `run_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is used to extract `snapshot_id` and stats. Returns the raw stdout as a `String`. On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`.
 - `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
+- `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
+- `get_restic_version` runs `restic version` and returns the trimmed stdout string (e.g. `restic 0.18.1 compiled with go1.25.1 on darwin/arm64`). Used by `SettingsPage` to verify the configured binary path is valid.
 - Repos, backup plans, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.
 
 ## Security Architecture
@@ -105,7 +115,7 @@ src-tauri/
 ## Persistence Layer
 
 - Single SQLite database (`app_data.db`) in the Tauri app data directory, opened at startup and managed as `tauri::State<AppDb>`.
-- Tables: `master_key`, `repositories` (encrypted passwords), `backup_plans`, `app_settings`, `snapshots_cache`, `browse_cache`, `repo_stats_cache`.
+- Tables: `master_key`, `repositories` (encrypted passwords), `backup_plans`, `app_settings`, `snapshots_cache`, `browse_cache`, `repo_stats_cache`, `backup_history`.
 - `tauri-plugin-store` (`settings.json`) is still registered but only used by `migrate_from_settings_json` during first-time setup. All new reads/writes go through `AppDb`.
 
 ## Caching Layer

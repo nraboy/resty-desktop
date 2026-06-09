@@ -205,3 +205,17 @@ pub fn get_restic_path(db: State<'_, AppDb>) -> Result<String, String> {
 pub fn set_restic_path(db: State<'_, AppDb>, path: String) -> Result<(), String> {
     db.set_setting("restic_path", &path)
 }
+
+#[tauri::command]
+pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
+    let restic_path = super::get_restic_path(&db);
+    let output = std::process::Command::new(&restic_path)
+        .arg("version")
+        .output()
+        .map_err(|_| format!("restic not found at '{restic_path}'"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
