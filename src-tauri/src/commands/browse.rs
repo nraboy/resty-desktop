@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
+use super::cache::SnapshotCache;
 use super::repo::{run_restic_with_path, Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,10 +39,15 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
 #[tauri::command]
 pub async fn list_files(
     app: AppHandle,
+    cache: State<'_, SnapshotCache>,
     repo: Repository,
     snapshot_id: String,
     path: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
+    if let Some(cached) = cache.get(&snapshot_id, path.as_deref())? {
+        return Ok(cached);
+    }
+
     let restic_path = super::get_restic_path(&app);
 
     let mut args = vec!["ls", "--json", snapshot_id.as_str()];
@@ -57,7 +63,7 @@ pub async fn list_files(
     let mut entries: Vec<FileEntry> = Vec::new();
     for (i, line) in stdout.lines().enumerate() {
         if i == 0 {
-            continue; // skip snapshot summary line
+            continue;
         }
         if let Ok(entry) = serde_json::from_str::<FileEntry>(line) {
             if is_direct_child(&entry.path, path.as_deref()) {
@@ -65,6 +71,8 @@ pub async fn list_files(
             }
         }
     }
+
+    let _ = cache.set(&snapshot_id, path.as_deref(), &entries);
     Ok(entries)
 }
 

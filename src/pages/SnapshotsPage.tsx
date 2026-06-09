@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { deleteSnapshot, listRepos, listSnapshots, tagSnapshot } from "../lib/invoke";
+import { deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, tagSnapshot } from "../lib/invoke";
 import type { Repository, Snapshot } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -17,6 +17,7 @@ export default function SnapshotsPage() {
   const [repo, setRepo] = useState<Repository | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Snapshot | null>(null);
   const [pruneOnDelete, setPruneOnDelete] = useState(true);
@@ -34,18 +35,35 @@ export default function SnapshotsPage() {
     });
   }, [repoId]);
 
-  const load = useCallback(async () => {
+  const refresh = useCallback(async () => {
     if (!repo) return;
-    setLoading(true);
+    setRefreshing(true);
     setError("");
     try {
-      const data = await listSnapshots(repo);
+      const data = await refreshSnapshots(repo);
       setSnapshots(data.reverse());
     } catch (err: any) {
       setError(String(err));
     } finally {
+      setRefreshing(false);
+    }
+  }, [repo]);
+
+  const load = useCallback(async () => {
+    if (!repo) return;
+    setLoading(true);
+    try {
+      const cached = await listSnapshots(repo);
+      setSnapshots(cached.reverse());
+    } finally {
       setLoading(false);
     }
+    // background revalidation — silent errors since we already have cached data
+    setRefreshing(true);
+    refreshSnapshots(repo)
+      .then((data) => setSnapshots(data.reverse()))
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
   }, [repo]);
 
   useEffect(() => {
@@ -58,7 +76,7 @@ export default function SnapshotsPage() {
     try {
       await deleteSnapshot(repo, deleteTarget.id, pruneOnDelete);
       setDeleteTarget(null);
-      await load();
+      await refresh();
     } catch (err: any) {
       setError(String(err));
     } finally {
@@ -73,7 +91,7 @@ export default function SnapshotsPage() {
       await tagSnapshot(repo, tagTarget.id, [newTag.trim()], []);
       setNewTag("");
       setTagTarget(null);
-      await load();
+      await refresh();
     } catch (err: any) {
       setError(String(err));
     } finally {
@@ -85,11 +103,11 @@ export default function SnapshotsPage() {
     if (!repo) return;
     try {
       await tagSnapshot(repo, snapshot.id, [], [tag]);
-      await load();
+      await refresh();
     } catch (err: any) {
       setError(String(err));
     }
-  }, [repo, load]);
+  }, [repo, refresh]);
 
   const filtered = useMemo(() => filter
     ? snapshots.filter(
@@ -132,7 +150,10 @@ export default function SnapshotsPage() {
             onChange={(e) => setFilter(e.target.value)}
             className="w-56"
           />
-          <Button variant="secondary" onClick={load} loading={loading}>
+          {refreshing && (
+            <span className="text-xs text-gray-500">Updating…</span>
+          )}
+          <Button variant="secondary" onClick={refresh} loading={refreshing}>
             Refresh
           </Button>
         </div>
@@ -144,7 +165,7 @@ export default function SnapshotsPage() {
         </div>
       )}
 
-      {!loading && filtered.length === 0 ? (
+      {!loading && !refreshing && filtered.length === 0 ? (
         <EmptyState
           title="No snapshots"
           description="Run a backup to create the first snapshot."

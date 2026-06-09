@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use super::backup_plan::RetentionPolicy;
+use super::cache::SnapshotCache;
 use super::repo::{run_restic_with_path, Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,19 +18,34 @@ pub struct Snapshot {
 
 #[tauri::command]
 pub async fn list_snapshots(
+    cache: State<'_, SnapshotCache>,
+    repo: Repository,
+) -> Result<Vec<Snapshot>, String> {
+    if let Some(json) = cache.get_snapshots(&repo.id)? {
+        if let Ok(cached) = serde_json::from_str::<Vec<Snapshot>>(&json) {
+            return Ok(cached);
+        }
+    }
+    Ok(vec![])
+}
+
+#[tauri::command]
+pub async fn refresh_snapshots(
     app: AppHandle,
+    cache: State<'_, SnapshotCache>,
     repo: Repository,
 ) -> Result<Vec<Snapshot>, String> {
     let restic_path = super::get_restic_path(&app);
     let stdout = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)?;
-    let snapshots: Vec<Snapshot> =
-        serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+    let _ = cache.set_snapshots(&repo.id, &stdout);
+    let snapshots: Vec<Snapshot> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
     Ok(snapshots)
 }
 
 #[tauri::command]
 pub async fn delete_snapshot(
     app: AppHandle,
+    cache: State<'_, SnapshotCache>,
     repo: Repository,
     snapshot_id: String,
     prune: bool,
@@ -40,6 +56,8 @@ pub async fn delete_snapshot(
         args.push("--prune");
     }
     run_restic_with_path(&repo, args, &restic_path)?;
+    let _ = cache.evict(&snapshot_id);
+    let _ = cache.evict_snapshots(&repo.id);
     Ok(())
 }
 
@@ -77,6 +95,7 @@ pub async fn tag_snapshot(
 #[tauri::command]
 pub async fn run_backup(
     app: AppHandle,
+    cache: State<'_, SnapshotCache>,
     repo: Repository,
     paths: Vec<String>,
     tags: Vec<String>,
@@ -101,12 +120,17 @@ pub async fn run_backup(
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_restic_with_path(&repo, args_refs, &restic_path)
+    let result = run_restic_with_path(&repo, args_refs, &restic_path);
+    if result.is_ok() {
+        let _ = cache.evict_snapshots(&repo.id);
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn forget_by_plan(
     app: AppHandle,
+    cache: State<'_, SnapshotCache>,
     repo: Repository,
     tags: Vec<String>,
     paths: Vec<String>,
@@ -148,5 +172,9 @@ pub async fn forget_by_plan(
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_restic_with_path(&repo, args_refs, &restic_path)
+    let result = run_restic_with_path(&repo, args_refs, &restic_path);
+    if result.is_ok() {
+        let _ = cache.evict_snapshots(&repo.id);
+    }
+    result
 }

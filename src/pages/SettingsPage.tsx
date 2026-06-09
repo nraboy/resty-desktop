@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { getResticPath, setResticPath } from "../lib/invoke";
+import { clearBrowseCache, getResticPath, setResticPath } from "../lib/invoke";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
@@ -9,6 +9,8 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheCleared, setCacheCleared] = useState(false);
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
   }, []);
@@ -25,6 +27,17 @@ export default function SettingsPage() {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    setClearingCache(true);
+    try {
+      await clearBrowseCache();
+      setCacheCleared(true);
+      setTimeout(() => setCacheCleared(false), 2000);
+    } finally {
+      setClearingCache(false);
     }
   };
 
@@ -91,6 +104,27 @@ export default function SettingsPage() {
           ))}
         </div>
       </div>
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Browse Cache</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Snapshot file listings are cached locally to speed up navigation. Clear the cache if you
+          see stale data or want to free up disk space.
+        </p>
+        <div className="flex items-center gap-3">
+          <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
+            Clear Browse Cache
+          </Button>
+          {cacheCleared && (
+            <span className="text-sm text-green-400 flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              Cleared
+            </span>
+          )}
+        </div>
+      </div>
+
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5 text-center">
         <p className="text-xs text-gray-400">
           Made with love by{" "}

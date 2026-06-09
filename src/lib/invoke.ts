@@ -31,6 +31,9 @@ export const setResticPath = (path: string): Promise<void> =>
 export const listSnapshots = (repo: Repository): Promise<Snapshot[]> =>
   invoke("list_snapshots", { repo });
 
+export const refreshSnapshots = (repo: Repository): Promise<Snapshot[]> =>
+  invoke("refresh_snapshots", { repo });
+
 export const deleteSnapshot = (
   repo: Repository,
   snapshotId: string,
@@ -85,3 +88,6 @@ export const forgetByPlan = (
   retention: RetentionPolicy
 ): Promise<string> =>
   invoke("forget_by_plan", { repo, tags, paths, retention });
+
+export const clearBrowseCache = (): Promise<void> =>
+  invoke("clear_browse_cache");

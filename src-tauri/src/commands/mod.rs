@@ -1,5 +1,6 @@
 pub mod backup_plan;
 pub mod browse;
+pub mod cache;
 pub mod repo;
 pub mod snapshot;
 
