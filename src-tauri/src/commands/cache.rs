@@ -1,5 +1,8 @@
 use std::sync::{Arc, Mutex};
+use std::str::FromStr;
 
+use chrono::Local;
+use cron::Schedule as CronSchedule;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -804,6 +807,37 @@ impl AppDb {
                 })
             })
             .collect()
+    }
+
+    /// On startup, advance any overdue `next_run_at` values to the next future fire time.
+    /// This skips missed backups (app was closed) rather than running them all at once.
+    pub fn recalculate_overdue_schedules(&self, now: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, cron_expr FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at < ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map(params![now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        for (id, cron_expr) in rows {
+            let full = format!("0 {} *", cron_expr.trim());
+            if let Ok(sched) = CronSchedule::from_str(&full) {
+                if let Some(next) = sched.upcoming(Local).next() {
+                    let _ = conn.execute(
+                        "UPDATE schedules SET next_run_at = ?1 WHERE id = ?2",
+                        params![next.timestamp(), id],
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn record_schedule_run(&self, id: &str, ran_at: i64, next_run_at: Option<i64>) -> Result<(), String> {

@@ -17,7 +17,13 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let conn = Connection::open(data_dir.join("app_data.db"))?;
             cache::AppDb::init_schema(&conn)?;
-            app.manage(cache::AppDb::new(conn));
+            let app_db = cache::AppDb::new(conn);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let _ = app_db.recalculate_overdue_schedules(now);
+            app.manage(app_db);
             app.manage(cache::MasterKey::new());
             app.manage(cache::CopyHandle::new());
             scheduler::spawn(app.handle().clone());

@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Resty Desktop",
   "version": "0.1.0",
-  "identifier": "com.resticgui.app",
+  "identifier": "com.nraboy.restydesktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -15,8 +15,8 @@
         "title": "Resty Desktop",
         "width": 1280,
         "height": 720,
-        "minWidth": 800,
-        "minHeight": 600,
+        "minWidth": 1280,
+        "minHeight": 720,
         "backgroundColor": "#030712" 
       }
     ],

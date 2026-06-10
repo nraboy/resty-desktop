@@ -157,16 +157,39 @@ export default function BackupPlansPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                <Button variant="secondary" size="sm" onClick={() => navigate(`/backup-plans/${plan.id}`)}>
-                  Edit
-                </Button>
-                <Button size="sm" onClick={() => openBackupModal(plan)}>Backup Now</Button>
-                <button
-                  onClick={() => setDeleteTarget(plan)}
-                  className="text-gray-500 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded hover:bg-red-900/20"
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Edit plan"
+                  onClick={() => navigate(`/backup-plans/${plan.id}`)}
+                  className="text-gray-500 hover:text-blue-400"
                 >
-                  Delete
-                </button>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path d="M2.695 14.763l-1.262 3.154a.5.5 0 00.65.65l3.155-1.262a4 4 0 001.343-.885L17.5 5.5a2.121 2.121 0 00-3-3L3.58 13.42a4 4 0 00-.885 1.343z" />
+                  </svg>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Run backup now"
+                  onClick={() => openBackupModal(plan)}
+                  className="text-gray-500 hover:text-green-400"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path fillRule="evenodd" d="M2 10a8 8 0 1116 0 8 8 0 01-16 0zm6.39-2.908a.75.75 0 01.766.027l3.5 2.25a.75.75 0 010 1.262l-3.5 2.25A.75.75 0 018 12.25v-4.5a.75.75 0 01.39-.658z" clipRule="evenodd" />
+                  </svg>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Delete plan"
+                  onClick={() => setDeleteTarget(plan)}
+                  className="text-gray-500 hover:text-red-400"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193v-.443A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                  </svg>
+                </Button>
               </div>
             </div>
           ))}
@@ -225,46 +248,46 @@ export default function BackupPlansPage() {
               )}
             </div>
 
-            {backupRunning && (
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs text-gray-400">
-                  <span>
-                    {progress
-                      ? `${progress.filesDone.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`
-                      : "Starting…"}
-                  </span>
-                  <span>
-                    {progress && progress.secondsRemaining != null
-                      ? `~${formatSeconds(progress.secondsRemaining)} remaining`
-                      : progress
-                      ? `${formatSeconds(progress.secondsElapsed)} elapsed`
-                      : ""}
-                  </span>
-                </div>
-                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="bg-blue-500 h-2 rounded-full transition-all duration-500"
-                    style={{ width: `${((progress?.percentDone ?? 0) * 100).toFixed(1)}%` }}
-                  />
-                </div>
-                {progress && progress.currentFiles.length > 0 && (
-                  <p className="text-xs text-gray-500 font-mono truncate" title={progress.currentFiles[0]}>
-                    {progress.currentFiles[0]}
+            <div className="min-h-[76px] flex flex-col justify-center">
+              {backupRunning && (
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs text-gray-400">
+                    <span>
+                      {progress
+                        ? `${progress.filesDone.toLocaleString()} / ${progress.totalFiles.toLocaleString()} files`
+                        : "Starting…"}
+                    </span>
+                    <span>
+                      {progress && progress.secondsRemaining != null
+                        ? `~${formatSeconds(progress.secondsRemaining)} remaining`
+                        : progress
+                        ? `${formatSeconds(progress.secondsElapsed)} elapsed`
+                        : ""}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${((progress?.percentDone ?? 0) * 100).toFixed(1)}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 font-mono truncate" title={progress?.currentFiles[0] ?? ""}>
+                    {progress && progress.currentFiles.length > 0 ? progress.currentFiles[0] : " "}
                   </p>
-                )}
-              </div>
-            )}
+                </div>
+              )}
 
-            {backupError && (
-              <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300 font-mono whitespace-pre-wrap">
-                {backupError}
-              </div>
-            )}
-            {backupDone && (
-              <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
-                Backup completed successfully.
-              </div>
-            )}
+              {backupError && (
+                <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300 font-mono whitespace-pre-wrap">
+                  {backupError}
+                </div>
+              )}
+              {backupDone && (
+                <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
+                  Backup completed successfully.
+                </div>
+              )}
+            </div>
 
             <div className="flex justify-end gap-2 pt-1">
               {backupDone || backupError ? (
