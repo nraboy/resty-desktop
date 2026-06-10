@@ -444,19 +444,22 @@ export default function RepositoriesPage() {
             </p>
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-300 mb-2">Destination Repository</label>
-              <select
-                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
-                value={mirrorDestId}
-                onChange={(e) => setMirrorDestId(e.target.value)}
-                disabled={mirroring}
-              >
-                <option value="">Select a repository…</option>
-                {repos
-                  .filter((r) => r.id !== mirrorSource?.id)
-                  .map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
-                  ))}
-              </select>
+              <div className="relative">
+                <select
+                  className="w-full appearance-none px-3 py-2 pr-8 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
+                  value={mirrorDestId}
+                  onChange={(e) => setMirrorDestId(e.target.value)}
+                  disabled={mirroring}
+                >
+                  <option value="">Select a repository…</option>
+                  {repos
+                    .filter((r) => r.id !== mirrorSource?.id)
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
+                    ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+              </div>
             </div>
             {mirrorError && (
               <p className="text-sm text-red-400 mb-3">{mirrorError}</p>

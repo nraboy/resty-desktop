@@ -600,19 +600,22 @@ export default function SnapshotsPage() {
             </p>
             <div className="mb-4">
               <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider font-medium">Destination repository</label>
-              <select
-                value={copyDestRepoId}
-                onChange={(e) => setCopyDestRepoId(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={copying}
-              >
-                <option value="">Select a repository…</option>
-                {allRepos
-                  .filter((r) => r.id !== repoId)
-                  .map((r) => (
-                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                  ))}
-              </select>
+              <div className="relative">
+                <select
+                  value={copyDestRepoId}
+                  onChange={(e) => setCopyDestRepoId(e.target.value)}
+                  className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={copying}
+                >
+                  <option value="">Select a repository…</option>
+                  {allRepos
+                    .filter((r) => r.id !== repoId)
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
+                    ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+              </div>
             </div>
             {copying && (
               <div className="mb-4">
