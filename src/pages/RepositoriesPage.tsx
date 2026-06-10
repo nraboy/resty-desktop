@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   addRepo,
@@ -30,6 +30,7 @@ function formatBytes(bytes: number): string {
 
 export default function RepositoriesPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [statsMap, setStatsMap] = useState<Record<string, ResticStats | null>>({});
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
@@ -63,6 +64,13 @@ export default function RepositoriesPage() {
   useEffect(() => {
     load().then(fetchStatsForLocal);
   }, []);
+
+  useEffect(() => {
+    if (searchParams.get("action") === "new-repo") {
+      openModal("init");
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams]);
 
   const handleRefreshRow = async (e: React.MouseEvent, repo: Repository) => {
     e.stopPropagation();
@@ -391,15 +399,17 @@ export default function RepositoriesPage() {
           )}
           {error && <p className="text-sm text-red-400">{error}</p>}
           <div className="flex items-center justify-between pt-2">
-            <Button type="button" variant="secondary" loading={testing} onClick={handleTest}>
-              Test Connection
-            </Button>
-            <div className="flex gap-2">
+            {modalMode === "add" && (
+              <Button type="button" variant="secondary" loading={testing} onClick={handleTest}>
+                Test Connection
+              </Button>
+            )}
+            <div className="flex gap-2 ml-auto">
               <Button variant="secondary" type="button" onClick={() => setModalMode(null)}>
                 Cancel
               </Button>
               <Button type="submit" loading={loading}>
-                {modalMode === "init" ? "Create & Init" : "Open"}
+                {modalMode === "init" ? "Create" : "Open"}
               </Button>
             </div>
           </div>

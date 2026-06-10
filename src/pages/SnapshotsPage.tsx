@@ -241,9 +241,6 @@ export default function SnapshotsPage() {
 
   return (
     <div className="p-6">
-      <Button variant="ghost" size="sm" onClick={() => navigate("/")} className="mb-2">
-        ← Repositories
-      </Button>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Snapshots</h1>

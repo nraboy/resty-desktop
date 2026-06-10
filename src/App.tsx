@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import SnapshotsPage from "./pages/SnapshotsPage";
@@ -11,18 +12,51 @@ import ScheduleEditPage from "./pages/ScheduleEditPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState } from "./lib/invoke";
+
+function MenuEventHandler() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const unlistenNewRepo = listen("menu:new-repository", () => {
+      navigate("/?action=new-repo");
+    });
+    const unlistenNewPlan = listen("menu:new-backup-plan", () => {
+      navigate("/backup-plans/new");
+    });
+    const unlistenSettings = listen("menu:settings", () => {
+      navigate("/settings");
+    });
+    return () => {
+      unlistenNewRepo.then((fn) => fn());
+      unlistenNewPlan.then((fn) => fn());
+      unlistenSettings.then((fn) => fn());
+    };
+  }, [navigate]);
+  return null;
+}
 
 type AuthState = "loading" | "setup" | "locked" | "unlocked";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("loading");
+  const [menuResetTriggered, setMenuResetTriggered] = useState(false);
 
   useEffect(() => {
     isAppSetup()
       .then((setup) => setAuthState(setup ? "locked" : "setup"))
       .catch(() => setAuthState("setup"));
   }, []);
+
+  useEffect(() => {
+    if (authState === "loading") return;
+    setMenuAuthState(authState === "unlocked").catch(() => {});
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== "locked") return;
+    const unlisten = listen("menu:reset-app", () => setMenuResetTriggered(true));
+    return () => { unlisten.then((fn) => fn()); };
+  }, [authState]);
 
   if (authState === "loading") {
     return (
@@ -49,12 +83,15 @@ export default function App() {
         onSuccess={() => setAuthState("unlocked")}
         onSubmit={(password) => unlockApp(password)}
         onReset={() => setAuthState("setup")}
+        openResetModal={menuResetTriggered}
+        onResetModalOpened={() => setMenuResetTriggered(false)}
       />
     );
   }
 
   return (
     <BrowserRouter>
+      <MenuEventHandler />
       <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
         <Sidebar />
         <main className="flex-1 overflow-y-auto">

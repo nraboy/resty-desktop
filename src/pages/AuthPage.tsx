@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -9,9 +9,11 @@ interface Props {
   onSuccess: () => void;
   onSubmit: (password: string) => Promise<void>;
   onReset?: () => void;
+  openResetModal?: boolean;
+  onResetModalOpened?: () => void;
 }
 
-export default function AuthPage({ mode, onSuccess, onSubmit, onReset }: Props) {
+export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openResetModal, onResetModalOpened }: Props) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
@@ -23,6 +25,13 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset }: Props) 
   const [resetError, setResetError] = useState("");
 
   const isSetup = mode === "setup";
+
+  useEffect(() => {
+    if (openResetModal) {
+      openResetModalFn();
+      onResetModalOpened?.();
+    }
+  }, [openResetModal]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,7 +74,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset }: Props) 
     }
   };
 
-  const openResetModal = () => {
+  const openResetModalFn = () => {
     setResetConfirm("");
     setResetError("");
     setShowResetModal(true);
@@ -121,7 +130,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset }: Props) 
           <div className="mt-5 text-center">
             <button
               className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
-              onClick={openResetModal}
+              onClick={openResetModalFn}
             >
               Forgot your password?
             </button>

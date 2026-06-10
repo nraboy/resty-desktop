@@ -6,6 +6,9 @@ import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository
 export const isAppSetup = (): Promise<boolean> =>
   invoke("is_app_setup");
 
+export const setMenuAuthState = (unlocked: boolean): Promise<void> =>
+  invoke("set_menu_auth_state", { unlocked });
+
 export const setupMasterPassword = (password: string): Promise<void> =>
   invoke("setup_master_password", { password });
 
