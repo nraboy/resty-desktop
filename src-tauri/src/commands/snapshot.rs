@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
-use super::cache::{AppDb, CopyHandle, MasterKey, MirrorHandle, RetentionPolicy};
+use super::cache::{AppDb, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
 use super::repo::run_restic_with_path;
 
 #[derive(Clone, Serialize)]
@@ -319,6 +319,13 @@ pub async fn copy_snapshot(
     let child_arc = std::sync::Arc::clone(&copy_handle.child);
     let cancelled_arc = std::sync::Arc::clone(&copy_handle.cancelled);
 
+    // Stash credentials so we can run `restic unlock` after a cancel-kill.
+    let src_path_for_unlock = src_repo.path.clone();
+    let src_pass_for_unlock = src_repo.password.clone();
+    let dst_path_for_unlock = dest_repo.path.clone();
+    let dst_pass_for_unlock = dest_repo.password.clone();
+    let restic_path_for_unlock = restic_path.clone();
+
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
@@ -374,6 +381,16 @@ pub async fn copy_snapshot(
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
         let _ = db.evict_stats(&dest_repo_id);
+    } else if copy_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        // The process was killed via SIGKILL and left stale locks on both repos.
+        // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
+            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
+            let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+            let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+        })
+        .await;
     }
     result
 }
@@ -403,6 +420,13 @@ pub async fn mirror_repo(
     mirror_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&mirror_handle.child);
     let cancelled_arc = std::sync::Arc::clone(&mirror_handle.cancelled);
+
+    // Stash credentials so we can run `restic unlock` after a cancel-kill.
+    let src_path_for_unlock = src_repo.path.clone();
+    let src_pass_for_unlock = src_repo.password.clone();
+    let dst_path_for_unlock = dest_repo.path.clone();
+    let dst_pass_for_unlock = dest_repo.password.clone();
+    let restic_path_for_unlock = restic_path.clone();
 
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -457,6 +481,16 @@ pub async fn mirror_repo(
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
         let _ = db.evict_stats(&dest_repo_id);
+    } else if mirror_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        // The process was killed via SIGKILL and left stale locks on both repos.
+        // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
+            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
+            let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+            let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+        })
+        .await;
     }
     result
 }

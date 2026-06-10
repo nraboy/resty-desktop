@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { listFiles, listRepos, restorePath } from "../lib/invoke";
+import { listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
 import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import Button from "../components/Button";
@@ -47,6 +47,10 @@ export default function BrowsePage() {
   const [targetDir, setTargetDir] = useState("/tmp/restic-restore");
   const [restoring, setRestoring] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
+  const [tags, setTags] = useState<string[]>(snapshot?.tags ?? []);
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [newTag, setNewTag] = useState("");
+  const [tagging, setTagging] = useState(false);
 
   useEffect(() => {
     if (!repoId) return;
@@ -92,6 +96,31 @@ export default function BrowsePage() {
       }),
   [entries, showHidden]);
 
+  const handleAddTag = async () => {
+    if (!repoId || !snapshotId || !newTag.trim()) return;
+    setTagging(true);
+    try {
+      await tagSnapshot(repoId, snapshotId, [newTag.trim()], []);
+      setTags((prev) => [...prev, newTag.trim()]);
+      setNewTag("");
+      setShowTagModal(false);
+    } catch (err: any) {
+      setError(String(err));
+    } finally {
+      setTagging(false);
+    }
+  };
+
+  const handleRemoveTag = async (tag: string) => {
+    if (!repoId || !snapshotId) return;
+    try {
+      await tagSnapshot(repoId, snapshotId, [], [tag]);
+      setTags((prev) => prev.filter((t) => t !== tag));
+    } catch (err: any) {
+      setError(String(err));
+    }
+  };
+
   const handleRestore = async () => {
     if (!repoId || !snapshotId || !restoreTarget) return;
     setRestoring(true);
@@ -122,17 +151,29 @@ export default function BrowsePage() {
         </Button>
         <h1 className="text-xl font-semibold text-gray-100 mt-3">Browse Snapshot</h1>
         {repo && (
-          <div className="flex items-center gap-2 mt-0.5">
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <p className="text-sm text-gray-400">{repo.name}</p>
-            {snapshot?.tags && snapshot.tags.length > 0 && (
-              <div className="flex items-center gap-1">
-                {snapshot.tags.map((tag) => (
-                  <span key={tag} className="px-1.5 py-0.5 text-xs rounded bg-gray-800 text-gray-400 border border-gray-700">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            )}
+            <div className="flex items-center gap-1 flex-wrap">
+              {tags.map((tag) => (
+                <span key={tag} className="flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 text-xs rounded bg-gray-800 text-gray-400 border border-gray-700">
+                  {tag}
+                  <button
+                    onClick={() => handleRemoveTag(tag)}
+                    className="text-gray-600 hover:text-red-400 transition-colors leading-none"
+                    title="Remove tag"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button
+                onClick={() => { setNewTag(""); setShowTagModal(true); }}
+                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500 transition-colors"
+                title="Add tag"
+              >
+                + tag
+              </button>
+            </div>
           </div>
         )}
         <p className="text-xs text-gray-600 font-mono mt-0.5">{snapshotId}</p>
@@ -245,6 +286,27 @@ export default function BrowsePage() {
           <div className="py-10 text-center text-gray-500 text-sm">Empty directory</div>
         )}
       </div>
+
+      <Modal
+        title="Add Tag"
+        open={showTagModal}
+        onClose={() => setShowTagModal(false)}
+      >
+        <p className="text-sm text-gray-300 mb-4">
+          Add a tag to snapshot <span className="font-mono text-blue-400">{snapshotId?.slice(0, 8)}</span>
+        </p>
+        <Input
+          label="Tag"
+          value={newTag}
+          onChange={(e) => setNewTag(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleAddTag(); }}
+          placeholder="e.g. weekly"
+        />
+        <div className="flex justify-end gap-2 mt-4">
+          <Button variant="secondary" onClick={() => setShowTagModal(false)}>Cancel</Button>
+          <Button loading={tagging} onClick={handleAddTag}>Add</Button>
+        </div>
+      </Modal>
 
       <Modal
         title="Restore"

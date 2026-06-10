@@ -1,8 +1,9 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_store::StoreExt;
 
-use super::cache::{AppDb, BackupPlan, MasterKey};
+use super::cache::{AppDb, BackupPlan, FullRepository, MasterKey};
 use super::crypto;
+use super::repo::run_restic_with_path;
 
 const VERIFICATION_PLAINTEXT: &[u8] = b"restic-gui-v1-ok";
 
@@ -38,6 +39,7 @@ pub async fn setup_master_password(
 /// Called on subsequent launches. Verifies password and loads key into memory.
 #[tauri::command]
 pub async fn unlock_app(
+    app: AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     password: String,
@@ -51,6 +53,36 @@ pub async fn unlock_app(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let _ = db.recalculate_overdue_schedules(now);
+
+    // Clean up any stale locks left by a previous crash or force-quit.
+    // Runs in the background so unlock_app returns immediately.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let db = app_clone.state::<AppDb>();
+        let master_key = app_clone.state::<MasterKey>();
+        let key = match master_key.get() {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+        let repos = match db.list_repos() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let restic_path = super::get_restic_path(&db);
+        for repo in repos {
+            if let Ok(full) = db.get_full_repo(&repo.id, &key) {
+                let path = full.path.clone();
+                let pass = full.password.clone();
+                let rp = restic_path.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    let fr = FullRepository { path, password: pass };
+                    let _ = run_restic_with_path(&fr, vec!["unlock"], &rp);
+                })
+                .await;
+            }
+        }
+    });
+
     Ok(())
 }
 
