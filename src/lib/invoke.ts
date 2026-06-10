@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Snapshot } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -138,6 +138,26 @@ export const saveBackupPlan = (plan: BackupPlan): Promise<void> =>
 
 export const removeBackupPlan = (planId: string): Promise<void> =>
   invoke("remove_backup_plan", { planId });
+
+// ── schedules ─────────────────────────────────────────────────────────────
+
+export const listSchedules = (): Promise<Schedule[]> =>
+  invoke("list_schedules");
+
+export const saveSchedule = (schedule: Schedule): Promise<void> =>
+  invoke("save_schedule", { schedule });
+
+export const removeSchedule = (scheduleId: string): Promise<void> =>
+  invoke("remove_schedule", { scheduleId });
+
+export const toggleSchedule = (scheduleId: string, enabled: boolean): Promise<void> =>
+  invoke("toggle_schedule", { scheduleId, enabled });
+
+export const runScheduleNow = (scheduleId: string): Promise<void> =>
+  invoke("run_schedule_now", { scheduleId });
+
+export const describeCronExpr = (cronExpr: string): Promise<string> =>
+  invoke("describe_cron_expr", { cronExpr });
 
 // ── cache ─────────────────────────────────────────────────────────────────
 

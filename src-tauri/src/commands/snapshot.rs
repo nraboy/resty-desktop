@@ -110,20 +110,19 @@ pub async fn tag_snapshot(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn run_backup(
-    app: tauri::AppHandle,
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    repo_id: String,
-    plan_id: Option<String>,
+pub async fn execute_backup(
+    app: &tauri::AppHandle,
+    db: &AppDb,
+    master_key: &MasterKey,
+    repo_id: &str,
+    plan_id: Option<&str>,
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
 ) -> Result<String, String> {
     let key = master_key.get()?;
-    let repo = db.get_full_repo(&repo_id, &key)?;
-    let restic_path = super::get_restic_path(&db);
+    let repo = db.get_full_repo(repo_id, &key)?;
+    let restic_path = super::get_restic_path(db);
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -224,7 +223,7 @@ pub async fn run_backup(
 
     match result {
         Ok(ref stdout) => {
-            let _ = db.evict_stats(&repo_id);
+            let _ = db.evict_stats(repo_id);
 
             let summary = stdout
                 .lines()
@@ -241,7 +240,7 @@ pub async fn run_backup(
                 let new_json = run_restic_with_path(&repo, vec!["snapshots", "--json", &id], &restic_path).ok()?;
                 let mut new_snaps: Vec<serde_json::Value> = serde_json::from_str(&new_json).ok()?;
                 let existing: Vec<serde_json::Value> = db
-                    .get_snapshots(&repo_id)
+                    .get_snapshots(repo_id)
                     .ok()
                     .flatten()
                     .and_then(|j| serde_json::from_str(&j).ok())
@@ -251,13 +250,13 @@ pub async fn run_backup(
             });
 
             if let Some(json) = appended {
-                let _ = db.set_snapshots(&repo_id, &json);
+                let _ = db.set_snapshots(repo_id, &json);
             } else {
-                let _ = db.evict_snapshots(&repo_id);
+                let _ = db.evict_snapshots(repo_id);
             }
 
             let _ = db.log_backup(
-                &history_id, &repo_id, plan_id.as_deref(), snapshot_id.as_deref(),
+                &history_id, repo_id, plan_id, snapshot_id.as_deref(),
                 started_at, duration, files_new, files_changed, bytes_added, None,
             );
 
@@ -274,7 +273,7 @@ pub async fn run_backup(
         }
         Err(ref err) => {
             let _ = db.log_backup(
-                &history_id, &repo_id, plan_id.as_deref(), None,
+                &history_id, repo_id, plan_id, None,
                 started_at, duration, 0, 0, 0, Some(err.as_str()),
             );
 
@@ -286,6 +285,20 @@ pub async fn run_backup(
             Err(err.clone())
         }
     }
+}
+
+#[tauri::command]
+pub async fn run_backup(
+    app: tauri::AppHandle,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    plan_id: Option<String>,
+    paths: Vec<String>,
+    tags: Vec<String>,
+    excludes: Vec<String>,
+) -> Result<String, String> {
+    execute_backup(&app, &db, &master_key, &repo_id, plan_id.as_deref(), paths, tags, excludes).await
 }
 
 #[tauri::command]

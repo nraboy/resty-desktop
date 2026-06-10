@@ -92,3 +92,16 @@ export interface BackupPlan {
   excludes: string[];
   retention?: RetentionPolicy;
 }
+
+export interface Schedule {
+  id: string;
+  name: string;
+  planIds: string[];
+  cronExpr: string;
+  enabled: boolean;
+  lastRunAt?: number;
+  nextRunAt?: number;
+  createdAt: number;
+}
+
+export type ScheduleFrequency = "hourly" | "daily" | "weekly" | "monthly" | "custom";

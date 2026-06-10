@@ -1,6 +1,7 @@
 mod commands;
+mod scheduler;
 
-use commands::{auth, backup_plan, browse, cache, repo, snapshot};
+use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot};
 use rusqlite::Connection;
 use tauri::Manager;
 
@@ -19,6 +20,7 @@ pub fn run() {
             app.manage(cache::AppDb::new(conn));
             app.manage(cache::MasterKey::new());
             app.manage(cache::CopyHandle::new());
+            scheduler::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -60,6 +62,13 @@ pub fn run() {
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,
             backup_plan::remove_backup_plan,
+            // schedules
+            schedule::list_schedules,
+            schedule::save_schedule,
+            schedule::remove_schedule,
+            schedule::toggle_schedule,
+            schedule::run_schedule_now,
+            schedule::describe_cron_expr,
             // cache
             cache::clear_browse_cache,
             cache::list_backup_history,

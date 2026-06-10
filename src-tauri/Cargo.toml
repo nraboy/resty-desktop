@@ -25,3 +25,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
+cron = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["time"] }

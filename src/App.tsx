@@ -6,6 +6,8 @@ import SnapshotsPage from "./pages/SnapshotsPage";
 import BrowsePage from "./pages/BrowsePage";
 import BackupPlansPage from "./pages/BackupPlansPage";
 import BackupPlanEditPage from "./pages/BackupPlanEditPage";
+import SchedulesPage from "./pages/SchedulesPage";
+import ScheduleEditPage from "./pages/ScheduleEditPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
@@ -62,6 +64,8 @@ export default function App() {
             <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
             <Route path="/backup-plans" element={<BackupPlansPage />} />
             <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
+            <Route path="/schedules" element={<SchedulesPage />} />
+            <Route path="/schedules/:scheduleId" element={<ScheduleEditPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>

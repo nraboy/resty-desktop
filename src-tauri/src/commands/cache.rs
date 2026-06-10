@@ -54,6 +54,19 @@ pub struct BackupPlan {
     pub retention: Option<RetentionPolicy>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub id: String,
+    pub name: String,
+    pub plan_ids: Vec<String>,
+    pub cron_expr: String,
+    pub enabled: bool,
+    pub last_run_at: Option<i64>,
+    pub next_run_at: Option<i64>,
+    pub created_at: i64,
+}
+
 // ── internal type (never serialised) ───────────────────────────────────────
 
 pub struct FullRepository {
@@ -176,6 +189,16 @@ impl AppDb {
                 files_changed    INTEGER NOT NULL DEFAULT 0,
                 bytes_added      INTEGER NOT NULL DEFAULT 0,
                 error            TEXT
+            );
+            CREATE TABLE IF NOT EXISTS schedules (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                plan_ids_json TEXT NOT NULL,
+                cron_expr     TEXT NOT NULL,
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                last_run_at   INTEGER,
+                next_run_at   INTEGER,
+                created_at    INTEGER NOT NULL
             );",
         )
     }
@@ -660,6 +683,191 @@ impl AppDb {
         Ok(())
     }
 
+    // ── schedules ────────────────────────────────────────────────────────────
+
+    pub fn list_schedules(&self) -> Result<Vec<Schedule>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at
+                 FROM schedules ORDER BY created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        rows.into_iter()
+            .map(|(id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at)| {
+                Ok(Schedule {
+                    id,
+                    name,
+                    plan_ids: serde_json::from_str(&plan_ids_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    cron_expr,
+                    enabled: enabled != 0,
+                    last_run_at,
+                    next_run_at,
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn save_schedule(&self, s: &Schedule) -> Result<(), String> {
+        let plan_ids_json = serde_json::to_string(&s.plan_ids).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO schedules
+             (id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                s.id,
+                s.name,
+                plan_ids_json,
+                s.cron_expr,
+                s.enabled as i64,
+                s.last_run_at,
+                s.next_run_at,
+                s.created_at
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn remove_schedule(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM schedules WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_schedule_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            params![enabled as i64, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_due_schedules(&self, now: i64) -> Result<Vec<Schedule>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at
+                 FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        rows.into_iter()
+            .map(|(id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at)| {
+                Ok(Schedule {
+                    id,
+                    name,
+                    plan_ids: serde_json::from_str(&plan_ids_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    cron_expr,
+                    enabled: enabled != 0,
+                    last_run_at,
+                    next_run_at,
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn record_schedule_run(&self, id: &str, ran_at: i64, next_run_at: Option<i64>) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE schedules SET last_run_at = ?1, next_run_at = ?2 WHERE id = ?3",
+            params![ran_at, next_run_at, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_plans_for_ids(&self, ids: &[String]) -> Result<Vec<BackupPlan>, String> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json
+             FROM backup_plans WHERE id IN ({})",
+            placeholders
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        rows.into_iter()
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json)| {
+                Ok(BackupPlan {
+                    id,
+                    name,
+                    repo_id,
+                    paths: serde_json::from_str(&paths_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    tags: serde_json::from_str(&tags_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    excludes: serde_json::from_str(&excludes_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    retention: retention_json
+                        .as_deref()
+                        .map(|s| serde_json::from_str(s))
+                        .transpose()
+                        .map_err(|e: serde_json::Error| e.to_string())?,
+                })
+            })
+            .collect()
+    }
+
     // ── global clear ─────────────────────────────────────────────────────────
 
     pub fn clear_cache(&self) -> Result<(), String> {
@@ -686,6 +894,7 @@ impl AppDb {
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;
              DELETE FROM backup_history;
+             DELETE FROM schedules;
              COMMIT;",
         )
         .map_err(|e| e.to_string())?;
