@@ -109,6 +109,9 @@ export const mirrorRepo = (srcRepoId: string, destRepoId: string): Promise<void>
 export const cancelMirror = (): Promise<void> =>
   invoke("cancel_mirror");
 
+export const cancelBackup = (): Promise<void> =>
+  invoke("cancel_backup");
+
 export const forgetByPlan = (
   repoId: string,
   tags: string[],

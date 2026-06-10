@@ -53,7 +53,9 @@ src/
                               #   per-snapshot copy to another repo with cancellation support
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
-    BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans
+    BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
+                              #   backup modal with streaming progress bar (backup:progress events), cancellation support
+                              #   (cancel_backup), and completion/error confirmation UI
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
     SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately
@@ -68,6 +70,8 @@ src-tauri/
   src/
     main.rs                   # Calls restic_gui_lib::run()
     lib.rs                    # Tauri builder; registers all commands; opens app_data.db, initialises schema, manages AppDb + MasterKey as Tauri state;
+                              #   manages CopyHandle, MirrorHandle, BackupHandle as Tauri state;
+                              #   calls recalculate_overdue_schedules at startup to skip missed schedule runs;
                               #   builds native menu bar (MenuState) with "Resty Desktop" and "File" submenus; items are auth-aware
                               #   (Settings/New Repository/New Backup Plan shown when unlocked; Reset Application shown when locked);
                               #   menu events emitted as menu:new-repository, menu:new-backup-plan, menu:settings, menu:reset-app Tauri events;
@@ -82,20 +86,27 @@ src-tauri/
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
-                              #   run_backup, forget_by_plan, unlock_repo,
+                              #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
+                              #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
+                              #   forget_by_plan, unlock_repo,
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
-                              #   both cancel_copy and cancel_mirror run restic unlock on both repos after SIGKILL to clear stale locks
+                              #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks
       browse.rs               # list_files, restore_path, restore_snapshot
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
-                              #   run_schedule_now, describe_cron_expr; cron helpers next_fire_time + describe_cron
+                              #   run_schedule_now (accepts BackupHandle, calls execute_backup for each plan in the schedule),
+                              #   describe_cron_expr; cron helpers next_fire_time + describe_cron
       cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory); CopyHandle (in-memory, for cancel);
                               #   MirrorHandle (in-memory, for mirror cancellation);
+                              #   BackupHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for backup cancellation);
+                              #   AppDb::recalculate_overdue_schedules — advances overdue next_run_at to next future fire time at startup (skips missed backups);
                               #   Repository, FullRepository, BackupPlan, RetentionPolicy, BackupHistoryEntry,
                               #   Schedule types; clear_browse_cache, list_backup_history commands
   scheduler.rs                # Background tokio task (60s tick) that calls execute_backup for due schedules;
-                              #   skips silently when app is locked; updates last_run_at and next_run_at after each run
+                              #   acquires BackupHandle state; skips silently when app is locked;
+                              #   updates last_run_at and next_run_at after each run;
+                              #   guards against overlapping ticks with an AtomicBool running flag
 ```
 
 ## Routes
@@ -118,7 +129,7 @@ src-tauri/
 - All commands set both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
-- `run_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is used to extract `snapshot_id` and stats. Returns the raw stdout as a `String`. On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`.
+- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is used to extract `snapshot_id` and stats. Returns the raw stdout as a `String`. On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks.
 - `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.

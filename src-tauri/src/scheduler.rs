@@ -5,7 +5,7 @@ use std::sync::{
 
 use tauri::Manager;
 
-use crate::commands::cache::{AppDb, MasterKey};
+use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::schedule::next_fire_time;
 use crate::commands::snapshot::execute_backup;
 
@@ -38,6 +38,7 @@ async fn tick(app: &tauri::AppHandle) {
 
     let db = app.state::<AppDb>();
     let master_key = app.state::<MasterKey>();
+    let backup_handle = app.state::<BackupHandle>();
 
     // Skip silently when app is locked
     if master_key.get().is_err() {
@@ -60,8 +61,9 @@ async fn tick(app: &tauri::AppHandle) {
                 app,
                 &db,
                 &master_key,
+                &*backup_handle,
                 &plan.repo_id,
-                Some(&plan.id),
+                Some(plan.id.as_str()),
                 plan.paths,
                 plan.tags,
                 plan.excludes,

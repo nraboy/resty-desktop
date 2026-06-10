@@ -3,7 +3,7 @@ use chrono::Local;
 use std::str::FromStr;
 use tauri::State;
 
-use super::cache::{AppDb, MasterKey, Schedule};
+use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
 use super::snapshot::execute_backup;
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
@@ -86,6 +86,7 @@ pub async fn run_schedule_now(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    backup_handle: State<'_, BackupHandle>,
     schedule_id: String,
 ) -> Result<(), String> {
     let schedules = db.list_schedules()?;
@@ -98,8 +99,8 @@ pub async fn run_schedule_now(
     let mut errors: Vec<String> = Vec::new();
     for plan in plans {
         if let Err(e) = execute_backup(
-            &app, &db, &master_key,
-            &plan.repo_id, Some(&plan.id),
+            &app, &db, &master_key, &backup_handle,
+            &plan.repo_id, Some(plan.id.as_str()),
             plan.paths, plan.tags, plan.excludes,
         )
         .await

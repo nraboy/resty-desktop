@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
-use super::cache::{AppDb, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
+use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
 use super::repo::run_restic_with_path;
 
 #[derive(Clone, Serialize)]
@@ -114,6 +114,7 @@ pub async fn execute_backup(
     app: &tauri::AppHandle,
     db: &AppDb,
     master_key: &MasterKey,
+    backup_handle: &BackupHandle,
     repo_id: &str,
     plan_id: Option<&str>,
     paths: Vec<String>,
@@ -149,7 +150,14 @@ pub async fn execute_backup(
     let app_inner = app.clone();
     let repo_path = repo.path.clone();
     let repo_password = repo.password.clone();
+    let repo_path_for_unlock = repo.path.clone();
+    let repo_pass_for_unlock = repo.password.clone();
     let restic_path_inner = restic_path.clone();
+    let restic_path_for_unlock = restic_path.clone();
+
+    backup_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let child_arc = std::sync::Arc::clone(&backup_handle.child);
+    let cancelled_arc = std::sync::Arc::clone(&backup_handle.cancelled);
 
     let result: Result<String, String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -172,10 +180,17 @@ pub async fn execute_backup(
         });
 
         let stdout = child.stdout.take().unwrap();
+
+        // Store child so cancel_backup can reach it.
+        *child_arc.lock().unwrap() = Some(child);
+
         let reader = BufReader::new(stdout);
         let mut all_lines: Vec<String> = Vec::new();
 
         for line in reader.lines() {
+            if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             let line = line.map_err(|e| e.to_string())?;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 if v["message_type"].as_str() == Some("status") {
@@ -198,8 +213,15 @@ pub async fn execute_backup(
             all_lines.push(line);
         }
 
-        let status = child.wait().map_err(|e| e.to_string())?;
+        let status = match child_arc.lock().unwrap().take() {
+            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+            None => return Err("cancelled".to_string()),
+        };
         let stderr_str = stderr_thread.join().unwrap_or_default();
+
+        if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("cancelled".to_string());
+        }
 
         if status.success() {
             Ok(all_lines.join("\n"))
@@ -210,6 +232,13 @@ pub async fn execute_backup(
     })
     .await
     .map_err(|e| e.to_string())?;
+
+    if backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock };
+            let _ = run_restic_with_path(&repo, vec!["unlock"], &restic_path_for_unlock);
+        });
+    }
 
     let duration = started.elapsed().as_secs_f64();
 
@@ -292,13 +321,25 @@ pub async fn run_backup(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    backup_handle: State<'_, BackupHandle>,
     repo_id: String,
     plan_id: Option<String>,
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &repo_id, plan_id.as_deref(), paths, tags, excludes).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_id, plan_id.as_deref(), paths, tags, excludes).await
+}
+
+#[tauri::command]
+pub async fn cancel_backup(backup_handle: State<'_, BackupHandle>) -> Result<(), String> {
+    backup_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut guard) = backup_handle.child.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

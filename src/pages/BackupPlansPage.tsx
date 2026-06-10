@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
+import { cancelBackup, forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
 import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -25,6 +25,7 @@ export default function BackupPlansPage() {
 
   const [backupPlan, setBackupPlan] = useState<BackupPlan | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
+  const [backupCancelling, setBackupCancelling] = useState(false);
   const [backupError, setBackupError] = useState("");
   const [backupDone, setBackupDone] = useState(false);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
@@ -79,6 +80,7 @@ export default function BackupPlansPage() {
   const startBackup = async () => {
     if (!backupPlan) return;
     setBackupRunning(true);
+    setBackupCancelling(false);
     setBackupError("");
     setBackupDone(false);
     setProgress(null);
@@ -100,11 +102,15 @@ export default function BackupPlansPage() {
       }
       setBackupDone(true);
     } catch (err: any) {
-      setBackupError(String(err));
+      const msg = String(err);
+      if (!msg.includes("cancelled")) {
+        setBackupError(msg);
+      }
     } finally {
       unlisten();
       unlistenRef.current = null;
       setBackupRunning(false);
+      setBackupCancelling(false);
     }
   };
 
@@ -294,8 +300,21 @@ export default function BackupPlansPage() {
                 <Button variant="secondary" onClick={closeBackupModal}>Close</Button>
               ) : (
                 <>
-                  <Button variant="secondary" onClick={closeBackupModal} disabled={backupRunning}>Cancel</Button>
-                  <Button onClick={startBackup} loading={backupRunning}>
+                  {backupRunning ? (
+                    <Button
+                      variant="danger"
+                      disabled={backupCancelling}
+                      onClick={async () => {
+                        setBackupCancelling(true);
+                        await cancelBackup();
+                      }}
+                    >
+                      {backupCancelling ? "Stopping…" : "Stop Backup"}
+                    </Button>
+                  ) : (
+                    <Button variant="secondary" onClick={closeBackupModal}>Cancel</Button>
+                  )}
+                  <Button onClick={startBackup} loading={backupRunning} disabled={backupRunning}>
                     {backupRunning ? "Running…" : "Start Backup"}
                   </Button>
                 </>
