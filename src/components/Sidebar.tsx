@@ -69,8 +69,12 @@ export default function Sidebar() {
   return (
     <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
       <div className="px-4 py-4 border-b border-gray-800">
-        <h1 className="text-base font-bold text-white tracking-tight">Restic GUI</h1>
-        <p className="text-xs text-gray-500 mt-0.5">Backup Manager</p>
+        <div className="flex items-center gap-2">
+          <img src="/icon.svg" alt="" className="w-7 h-7 flex-shrink-0" />
+          <div>
+            <h1 className="text-base font-bold text-white tracking-tight">Resty Desktop</h1>
+          </div>
+        </div>
       </div>
 
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">

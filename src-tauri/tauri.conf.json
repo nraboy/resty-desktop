@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Restic GUI",
+  "productName": "Resty Desktop",
   "version": "0.1.0",
   "identifier": "com.resticgui.app",
   "build": {
@@ -12,11 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "Restic GUI",
+        "title": "Resty Desktop",
         "width": 1280,
         "height": 720,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "backgroundColor": "#030712" 
       }
     ],
     "security": {
