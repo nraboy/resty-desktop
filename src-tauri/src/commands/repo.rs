@@ -170,22 +170,28 @@ pub async fn check_repo(
     let duration_seconds = started.elapsed().as_secs_f64();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let mut errors: Vec<String> = Vec::new();
 
-    for line in stdout.lines() {
+    for line in stdout.lines().chain(stderr.lines()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v["message_type"].as_str() == Some("error") {
-                if let Some(msg) = v["error"]["message"].as_str() {
-                    errors.push(msg.to_string());
+            let msg = match v["message_type"].as_str() {
+                Some("error") => v["error"]["message"].as_str().map(str::to_string),
+                Some("exit_error") => v["message"].as_str().map(str::to_string),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                if !errors.contains(&m) {
+                    errors.push(m);
                 }
             }
         }
     }
 
     if !output.status.success() && errors.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if !stderr.is_empty() {
-            errors.push(stderr);
+        let raw = stderr.trim().to_string();
+        if !raw.is_empty() {
+            errors.push(raw);
         }
     }
 

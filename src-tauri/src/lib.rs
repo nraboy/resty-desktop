@@ -18,6 +18,7 @@ pub fn run() {
             cache::AppDb::init_schema(&conn)?;
             app.manage(cache::AppDb::new(conn));
             app.manage(cache::MasterKey::new());
+            app.manage(cache::CopyHandle::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -49,6 +50,8 @@ pub fn run() {
             snapshot::run_backup,
             snapshot::forget_by_plan,
             snapshot::unlock_repo,
+            snapshot::copy_snapshot,
+            snapshot::cancel_copy,
             // browse
             browse::list_files,
             browse::restore_path,

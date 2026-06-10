@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,22 @@ pub struct BackupPlan {
 pub struct FullRepository {
     pub path: String,
     pub password: String,
+}
+
+// ── copy cancellation handle ──────────────────────────────────────────────
+
+pub struct CopyHandle {
+    pub child: Arc<Mutex<Option<std::process::Child>>>,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CopyHandle {
+    pub fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
 }
 
 // ── in-memory master-key state ─────────────────────────────────────────────

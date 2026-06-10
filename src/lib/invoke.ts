@@ -90,6 +90,16 @@ export const runBackup = (
 export const unlockRepo = (repoId: string): Promise<void> =>
   invoke("unlock_repo", { repoId });
 
+export const copySnapshot = (
+  srcRepoId: string,
+  destRepoId: string,
+  snapshotId: string
+): Promise<void> =>
+  invoke("copy_snapshot", { srcRepoId, destRepoId, snapshotId });
+
+export const cancelCopy = (): Promise<void> =>
+  invoke("cancel_copy");
+
 export const forgetByPlan = (
   repoId: string,
   tags: string[],

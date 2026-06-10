@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { checkRepo, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import Button from "../components/Button";
@@ -26,6 +26,7 @@ export default function SnapshotsPage() {
   const navigate = useNavigate();
   const { repoId } = useParams<{ repoId: string }>();
   const [repo, setRepo] = useState<Repository | null>(null);
+  const [allRepos, setAllRepos] = useState<Repository[]>([]);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -47,10 +48,16 @@ export default function SnapshotsPage() {
   const [restoreDone, setRestoreDone] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
   const restoreUnlistenRef = useRef<(() => void) | null>(null);
+  const [copyTarget, setCopyTarget] = useState<Snapshot | null>(null);
+  const [copyDestRepoId, setCopyDestRepoId] = useState("");
+  const [copying, setCopying] = useState(false);
+  const [copyDone, setCopyDone] = useState(false);
+  const [copyCancelled, setCopyCancelled] = useState(false);
 
   useEffect(() => {
     if (!repoId) return;
     listRepos().then((repos) => {
+      setAllRepos(repos);
       const found = repos.find((r) => r.id === repoId) ?? null;
       setRepo(found);
     });
@@ -158,6 +165,25 @@ export default function SnapshotsPage() {
       setError(String(err));
     }
   }, [repoId, refresh]);
+
+  const handleCopy = async () => {
+    if (!repoId || !copyTarget || !copyDestRepoId) return;
+    setCopying(true);
+    setCopyCancelled(false);
+    try {
+      await copySnapshot(repoId, copyDestRepoId, copyTarget.id);
+      setCopyDone(true);
+    } catch (err: any) {
+      if (String(err).includes("cancelled")) {
+        setCopyCancelled(true);
+      } else {
+        setError(String(err));
+        setCopyTarget(null);
+      }
+    } finally {
+      setCopying(false);
+    }
+  };
 
   const handlePickRestoreDir = async () => {
     const dir = await openDialog({ directory: true, multiple: false });
@@ -322,6 +348,17 @@ export default function SnapshotsPage() {
                         </svg>
                       </button>
                       <button
+                        title="Copy to repository"
+                        onClick={() => { setCopyTarget(snap); setCopyDestRepoId(""); setCopyDone(false); }}
+                        className="p-1.5 rounded text-gray-400 hover:text-purple-400 hover:bg-gray-800 transition-colors"
+                        disabled={allRepos.filter((r) => r.id !== repoId).length === 0}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                          <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z" />
+                          <path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z" />
+                        </svg>
+                      </button>
+                      <button
                         title="Delete snapshot"
                         onClick={() => setDeleteTarget(snap)}
                         className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-gray-800 transition-colors"
@@ -413,7 +450,7 @@ export default function SnapshotsPage() {
                 </div>
                 <div className="mb-4 space-y-2">
                   {checkResult.errors.map((err, i) => (
-                    <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 break-all">
+                    <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 whitespace-pre-wrap break-all">
                       {err}
                     </div>
                   ))}
@@ -511,6 +548,91 @@ export default function SnapshotsPage() {
               <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
               <Button onClick={handleRestore} loading={restoring} disabled={!restoreDir}>
                 Restore
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+      <Modal
+        title="Copy Snapshot"
+        open={copyTarget !== null}
+        onClose={() => { if (!copying) { setCopyTarget(null); setCopyDone(false); setCopyCancelled(false); } }}
+      >
+        {copyDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              Copy complete
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Snapshot <span className="font-mono text-blue-400">{copyTarget?.short_id}</span> was copied to{" "}
+              <span className="text-gray-300">{allRepos.find((r) => r.id === copyDestRepoId)?.name ?? copyDestRepoId}</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setCopyTarget(null); setCopyDone(false); }}>Close</Button>
+            </div>
+          </>
+        ) : copyCancelled ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-yellow-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+              Copy cancelled
+            </div>
+            <p className="text-sm text-gray-400 mb-3">
+              The copy was stopped before completing. No snapshot was written to the destination.
+            </p>
+            <p className="text-xs text-gray-500 mb-4">
+              Any partially transferred data will remain as unreferenced blobs until you run{" "}
+              <span className="font-mono text-gray-400">restic prune</span> on{" "}
+              <span className="text-gray-300">{allRepos.find((r) => r.id === copyDestRepoId)?.name ?? "the destination"}</span>.
+              You may also need to unlock that repository.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setCopyTarget(null); setCopyCancelled(false); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Copy snapshot <span className="font-mono text-blue-400">{copyTarget?.short_id}</span> to another repository.
+              Only data not already present in the destination will be transferred.
+            </p>
+            <div className="mb-4">
+              <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider font-medium">Destination repository</label>
+              <select
+                value={copyDestRepoId}
+                onChange={(e) => setCopyDestRepoId(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={copying}
+              >
+                <option value="">Select a repository…</option>
+                {allRepos
+                  .filter((r) => r.id !== repoId)
+                  .map((r) => (
+                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
+                  ))}
+              </select>
+            </div>
+            {copying && (
+              <div className="mb-4">
+                <div className="text-xs text-gray-400 mb-1">Copying — this may take a while…</div>
+                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                  <div className="h-2 w-1/3 rounded-full bg-purple-500 animate-[slide_1.4s_ease-in-out_infinite]" />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              {copying ? (
+                <Button variant="danger" onClick={() => cancelCopy()}>Stop</Button>
+              ) : (
+                <Button variant="secondary" onClick={() => setCopyTarget(null)}>Cancel</Button>
+              )}
+              <Button onClick={handleCopy} loading={copying} disabled={!copyDestRepoId}>
+                Copy
               </Button>
             </div>
           </>
