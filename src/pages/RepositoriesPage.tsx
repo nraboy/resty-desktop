@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   addRepo,
+  cancelMirror,
   getRepoStats,
   initRepo,
   listRepos,
+  mirrorRepo,
   refreshRepoStats,
   refreshSnapshots,
   removeRepo,
@@ -46,6 +48,14 @@ export default function RepositoriesPage() {
   const [deleting, setDeleting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [mirrorSource, setMirrorSource] = useState<Repository | null>(null);
+  const [mirrorDestId, setMirrorDestId] = useState("");
+  const [mirroring, setMirroring] = useState(false);
+  const [mirrorDone, setMirrorDone] = useState(false);
+  const [mirrorCancelled, setMirrorCancelled] = useState(false);
+  const [mirrorError, setMirrorError] = useState("");
+  const [mirrorElapsed, setMirrorElapsed] = useState(0);
+  const mirrorStartRef = useRef<number>(0);
 
   const load = () =>
     listRepos()
@@ -171,6 +181,54 @@ export default function RepositoriesPage() {
     if (selected) setForm((f) => ({ ...f, path: selected as string }));
   };
 
+  useEffect(() => {
+    if (!mirroring) return;
+    mirrorStartRef.current = Date.now();
+    setMirrorElapsed(0);
+    const id = setInterval(() => {
+      setMirrorElapsed(Math.floor((Date.now() - mirrorStartRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [mirroring]);
+
+  const handleMirror = async () => {
+    if (!mirrorSource || !mirrorDestId) return;
+    setMirroring(true);
+    setMirrorDone(false);
+    setMirrorCancelled(false);
+    setMirrorError("");
+    try {
+      await mirrorRepo(mirrorSource.id, mirrorDestId);
+      setMirrorDone(true);
+      setStatsMap((prev) => { const next = { ...prev }; delete next[mirrorDestId]; return next; });
+      refreshRepoStats(mirrorDestId)
+        .then((s) => setStatsMap((prev) => ({ ...prev, [mirrorDestId]: s })))
+        .catch(() => {});
+    } catch (err: any) {
+      const msg = String(err);
+      if (msg === "cancelled") {
+        setMirrorCancelled(true);
+      } else {
+        setMirrorError(msg);
+      }
+    } finally {
+      setMirroring(false);
+    }
+  };
+
+  const handleCancelMirror = async () => {
+    try { await cancelMirror(); } catch {}
+  };
+
+  const closeMirrorModal = () => {
+    if (mirroring) return;
+    setMirrorSource(null);
+    setMirrorDestId("");
+    setMirrorDone(false);
+    setMirrorCancelled(false);
+    setMirrorError("");
+  };
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
@@ -258,6 +316,7 @@ export default function RepositoriesPage() {
                       setEditName(repo.name);
                     }}
                     className="text-gray-500 hover:text-blue-400"
+                    title="Rename"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -269,9 +328,29 @@ export default function RepositoriesPage() {
                     size="sm"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setMirrorSource(repo);
+                      setMirrorDestId("");
+                      setMirrorDone(false);
+                      setMirrorCancelled(false);
+                      setMirrorError("");
+                    }}
+                    className="text-gray-500 hover:text-purple-400"
+                    title="Mirror to another repository"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                    </svg>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setDeleteTarget(repo);
                     }}
                     className="text-gray-500 hover:text-red-400"
+                    title="Remove"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -327,6 +406,98 @@ export default function RepositoriesPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        title="Mirror Repository"
+        open={mirrorSource !== null}
+        onClose={closeMirrorModal}
+      >
+        {mirrorDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              Mirror complete
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              All snapshots from <span className="font-semibold text-white">{mirrorSource?.name}</span> have been copied to{" "}
+              <span className="font-semibold text-white">{repos.find((r) => r.id === mirrorDestId)?.name}</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
+            </div>
+          </>
+        ) : mirrorCancelled ? (
+          <>
+            <p className="text-sm text-gray-400 mb-4">Mirror was cancelled.</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Copy all snapshots from <span className="font-semibold text-white">{mirrorSource?.name}</span> into another
+              repository. Snapshots that already exist in the destination are skipped.
+            </p>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-300 mb-2">Destination Repository</label>
+              <select
+                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
+                value={mirrorDestId}
+                onChange={(e) => setMirrorDestId(e.target.value)}
+                disabled={mirroring}
+              >
+                <option value="">Select a repository…</option>
+                {repos
+                  .filter((r) => r.id !== mirrorSource?.id)
+                  .map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+              </select>
+            </div>
+            {mirrorError && (
+              <p className="text-sm text-red-400 mb-3">{mirrorError}</p>
+            )}
+            {mirroring && (
+              <div className="mb-4">
+                <p className="text-xs text-gray-400 mb-1">Copying snapshots…</p>
+                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                  <div className="h-2 w-1/3 rounded-full bg-purple-500 animate-[slide_1.4s_ease-in-out_infinite]" />
+                </div>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              {mirroring ? (
+                <span className="text-xs text-gray-500">
+                  {mirrorElapsed < 60
+                    ? `${mirrorElapsed}s elapsed`
+                    : `${Math.floor(mirrorElapsed / 60)}m ${mirrorElapsed % 60}s elapsed`}
+                </span>
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+              {mirroring ? (
+                <Button variant="secondary" onClick={handleCancelMirror}>Cancel</Button>
+              ) : (
+                <>
+                  <Button variant="secondary" onClick={closeMirrorModal}>Cancel</Button>
+                  <Button
+                    onClick={handleMirror}
+                    disabled={!mirrorDestId}
+                    className="bg-purple-600 hover:bg-purple-500"
+                  >
+                    Mirror
+                  </Button>
+                </>
+              )}
+              </div>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal

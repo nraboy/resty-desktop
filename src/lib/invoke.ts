@@ -103,6 +103,12 @@ export const copySnapshot = (
 export const cancelCopy = (): Promise<void> =>
   invoke("cancel_copy");
 
+export const mirrorRepo = (srcRepoId: string, destRepoId: string): Promise<void> =>
+  invoke("mirror_repo", { srcRepoId, destRepoId });
+
+export const cancelMirror = (): Promise<void> =>
+  invoke("cancel_mirror");
+
 export const forgetByPlan = (
   repoId: string,
   tags: string[],

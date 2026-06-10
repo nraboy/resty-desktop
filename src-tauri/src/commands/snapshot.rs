@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
-use super::cache::{AppDb, CopyHandle, MasterKey, RetentionPolicy};
+use super::cache::{AppDb, CopyHandle, MasterKey, MirrorHandle, RetentionPolicy};
 use super::repo::run_restic_with_path;
 
 #[derive(Clone, Serialize)]
@@ -382,6 +382,89 @@ pub async fn copy_snapshot(
 pub async fn cancel_copy(copy_handle: State<'_, CopyHandle>) -> Result<(), String> {
     copy_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(ref mut child) = *copy_handle.child.lock().map_err(|e| e.to_string())? {
+        child.kill().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mirror_repo(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    mirror_handle: State<'_, MirrorHandle>,
+    src_repo_id: String,
+    dest_repo_id: String,
+) -> Result<(), String> {
+    let key = master_key.get()?;
+    let src_repo = db.get_full_repo(&src_repo_id, &key)?;
+    let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    mirror_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let child_arc = std::sync::Arc::clone(&mirror_handle.child);
+    let cancelled_arc = std::sync::Arc::clone(&mirror_handle.cancelled);
+
+    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+
+        let mut child = std::process::Command::new(&restic_path)
+            .args(["copy"])
+            .env("RESTIC_REPOSITORY", &dest_repo.path)
+            .env("RESTIC_PASSWORD", &dest_repo.password)
+            .env("RESTIC_FROM_REPOSITORY", &src_repo.path)
+            .env("RESTIC_FROM_PASSWORD", &src_repo.password)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run restic: {e}"))?;
+
+        let stderr = child.stderr.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+
+        let stderr_thread = std::thread::spawn(move || {
+            let mut s = String::new();
+            BufReader::new(stderr).read_to_string(&mut s).ok();
+            s
+        });
+
+        *child_arc.lock().unwrap() = Some(child);
+
+        // Drain stdout to avoid blocking the process on a full pipe buffer.
+        for _ in BufReader::new(stdout).lines() {}
+
+        let status = match child_arc.lock().unwrap().take() {
+            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+            None => return Err("cancelled".to_string()),
+        };
+
+        let stderr_str = stderr_thread.join().unwrap_or_default();
+
+        if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("cancelled".to_string());
+        }
+
+        if status.success() {
+            Ok(())
+        } else {
+            let msg = stderr_str.trim();
+            Err(if msg.is_empty() { "restic copy failed".to_string() } else { msg.to_string() })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if result.is_ok() {
+        let _ = db.evict_snapshots(&dest_repo_id);
+        let _ = db.evict_stats(&dest_repo_id);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_mirror(mirror_handle: State<'_, MirrorHandle>) -> Result<(), String> {
+    mirror_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(ref mut child) = *mirror_handle.child.lock().map_err(|e| e.to_string())? {
         child.kill().map_err(|e| e.to_string())?;
     }
     Ok(())

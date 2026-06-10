@@ -77,6 +77,7 @@ pub fn run() {
             app.manage(app_db);
             app.manage(cache::MasterKey::new());
             app.manage(cache::CopyHandle::new());
+            app.manage(cache::MirrorHandle::new());
             scheduler::spawn(app.handle().clone());
             Ok(())
         })
@@ -121,6 +122,8 @@ pub fn run() {
             snapshot::unlock_repo,
             snapshot::copy_snapshot,
             snapshot::cancel_copy,
+            snapshot::mirror_repo,
+            snapshot::cancel_mirror,
             // browse
             browse::list_files,
             browse::restore_path,
