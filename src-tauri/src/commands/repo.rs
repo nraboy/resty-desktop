@@ -133,7 +133,9 @@ fn fetch_and_cache_stats(
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
     let stdout = run_restic_with_path(&repo, vec!["stats", "--json"], &restic_path)?;
-    let v: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+    let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
+        .ok_or_else(|| "No output from restic stats".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
     let stats = ResticStats {
         total_size: v["total_size"].as_u64().unwrap_or(0),
         total_file_count: v["total_file_count"].as_u64().unwrap_or(0),

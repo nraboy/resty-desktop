@@ -29,6 +29,7 @@ export default function RepositoriesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [statsMap, setStatsMap] = useState<Record<string, ResticStats | null>>({});
+  const [statsErrorMap, setStatsErrorMap] = useState<Record<string, string>>({});
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
@@ -62,7 +63,10 @@ export default function RepositoriesPage() {
       if (isRemoteRepo(repo.path)) continue;
       getRepoStats(repo.id)
         .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-        .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })));
+        .catch((err) => {
+          setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
+          setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
+        });
     }
   };
 
@@ -81,20 +85,28 @@ export default function RepositoriesPage() {
     e.stopPropagation();
     setRefreshingRow(repo.id);
     setStatsMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
+    setStatsErrorMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
     refreshRepoStats(repo.id)
       .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-      .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })))
+      .catch((err) => {
+        setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
+        setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
+      })
       .finally(() => setRefreshingRow(null));
   };
 
   const handleRefreshAll = async () => {
     setRefreshingAll(true);
     setStatsMap({});
+    setStatsErrorMap({});
     await Promise.allSettled(
       repos.map((repo) =>
         refreshRepoStats(repo.id)
           .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-          .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })))
+          .catch((err) => {
+            setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
+            setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
+          })
       )
     );
     setRefreshingAll(false);
@@ -296,7 +308,14 @@ export default function RepositoriesPage() {
                           <p className="text-xs text-gray-600">{statsMap[repo.id]!.snapshots_count} snapshot{statsMap[repo.id]!.snapshots_count !== 1 ? "s" : ""}</p>
                         </>
                       ) : (
-                        <p className="text-xs text-gray-600">unavailable</p>
+                        <div className="relative group cursor-help">
+                          <p className="text-xs text-gray-600">unavailable</p>
+                          {statsErrorMap[repo.id] && (
+                            <div className="absolute bottom-full right-0 mb-1 px-2 py-1.5 w-72 bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 break-words">
+                              {statsErrorMap[repo.id]}
+                            </div>
+                          )}
+                        </div>
                       )
                     ) : isRemoteRepo(repo.path) ? (
                       <p className="text-xs text-gray-600">—</p>
