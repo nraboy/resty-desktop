@@ -57,3 +57,10 @@ The packaged app will be written to `src-tauri/target/release/bundle/`.
 ## Configuration
 
 The Restic binary path defaults to `restic` on `$PATH`. You can override it in the Settings page if Restic is installed elsewhere.
+
+## Support the Developer
+
+This GUI wrapper for Restic was created by [Nic Raboy](https://www.nraboy.com). If you found it valuable, consider donating to demonstrate your appreciation.
+
+- [PayPal](https://paypal.me/nraboy)
+- [Square Cash](https://cash.app/$nraboy)
