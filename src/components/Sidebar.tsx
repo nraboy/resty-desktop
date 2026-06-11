@@ -99,7 +99,7 @@ export default function Sidebar() {
 
       {appVersion && (
         <div className="px-4 py-3 border-t border-gray-800">
-          <p className="text-xs text-gray-600 text-center">v{appVersion}</p>
+          <p className="text-xs text-gray-600 text-center">VER {appVersion}</p>
         </div>
       )}
     </aside>

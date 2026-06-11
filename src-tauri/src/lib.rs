@@ -3,7 +3,7 @@ mod scheduler;
 
 use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot};
 use rusqlite::Connection;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 
 struct MenuState {
@@ -53,7 +53,16 @@ pub fn run() {
             let file_submenu = SubmenuBuilder::new(app, "File")
                 .item(&reset_app_item)
                 .build()?;
-            let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu]).build()?;
+            let edit_submenu = SubmenuBuilder::new(app, "Edit")
+                .item(&PredefinedMenuItem::undo(app, None)?)
+                .item(&PredefinedMenuItem::redo(app, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::cut(app, None)?)
+                .item(&PredefinedMenuItem::copy(app, None)?)
+                .item(&PredefinedMenuItem::paste(app, None)?)
+                .item(&PredefinedMenuItem::select_all(app, None)?)
+                .build()?;
+            let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu, &edit_submenu]).build()?;
             app.set_menu(menu)?;
             app.manage(MenuState {
                 app_submenu,

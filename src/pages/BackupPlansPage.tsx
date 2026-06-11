@@ -154,8 +154,26 @@ export default function BackupPlansPage() {
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {repoName(plan.repoId)} &middot;{" "}
                   {plan.paths.length} {plan.paths.length === 1 ? "path" : "paths"}
+                  {(() => {
+                    const excCount = plan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length;
+                    return excCount > 0 ? ` · ${excCount} ${excCount === 1 ? "exclusion" : "exclusions"}` : null;
+                  })()}
                   {plan.tags.length > 0 && ` · ${plan.tags.join(", ")}`}
                 </p>
+                {plan.retention && (() => {
+                  const r = plan.retention;
+                  const parts: string[] = [];
+                  if (r.keepLast != null) parts.push(`last ${r.keepLast}`);
+                  if (r.keepDaily != null) parts.push(`${r.keepDaily}d`);
+                  if (r.keepWeekly != null) parts.push(`${r.keepWeekly}w`);
+                  if (r.keepMonthly != null) parts.push(`${r.keepMonthly}mo`);
+                  if (r.keepYearly != null) parts.push(`${r.keepYearly}y`);
+                  return parts.length > 0 ? (
+                    <p className="text-xs text-gray-600 mt-0.5 truncate">
+                      Retention: {parts.join(" · ")}
+                    </p>
+                  ) : null;
+                })()}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <Button
