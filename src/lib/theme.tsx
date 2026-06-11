@@ -6,7 +6,7 @@ export type Theme = "system" | "light" | "dark";
 const STORAGE_KEY = "resty-theme";
 
 const ThemeContext = createContext<{ theme: Theme; setTheme: (t: Theme) => void }>({
-  theme: "dark",
+  theme: "system",
   setTheme: () => {},
 });
 
@@ -23,7 +23,7 @@ function applyClass(theme: Theme) {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
-    return (stored as Theme) || "dark";
+    return (stored as Theme) || "system";
   });
 
   useEffect(() => {
