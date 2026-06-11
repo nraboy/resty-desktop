@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Resty Desktop backs up files you select, including files on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Resty Desktop backs up files you select, including files in your Documents folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Resty Desktop backs up files you select, including files in your Downloads folder.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Resty Desktop backs up files from external drives and volumes you select.</string>
+</dict>
+</plist>

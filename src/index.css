@@ -26,8 +26,19 @@
     --tw-blue-400: 96 165 250;
     --tw-blue-700: 29 78 216;
     --tw-blue-900: 30 58 138;
-    /* Green accent — dark mode original */
+    /* Green accent — dark mode originals */
+    --tw-green-300: 134 239 172;
     --tw-green-400: 74 222 128;
+    --tw-green-700: 21 128 61;
+    --tw-green-900: 20 83 45;
+    /* Red accent — dark mode originals */
+    --tw-red-300: 252 165 165;
+    --tw-red-700: 185 28 28;
+    --tw-red-900: 127 29 29;
+    /* Amber accent — dark mode originals */
+    --tw-amber-300: 252 211 77;
+    --tw-amber-700: 180 83 9;
+    --tw-amber-900: 120 53 15;
   }
 
   /* Light mode — slate-based palette with cool blue-gray tint */
@@ -49,7 +60,18 @@
     --tw-blue-700: 96 165 250;    /* → blue-400: light border on light pill bg */
     --tw-blue-900: 219 234 254;   /* → blue-100: light bg for dark-mode pill/badge bg */
     /* Green — darker for legibility on light backgrounds */
+    --tw-green-300: 22 101 52;    /* → green-800: dark text on light bg */
     --tw-green-400: 21 128 61;    /* → green-700 */
+    --tw-green-700: 134 239 172;  /* → green-300: medium border on light bg */
+    --tw-green-900: 240 253 244;  /* → green-50: very light bg */
+    /* Red — dark values for contrast on light backgrounds */
+    --tw-red-300: 153 27 27;      /* → red-800: dark text on light bg */
+    --tw-red-700: 252 165 165;    /* → red-300: medium border on light bg */
+    --tw-red-900: 255 241 242;    /* → red-50: very light bg */
+    /* Amber — dark values for contrast on light backgrounds */
+    --tw-amber-300: 146 64 14;    /* → amber-800: dark text on light bg */
+    --tw-amber-700: 217 119 6;    /* → amber-600 */
+    --tw-amber-900: 253 230 138;  /* → amber-200: visible warm bg on white */
   }
 
   /* System mode — follow OS preference */
@@ -70,7 +92,16 @@
       --tw-blue-400: 29 78 216;
       --tw-blue-700: 96 165 250;
       --tw-blue-900: 219 234 254;
+      --tw-green-300: 22 101 52;
       --tw-green-400: 21 128 61;
+      --tw-green-700: 134 239 172;
+      --tw-green-900: 240 253 244;
+      --tw-red-300: 153 27 27;
+      --tw-red-700: 252 165 165;
+      --tw-red-900: 255 241 242;
+      --tw-amber-300: 146 64 14;
+      --tw-amber-700: 217 119 6;
+      --tw-amber-900: 253 230 138;
     }
   }
 

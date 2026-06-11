@@ -60,7 +60,6 @@ export default function RepositoriesPage() {
 
   const fetchStatsForLocal = (repoList: Repository[]) => {
     for (const repo of repoList) {
-      if (isRemoteRepo(repo.path)) continue;
       getRepoStats(repo.id)
         .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
         .catch((err) => {
@@ -97,17 +96,27 @@ export default function RepositoriesPage() {
 
   const handleRefreshAll = async () => {
     setRefreshingAll(true);
-    setStatsMap({});
-    setStatsErrorMap({});
+    const localRepos = repos.filter((repo) => !isRemoteRepo(repo.path));
+    setStatsMap((prev) => {
+      const next = { ...prev };
+      for (const repo of localRepos) delete next[repo.id];
+      return next;
+    });
+    setStatsErrorMap((prev) => {
+      const next = { ...prev };
+      for (const repo of localRepos) delete next[repo.id];
+      return next;
+    });
     await Promise.allSettled(
-      repos.map((repo) =>
-        refreshRepoStats(repo.id)
-          .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-          .catch((err) => {
-            setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
-            setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
-          })
-      )
+      localRepos
+        .map((repo) =>
+          refreshRepoStats(repo.id)
+            .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+            .catch((err) => {
+              setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
+              setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
+            })
+        )
     );
     setRefreshingAll(false);
   };

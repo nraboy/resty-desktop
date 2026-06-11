@@ -55,6 +55,15 @@ const EXCLUDE_SUGGESTIONS = [
   },
 ];
 
+function needsFullDiskAccess(p: string): boolean {
+  return (
+    /\/Library(\/|$)/.test(p) ||
+    p === "/System" || p.startsWith("/System/") ||
+    p === "/private" || p.startsWith("/private/") ||
+    p === "/var" || p.startsWith("/var/")
+  );
+}
+
 export default function BackupPlanEditPage() {
   const { planId } = useParams<{ planId: string }>();
   const navigate = useNavigate();
@@ -349,6 +358,15 @@ export default function BackupPlanEditPage() {
               </li>
             ))}
           </ul>
+        )}
+
+        {paths.some(needsFullDiskAccess) && (
+          <div className="mt-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg text-xs text-amber-300">
+            <span className="font-medium">Full Disk Access may be required.</span>{" "}
+            One or more paths (e.g. <code className="text-amber-300">~/Library</code>, system directories) are protected by macOS and cannot be read without Full Disk Access. Go to{" "}
+            <span className="font-medium">System Settings → Privacy &amp; Security → Full Disk Access</span>{" "}
+            and add Resty Desktop to avoid permission errors.
+          </div>
         )}
       </div>
 

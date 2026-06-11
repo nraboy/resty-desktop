@@ -142,6 +142,13 @@ pub async fn execute_backup(
         args.push(path.clone());
     }
 
+    // Touch each path from the parent process so macOS TCC prompts appear
+    // upfront, attributed to "Resty Desktop", before restic is spawned.
+    // Child processes inherit the grants so restic won't re-trigger them.
+    for path in &paths {
+        let _ = std::fs::metadata(path);
+    }
+
     let started = std::time::Instant::now();
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -236,7 +243,12 @@ pub async fn execute_backup(
             Ok(summary_line.unwrap_or_default())
         } else {
             let msg = stderr_str.trim();
-            Err(if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() })
+            let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
+            #[cfg(target_os = "macos")]
+            if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
+                return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
+            }
+            Err(base)
         }
     })
     .await
