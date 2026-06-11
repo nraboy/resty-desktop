@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { changeMasterPassword, clearBrowseCache, getResticPath, getResticVersion, setResticPath } from "../lib/invoke";
+import { changeMasterPassword, clearBrowseCache, getCompression, getResticPath, getResticVersion, setCompression as saveCompression, setResticPath } from "../lib/invoke";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
 export default function SettingsPage() {
   const [resticPath, setResticPathLocal] = useState("restic");
+  const [compression, setCompression] = useState("auto");
   const [resticVersion, setResticVersion] = useState<string | null>(null);
   const [versionError, setVersionError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -23,6 +24,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
+    getCompression().then(setCompression).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -34,6 +36,7 @@ export default function SettingsPage() {
     setSaved(false);
     try {
       await setResticPath(resticPath);
+      await saveCompression(compression);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       getResticVersion()
@@ -110,6 +113,29 @@ export default function SettingsPage() {
           {versionError && (
             <p className="mt-2 text-xs text-red-400">{versionError}</p>
           )}
+        </div>
+        <div>
+          <h2 className="text-sm font-medium text-gray-300 mb-1">Backup Compression</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            Controls the <span className="font-mono">RESTIC_COMPRESSION</span> level applied to all
+            future backups.
+          </p>
+          <div className="relative">
+            <select
+              value={compression}
+              onChange={(e) => setCompression(e.target.value)}
+              className="appearance-none w-full bg-gray-800 border border-gray-700 text-gray-100 text-sm rounded-lg px-3 py-2 pr-8 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="auto">auto — default, balanced compression</option>
+              <option value="off">off — no compression, fastest</option>
+              <option value="fastest">fastest — minimal compression, low CPU</option>
+              <option value="better">better — more compression, more CPU</option>
+              <option value="max">max — maximum compression, highest CPU</option>
+            </select>
+            <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
         </div>
         {error && <p className="text-sm text-red-400">{error}</p>}
         <div className="flex items-center gap-3">

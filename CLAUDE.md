@@ -65,7 +65,8 @@ src/
     ScheduleEditPage.tsx      # Create/edit a schedule (name, cron expression, backup plans to run); scheduleId="new" for creation
     LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows
     SettingsPage.tsx          # Restic binary path override; shows detected restic version below path input;
-                              #   install instructions section hidden when restic is found
+                              #   install instructions section hidden when restic is found;
+                              #   global backup compression selector (off/fastest/auto/better/max) persisted to app_settings
 
 src-tauri/
   Cargo.toml
@@ -87,7 +88,7 @@ src-tauri/
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
-                              #   get_restic_version, check_repo
+                              #   get_restic_version, check_repo, get_compression, set_compression
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
@@ -134,7 +135,7 @@ src-tauri/
 - All commands set both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
-- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is captured and returned (all other lines are discarded as they arrive — not buffered). On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks.
+- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is captured and returned (all other lines are discarded as they arrive — not buffered). On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks. `execute_backup` reads the `compression` setting from `app_settings` (default `auto`) and passes it as `RESTIC_COMPRESSION` env var to the restic process.
 - `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.

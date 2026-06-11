@@ -59,6 +59,12 @@ export const setResticPath = (path: string): Promise<void> =>
 export const getResticVersion = (): Promise<string> =>
   invoke("get_restic_version");
 
+export const getCompression = (): Promise<string> =>
+  invoke("get_compression");
+
+export const setCompression = (value: string): Promise<void> =>
+  invoke("set_compression", { value });
+
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 

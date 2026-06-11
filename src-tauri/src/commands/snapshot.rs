@@ -124,6 +124,7 @@ pub async fn execute_backup(
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
+    let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -154,6 +155,7 @@ pub async fn execute_backup(
     let repo_pass_for_unlock = repo.password.clone();
     let restic_path_inner = restic_path.clone();
     let restic_path_for_unlock = restic_path.clone();
+    let compression_inner = compression.clone();
 
     backup_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&backup_handle.child);
@@ -167,6 +169,7 @@ pub async fn execute_backup(
             .args(&args)
             .env("RESTIC_REPOSITORY", &repo_path)
             .env("RESTIC_PASSWORD", &repo_password)
+            .env("RESTIC_COMPRESSION", &compression_inner)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

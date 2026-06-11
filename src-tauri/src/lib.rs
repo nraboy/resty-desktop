@@ -111,6 +111,8 @@ pub fn run() {
             repo::get_restic_path,
             repo::set_restic_path,
             repo::get_restic_version,
+            repo::get_compression,
+            repo::set_compression,
             repo::check_repo,
             // snapshots
             snapshot::list_snapshots,

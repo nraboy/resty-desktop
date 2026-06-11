@@ -213,6 +213,16 @@ pub fn set_restic_path(db: State<'_, AppDb>, path: String) -> Result<(), String>
 }
 
 #[tauri::command]
+pub fn get_compression(db: State<'_, AppDb>) -> Result<String, String> {
+    db.get_setting("compression", "auto")
+}
+
+#[tauri::command]
+pub fn set_compression(db: State<'_, AppDb>, value: String) -> Result<(), String> {
+    db.set_setting("compression", &value)
+}
+
+#[tauri::command]
 pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
     let restic_path = super::get_restic_path(&db);
     let output = std::process::Command::new(&restic_path)
