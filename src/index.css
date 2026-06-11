@@ -8,6 +8,53 @@
 }
 
 @layer base {
+  /* Dark mode color values (default) — standard Tailwind gray scale */
+  :root {
+    --tw-gray-50:  249 250 251;
+    --tw-gray-100: 243 244 246;
+    --tw-gray-200: 229 231 235;
+    --tw-gray-300: 209 213 219;
+    --tw-gray-400: 156 163 175;
+    --tw-gray-500: 107 114 128;
+    --tw-gray-600: 75 85 99;
+    --tw-gray-700: 55 65 81;
+    --tw-gray-800: 31 41 55;
+    --tw-gray-900: 17 24 39;
+    --tw-gray-950: 3 7 18;
+  }
+
+  /* Light mode — symmetrically inverted gray scale (gray-X → gray-(1000-X)) */
+  html.light {
+    --tw-gray-50:  3 7 18;
+    --tw-gray-100: 17 24 39;
+    --tw-gray-200: 31 41 55;
+    --tw-gray-300: 55 65 81;
+    --tw-gray-400: 75 85 99;
+    --tw-gray-500: 107 114 128;
+    --tw-gray-600: 156 163 175;
+    --tw-gray-700: 209 213 219;
+    --tw-gray-800: 229 231 235;
+    --tw-gray-900: 243 244 246;
+    --tw-gray-950: 249 250 251;
+  }
+
+  /* System mode — follow OS preference */
+  @media (prefers-color-scheme: light) {
+    html.system {
+      --tw-gray-50:  3 7 18;
+      --tw-gray-100: 17 24 39;
+      --tw-gray-200: 31 41 55;
+      --tw-gray-300: 55 65 81;
+      --tw-gray-400: 75 85 99;
+      --tw-gray-500: 107 114 128;
+      --tw-gray-600: 156 163 175;
+      --tw-gray-700: 209 213 219;
+      --tw-gray-800: 229 231 235;
+      --tw-gray-900: 243 244 246;
+      --tw-gray-950: 249 250 251;
+    }
+  }
+
   body {
     @apply bg-gray-950 text-gray-100 antialiased;
     font-family: system-ui, -apple-system, sans-serif;

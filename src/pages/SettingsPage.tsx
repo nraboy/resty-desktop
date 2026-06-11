@@ -1,10 +1,19 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { changeMasterPassword, clearBrowseCache, getCompression, getResticPath, getResticVersion, setCompression as saveCompression, setResticPath } from "../lib/invoke";
+import { useTheme } from "../lib/theme";
+import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
 import Input from "../components/Input";
 
+const THEMES: { value: Theme; label: string; description: string }[] = [
+  { value: "system", label: "System", description: "Follow the OS appearance" },
+  { value: "light",  label: "Light",  description: "Always use the light theme" },
+  { value: "dark",   label: "Dark",   description: "Always use the dark theme" },
+];
+
 export default function SettingsPage() {
+  const { theme, setTheme } = useTheme();
   const [resticPath, setResticPathLocal] = useState("restic");
   const [compression, setCompression] = useState("auto");
   const [resticVersion, setResticVersion] = useState<string | null>(null);
@@ -148,6 +157,28 @@ export default function SettingsPage() {
               Saved
             </span>
           )}
+        </div>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Appearance</h2>
+        <p className="text-xs text-gray-500 mb-3">Choose the color theme for the application.</p>
+        <div className="flex gap-2">
+          {THEMES.map(({ value, label, description }) => (
+            <button
+              key={value}
+              onClick={() => setTheme(value)}
+              className={[
+                "flex-1 rounded-lg border px-3 py-3 text-left transition-colors",
+                theme === value
+                  ? "border-blue-500 bg-blue-600/20 text-blue-400"
+                  : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600 hover:text-gray-300",
+              ].join(" ")}
+            >
+              <p className={`text-sm font-medium ${theme === value ? "text-blue-300" : "text-gray-300"}`}>{label}</p>
+              <p className="text-xs mt-0.5">{description}</p>
+            </button>
+          ))}
         </div>
       </div>
 
