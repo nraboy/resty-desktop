@@ -30,6 +30,7 @@ export default function RepositoriesPage() {
   const [repos, setRepos] = useState<Repository[]>([]);
   const [statsMap, setStatsMap] = useState<Record<string, ResticStats | null>>({});
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -79,14 +80,24 @@ export default function RepositoriesPage() {
   const handleRefreshRow = async (e: React.MouseEvent, repo: Repository) => {
     e.stopPropagation();
     setRefreshingRow(repo.id);
-    try {
-      const s = await refreshRepoStats(repo.id);
-      setStatsMap((prev) => ({ ...prev, [repo.id]: s }));
-    } catch {
-      setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
-    } finally {
-      setRefreshingRow(null);
-    }
+    setStatsMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
+    refreshRepoStats(repo.id)
+      .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+      .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })))
+      .finally(() => setRefreshingRow(null));
+  };
+
+  const handleRefreshAll = async () => {
+    setRefreshingAll(true);
+    setStatsMap({});
+    await Promise.allSettled(
+      repos.map((repo) =>
+        refreshRepoStats(repo.id)
+          .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
+          .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })))
+      )
+    );
+    setRefreshingAll(false);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -231,6 +242,15 @@ export default function RepositoriesPage() {
           <p className="text-sm text-gray-500 mt-0.5">Manage your Restic backup repositories</p>
         </div>
         <div className="flex gap-2">
+          {repos.length > 0 && (
+            <Button
+              variant="secondary"
+              disabled={refreshingAll}
+              onClick={handleRefreshAll}
+            >
+              Refresh Stats
+            </Button>
+          )}
           <Button variant="secondary" onClick={() => openModal("add")}>
             Open Existing
           </Button>
@@ -284,21 +304,19 @@ export default function RepositoriesPage() {
                       <p className="text-xs text-gray-600 animate-pulse">loading…</p>
                     )}
                   </div>
-                  {isRemoteRepo(repo.path) && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      loading={refreshingRow === repo.id}
-                      onClick={(e) => handleRefreshRow(e, repo)}
-                      className="text-gray-500 hover:text-blue-400"
-                      title="Refresh stats"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </Button>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={refreshingAll || refreshingRow === repo.id}
+                    onClick={(e) => handleRefreshRow(e, repo)}
+                    className="text-gray-500 hover:text-blue-400"
+                    title="Refresh stats"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </Button>
                 </div>
                 <div className="flex items-center gap-2">
                   <Button

@@ -125,6 +125,20 @@ impl BackupHandle {
     }
 }
 
+pub struct PruneHandle {
+    pub child: Arc<Mutex<Option<std::process::Child>>>,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PruneHandle {
+    pub fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
 // ── in-memory master-key state ─────────────────────────────────────────────
 
 pub struct MasterKey(pub Mutex<Option<[u8; 32]>>);

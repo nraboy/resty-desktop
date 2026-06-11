@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
-import { changeMasterPassword, clearBrowseCache, getCompression, getResticPath, getResticVersion, setCompression as saveCompression, setResticPath } from "../lib/invoke";
+import { cancelPrune, changeMasterPassword, clearBrowseCache, getCompression, getResticPath, getResticVersion, pruneAllRepos, setCompression as saveCompression, setResticPath } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
 import Input from "../components/Input";
+import Modal from "../components/Modal";
 
 const THEMES: { value: Theme; label: string; description: string }[] = [
   { value: "system", label: "System", description: "Follow the OS appearance" },
@@ -24,6 +26,18 @@ export default function SettingsPage() {
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheCleared, setCacheCleared] = useState(false);
 
+  const [pruneModalOpen, setPruneModalOpen] = useState(false);
+  const [pruning, setPruning] = useState(false);
+  const [pruneDone, setPruneDone] = useState(false);
+  const [pruneCancelled, setPruneCancelled] = useState(false);
+  const [pruneError, setPruneError] = useState("");
+  const [pruneCurrent, setPruneCurrent] = useState(0);
+  const [pruneTotal, setPruneTotal] = useState(0);
+  const [pruneRepoName, setPruneRepoName] = useState("");
+  const [pruneElapsed, setPruneElapsed] = useState(0);
+  const pruneStartRef = useRef<number>(0);
+  const pruneUnlistenRef = useRef<(() => void) | null>(null);
+
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -38,6 +52,16 @@ export default function SettingsPage() {
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
   }, []);
+
+  useEffect(() => {
+    if (!pruning) return;
+    pruneStartRef.current = Date.now();
+    setPruneElapsed(0);
+    const id = setInterval(() => {
+      setPruneElapsed(Math.floor((Date.now() - pruneStartRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [pruning]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -67,6 +91,58 @@ export default function SettingsPage() {
     } finally {
       setClearingCache(false);
     }
+  };
+
+  const handlePruneAll = async () => {
+    setPruning(true);
+    setPruneDone(false);
+    setPruneCancelled(false);
+    setPruneError("");
+    setPruneCurrent(0);
+    setPruneTotal(0);
+    setPruneRepoName("");
+
+    const unlisten = await listen<{ current: number; total: number; repoName: string }>(
+      "prune:progress",
+      ({ payload }) => {
+        setPruneCurrent(payload.current);
+        setPruneTotal(payload.total);
+        setPruneRepoName(payload.repoName);
+      }
+    );
+    pruneUnlistenRef.current = unlisten;
+
+    try {
+      await pruneAllRepos();
+      setPruneDone(true);
+    } catch (err: any) {
+      const msg = String(err);
+      if (msg === "Cancelled") {
+        setPruneCancelled(true);
+      } else {
+        setPruneError(msg);
+      }
+    } finally {
+      setPruning(false);
+      unlisten();
+      pruneUnlistenRef.current = null;
+    }
+  };
+
+  const closePruneModal = async () => {
+    if (pruning) {
+      await cancelPrune();
+      return;
+    }
+    pruneUnlistenRef.current?.();
+    pruneUnlistenRef.current = null;
+    setPruneModalOpen(false);
+    setPruneDone(false);
+    setPruneCancelled(false);
+    setPruneError("");
+    setPruneCurrent(0);
+    setPruneTotal(0);
+    setPruneRepoName("");
   };
 
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -247,6 +323,88 @@ export default function SettingsPage() {
           ))}
         </div>
       </div>}
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Prune Repositories</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Remove orphaned data from all repositories. This cleans up pack files not referenced by
+          any snapshot, such as leftovers from interrupted backups or manually forgotten snapshots.
+        </p>
+        <Button variant="secondary" onClick={() => { setPruneModalOpen(true); handlePruneAll(); }}>
+          Prune All Repositories
+        </Button>
+      </div>
+
+      <Modal open={pruneModalOpen} onClose={closePruneModal} title="Prune All Repositories">
+        {pruneDone ? (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-300">
+              All {pruneTotal} {pruneTotal === 1 ? "repository has" : "repositories have"} been pruned successfully.
+            </p>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500">
+                {pruneElapsed < 60
+                  ? `${pruneElapsed}s elapsed`
+                  : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
+              </p>
+              <Button variant="secondary" onClick={closePruneModal}>Close</Button>
+            </div>
+          </div>
+        ) : pruneCancelled ? (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-300">Prune was cancelled.</p>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500">
+                {pruneElapsed < 60
+                  ? `${pruneElapsed}s elapsed`
+                  : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
+              </p>
+              <Button variant="secondary" onClick={closePruneModal}>Close</Button>
+            </div>
+          </div>
+        ) : pruneError ? (
+          <div className="space-y-4">
+            <p className="text-sm text-red-400">{pruneError}</p>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500">
+                {pruneElapsed < 60
+                  ? `${pruneElapsed}s elapsed`
+                  : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
+              </p>
+              <Button variant="secondary" onClick={closePruneModal}>Close</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {pruneTotal > 0 ? (
+              <p className="text-sm text-gray-400">
+                Pruning <span className="text-gray-50 font-medium">{pruneRepoName}</span>
+                {" "}({pruneCurrent + 1} of {pruneTotal})…
+              </p>
+            ) : (
+              <p className="text-sm text-gray-400">Starting…</p>
+            )}
+            <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+              <div
+                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                style={{ width: pruneTotal > 0 ? `${(pruneCurrent / pruneTotal) * 100}%` : "0%" }}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500">
+                {pruneElapsed < 60
+                  ? `${pruneElapsed}s elapsed`
+                  : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
+              </p>
+              {pruneTotal > 0 && (
+                <p className="text-xs text-gray-500">
+                  {pruneCurrent} / {pruneTotal} complete
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Browse Cache</h2>

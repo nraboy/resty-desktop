@@ -68,6 +68,12 @@ export const setCompression = (value: string): Promise<void> =>
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 
+export const pruneAllRepos = (): Promise<void> =>
+  invoke("prune_all_repos");
+
+export const cancelPrune = (): Promise<void> =>
+  invoke("cancel_prune");
+
 // ── snapshots ─────────────────────────────────────────────────────────────
 
 export const listSnapshots = (repoId: string): Promise<Snapshot[]> =>

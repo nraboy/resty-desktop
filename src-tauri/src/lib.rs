@@ -87,6 +87,7 @@ pub fn run() {
             app.manage(cache::CopyHandle::new());
             app.manage(cache::MirrorHandle::new());
             app.manage(cache::BackupHandle::new());
+            app.manage(cache::PruneHandle::new());
             scheduler::spawn(app.handle().clone());
             Ok(())
         })
@@ -123,6 +124,8 @@ pub fn run() {
             repo::get_compression,
             repo::set_compression,
             repo::check_repo,
+            repo::prune_all_repos,
+            repo::cancel_prune,
             // snapshots
             snapshot::list_snapshots,
             snapshot::refresh_snapshots,

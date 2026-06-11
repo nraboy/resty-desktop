@@ -49,6 +49,8 @@ src/
   pages/
     AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.);
+                              #   per-row refresh stats button shown for all repos (not just remote); "Refresh Stats" header button
+                              #   refreshes all repos in parallel via Promise.allSettled; refreshingAll state disables per-row buttons during bulk refresh;
                               #   mirror repository modal: copies all snapshots from one repo to another with indeterminate progress bar,
                               #   elapsed timer, cancellation support, and completion/cancellation confirmation UI
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
@@ -66,7 +68,9 @@ src/
     LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows
     SettingsPage.tsx          # Restic binary path override; shows detected restic version below path input;
                               #   install instructions section hidden when restic is found;
-                              #   global backup compression selector (off/fastest/auto/better/max) persisted to app_settings
+                              #   global backup compression selector (off/fastest/auto/better/max) persisted to app_settings;
+                              #   prune all repositories: runs restic prune on every repo sequentially with a modal showing
+                              #   progress bar, elapsed timer, per-repo name, and cancellation support (prune:progress events)
 
 src-tauri/
   Cargo.toml
@@ -74,7 +78,7 @@ src-tauri/
   src/
     main.rs                   # Calls restic_gui_lib::run()
     lib.rs                    # Tauri builder; registers all commands; opens app_data.db, initialises schema, manages AppDb + MasterKey as Tauri state;
-                              #   manages CopyHandle, MirrorHandle, BackupHandle as Tauri state;
+                              #   manages CopyHandle, MirrorHandle, BackupHandle, PruneHandle as Tauri state;
                               #   calls recalculate_overdue_schedules at startup to skip missed schedule runs;
                               #   builds native menu bar (MenuState) with "Resty Desktop" and "File" submenus; items are auth-aware
                               #   (Settings/New Repository/New Backup Plan shown when unlocked; Reset Application shown when locked);
@@ -88,7 +92,9 @@ src-tauri/
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
-                              #   get_restic_version, check_repo, get_compression, set_compression
+                              #   get_restic_version, check_repo, get_compression, set_compression,
+                              #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
+                              #   cancellable via PruneHandle), cancel_prune
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
@@ -106,6 +112,7 @@ src-tauri/
                               #   CopyHandle (in-memory, for cancel);
                               #   MirrorHandle (in-memory, for mirror cancellation);
                               #   BackupHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for backup cancellation);
+                              #   PruneHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for prune cancellation);
                               #   AppDb::recalculate_overdue_schedules — advances overdue next_run_at to next future fire time at startup (skips missed backups);
                               #   Repository, FullRepository, BackupPlan, RetentionPolicy, BackupHistoryEntry,
                               #   Schedule types; clear_browse_cache, list_backup_history commands
@@ -140,6 +147,7 @@ src-tauri/
 - `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.
 - `mirror_repo` runs `restic copy` (no specific snapshot ID) with `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots from src to dest, skipping those already present. A `MirrorHandle` state (same pattern as `CopyHandle`) allows `cancel_mirror`. Also runs `restic unlock` on both repos after cancel.
+- `prune_all_repos` runs `restic prune` on each repo sequentially, emitting `prune:progress` events (consumed by the SettingsPage modal). A `PruneHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `BackupHandle`) allows `cancel_prune` to kill the child mid-run; after a cancel-kill, `restic unlock` is called on the affected repo to clear stale locks.
 - `unlock_app` runs `restic unlock` on all repos in the background immediately after the master password is verified, clearing any stale locks left by a previous crash or force-quit.
 - `get_restic_version` runs `restic version` and returns the trimmed stdout string (e.g. `restic 0.18.1 compiled with go1.25.1 on darwin/arm64`). Used by `SettingsPage` to verify the configured binary path is valid.
 - Repos, backup plans, schedules, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.
