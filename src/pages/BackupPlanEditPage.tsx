@@ -375,7 +375,7 @@ export default function BackupPlanEditPage() {
                 {t}
                 <button
                   onClick={() => removeTag(t)}
-                  className="text-blue-400 hover:text-white transition-colors"
+                  className="text-blue-400 hover:text-gray-50 transition-colors"
                 >
                   ×
                 </button>

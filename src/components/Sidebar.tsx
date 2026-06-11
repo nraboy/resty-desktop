@@ -72,7 +72,7 @@ export default function Sidebar() {
         <div className="flex items-center gap-2">
           <img src="/icon.svg" alt="" className="w-7 h-7 flex-shrink-0" />
           <div>
-            <h1 className="text-base font-bold text-white tracking-tight">Resty Desktop</h1>
+            <h1 className="text-base font-bold text-gray-50 tracking-tight">Resty Desktop</h1>
           </div>
         </div>
       </div>
@@ -99,7 +99,7 @@ export default function Sidebar() {
 
       {appVersion && (
         <div className="px-4 py-3 border-t border-gray-800">
-          <p className="text-xs text-gray-600 text-center">VER {appVersion}</p>
+          <p className="text-xs text-gray-500 text-center">VER {appVersion}</p>
         </div>
       )}
     </aside>

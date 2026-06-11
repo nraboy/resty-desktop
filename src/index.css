@@ -21,37 +21,56 @@
     --tw-gray-800: 31 41 55;
     --tw-gray-900: 17 24 39;
     --tw-gray-950: 3 7 18;
+    /* Blue accent — dark mode originals */
+    --tw-blue-300: 147 197 253;
+    --tw-blue-400: 96 165 250;
+    --tw-blue-700: 29 78 216;
+    --tw-blue-900: 30 58 138;
+    /* Green accent — dark mode original */
+    --tw-green-400: 74 222 128;
   }
 
-  /* Light mode — symmetrically inverted gray scale (gray-X → gray-(1000-X)) */
+  /* Light mode — slate-based palette with cool blue-gray tint */
   html.light {
-    --tw-gray-50:  3 7 18;
-    --tw-gray-100: 17 24 39;
-    --tw-gray-200: 31 41 55;
-    --tw-gray-300: 55 65 81;
-    --tw-gray-400: 75 85 99;
-    --tw-gray-500: 107 114 128;
-    --tw-gray-600: 156 163 175;
-    --tw-gray-700: 209 213 219;
-    --tw-gray-800: 229 231 235;
-    --tw-gray-900: 243 244 246;
-    --tw-gray-950: 249 250 251;
+    --tw-gray-50:  2 6 23;        /* near-black text */
+    --tw-gray-100: 15 23 42;      /* primary text */
+    --tw-gray-200: 30 41 59;      /* strong text */
+    --tw-gray-300: 51 65 85;      /* body text */
+    --tw-gray-400: 71 85 105;     /* secondary text — ~7.8:1 on bg ✓ */
+    --tw-gray-500: 100 116 139;   /* muted text — ~4.6:1 on bg ✓ */
+    --tw-gray-600: 148 163 184;   /* subtle borders/dividers */
+    --tw-gray-700: 203 213 225;   /* light borders */
+    --tw-gray-800: 226 232 240;   /* card/input bg */
+    --tw-gray-900: 241 245 249;   /* panel/sidebar bg */
+    --tw-gray-950: 248 250 252;   /* main app bg */
+    /* Blue accent — dark blue values for light backgrounds (~4.65:1 on active nav bg ✓) */
+    --tw-blue-300: 29 78 216;     /* → blue-700 */
+    --tw-blue-400: 29 78 216;     /* → blue-700 */
+    --tw-blue-700: 96 165 250;    /* → blue-400: light border on light pill bg */
+    --tw-blue-900: 219 234 254;   /* → blue-100: light bg for dark-mode pill/badge bg */
+    /* Green — darker for legibility on light backgrounds */
+    --tw-green-400: 21 128 61;    /* → green-700 */
   }
 
   /* System mode — follow OS preference */
   @media (prefers-color-scheme: light) {
     html.system {
-      --tw-gray-50:  3 7 18;
-      --tw-gray-100: 17 24 39;
-      --tw-gray-200: 31 41 55;
-      --tw-gray-300: 55 65 81;
-      --tw-gray-400: 75 85 99;
-      --tw-gray-500: 107 114 128;
-      --tw-gray-600: 156 163 175;
-      --tw-gray-700: 209 213 219;
-      --tw-gray-800: 229 231 235;
-      --tw-gray-900: 243 244 246;
-      --tw-gray-950: 249 250 251;
+      --tw-gray-50:  2 6 23;
+      --tw-gray-100: 15 23 42;
+      --tw-gray-200: 30 41 59;
+      --tw-gray-300: 51 65 85;
+      --tw-gray-400: 71 85 105;
+      --tw-gray-500: 100 116 139;
+      --tw-gray-600: 148 163 184;
+      --tw-gray-700: 203 213 225;
+      --tw-gray-800: 226 232 240;
+      --tw-gray-900: 241 245 249;
+      --tw-gray-950: 248 250 252;
+      --tw-blue-300: 29 78 216;
+      --tw-blue-400: 29 78 216;
+      --tw-blue-700: 96 165 250;
+      --tw-blue-900: 219 234 254;
+      --tw-green-400: 21 128 61;
     }
   }
 

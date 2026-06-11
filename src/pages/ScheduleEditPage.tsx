@@ -471,7 +471,7 @@ export default function ScheduleEditPage() {
       >
         <p className="text-sm text-gray-300 mb-5">
           Are you sure you want to delete{" "}
-          <span className="font-semibold text-white">{name}</span>?
+          <span className="font-semibold text-gray-50">{name}</span>?
           This removes the schedule only — backup plans are not affected.
         </p>
         <div className="flex justify-end gap-2">

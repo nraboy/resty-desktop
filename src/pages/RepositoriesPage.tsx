@@ -365,7 +365,7 @@ export default function RepositoriesPage() {
       >
         <p className="text-sm text-gray-300 mb-5">
           Are you sure you want to remove{" "}
-          <span className="font-semibold text-white">{deleteTarget?.name}</span>?
+          <span className="font-semibold text-gray-50">{deleteTarget?.name}</span>?
           This only removes it from the list — the repository data on disk is not deleted.
         </p>
         <div className="flex justify-end gap-2">
@@ -416,8 +416,8 @@ export default function RepositoriesPage() {
               Mirror complete
             </div>
             <p className="text-sm text-gray-400 mb-4">
-              All snapshots from <span className="font-semibold text-white">{mirrorSource?.name}</span> have been copied to{" "}
-              <span className="font-semibold text-white">{repos.find((r) => r.id === mirrorDestId)?.name}</span>.
+              All snapshots from <span className="font-semibold text-gray-50">{mirrorSource?.name}</span> have been copied to{" "}
+              <span className="font-semibold text-gray-50">{repos.find((r) => r.id === mirrorDestId)?.name}</span>.
             </p>
             <div className="flex justify-end">
               <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
@@ -433,7 +433,7 @@ export default function RepositoriesPage() {
         ) : (
           <>
             <p className="text-sm text-gray-300 mb-4">
-              Copy all snapshots from <span className="font-semibold text-white">{mirrorSource?.name}</span> into another
+              Copy all snapshots from <span className="font-semibold text-gray-50">{mirrorSource?.name}</span> into another
               repository. Snapshots that already exist in the destination are skipped.
             </p>
             <div className="mb-4">

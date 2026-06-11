@@ -4,6 +4,15 @@ export default {
   theme: {
     extend: {
       colors: {
+        blue: {
+          300: "rgb(var(--tw-blue-300) / <alpha-value>)",
+          400: "rgb(var(--tw-blue-400) / <alpha-value>)",
+          700: "rgb(var(--tw-blue-700) / <alpha-value>)",
+          900: "rgb(var(--tw-blue-900) / <alpha-value>)",
+        },
+        green: {
+          400: "rgb(var(--tw-green-400) / <alpha-value>)",
+        },
         gray: {
           50:  "rgb(var(--tw-gray-50)  / <alpha-value>)",
           100: "rgb(var(--tw-gray-100) / <alpha-value>)",

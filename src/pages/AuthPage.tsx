@@ -165,7 +165,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
           </div>
 
           <p className="text-sm text-gray-300">
-            Type <span className="font-mono font-semibold text-white">RESET</span> to confirm.
+            Type <span className="font-mono font-semibold text-gray-50">RESET</span> to confirm.
           </p>
           <Input
             placeholder="RESET"

@@ -246,7 +246,7 @@ export default function BrowsePage() {
                       {entry.type === "dir" ? (
                         <button
                           onClick={() => enterDir(entry)}
-                          className="text-gray-200 hover:text-white transition-colors text-left"
+                          className="text-gray-200 hover:text-gray-50 transition-colors text-left"
                         >
                           {entry.name}
                         </button>

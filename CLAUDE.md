@@ -14,7 +14,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 |---|---|
 | Desktop shell | Tauri v2 |
 | Frontend | React 19 + TypeScript |
-| Styling | Tailwind CSS v3 |
+| Styling | Tailwind CSS v3 + CSS custom properties for theming |
 | Build tool | Vite |
 | State management | URL-based nav (no global store) |
 | Routing | React Router v6 |
@@ -178,6 +178,36 @@ src-tauri/
 2. Register it in the `invoke_handler!` macro in `src-tauri/src/lib.rs`.
 3. Add a typed wrapper in `src/lib/invoke.ts`.
 4. Consume it from a page or hook.
+
+## Theming
+
+The app supports three modes — Dark (default), Light, and System (follows OS) — stored in `localStorage` via `src/lib/theme.ts` and applied as a class (`dark`, `light`, `system`) on `<html>`.
+
+### How colors are themed
+
+All theme-sensitive Tailwind utilities route through CSS custom properties defined in `src/index.css`. Tailwind's `gray`, `blue`, and `green` color scales are extended in `tailwind.config.js` to reference these variables:
+
+```
+gray.50–950   → --tw-gray-50 … --tw-gray-950
+blue.300/400/700/900 → --tw-blue-300/400/700/900
+green.400     → --tw-green-400
+```
+
+`:root` holds the dark-mode defaults (standard Tailwind gray scale, original blue/green values). `html.light` and `@media (prefers-color-scheme: light) html.system` override them with the light-mode palette.
+
+**Light mode palette**: Tailwind `slate` color family (cool blue-gray tint) reversed — `gray-950` → slate-50 background, `gray-100` → slate-900 near-black text. Blue accents remap to darker values (blue-400/300 → blue-700) so they remain legible on light backgrounds. Green-400 remaps to green-700.
+
+### Adding or changing a themed color
+
+1. Add `--tw-<color>-<shade>: <R> <G> <B>;` to both `:root` (dark default) and `html.light` (light override) in `src/index.css`.
+2. Extend `tailwind.config.js` under `theme.extend.colors` with `"rgb(var(--tw-<color>-<shade>) / <alpha-value>)"`.
+3. Use `text-<color>-<shade>` / `bg-<color>-<shade>` in components as usual — the value adapts per theme automatically.
+
+### Hardcoded colors to avoid
+
+- Do **not** use `text-white` for text on gray backgrounds — it becomes invisible in light mode. Use `text-gray-50` instead (remaps to near-black in light, near-white in dark).
+- Do **not** use `hover:text-white` on interactive elements inside content areas — same reason. Use `hover:text-gray-50`.
+- Colors outside the extended set (e.g. `blue-500`, `blue-600`, `red-*`, `yellow-*`) are **not** theme-mapped and render identically in both modes. This is intentional for colored-background elements like primary buttons (`bg-blue-600 text-white`) where white text is always on a dark-colored surface.
 
 ## Running the App
 
