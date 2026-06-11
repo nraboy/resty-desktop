@@ -1,7 +1,6 @@
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_store::StoreExt;
 
-use super::cache::{AppDb, BackupPlan, FullRepository, MasterKey};
+use super::cache::{AppDb, FullRepository, MasterKey};
 use super::crypto;
 use super::repo::run_restic_with_path;
 
@@ -12,10 +11,9 @@ pub fn is_app_setup(db: State<'_, AppDb>) -> Result<bool, String> {
     db.has_master_key()
 }
 
-/// Called once on first launch. Derives key, stores verification, migrates settings.json data.
+/// Called once on first launch. Derives key and stores the verification blob.
 #[tauri::command]
 pub async fn setup_master_password(
-    app: AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     password: String,
@@ -30,8 +28,6 @@ pub async fn setup_master_password(
 
     db.store_master_key(&salt, &nonce, &ciphertext)?;
     master_key.set(key)?;
-
-    migrate_from_settings_json(&app, &db, &key)?;
 
     Ok(())
 }
@@ -122,47 +118,4 @@ pub fn reset_app(
 ) -> Result<(), String> {
     db.reset_all()?;
     master_key.clear()
-}
-
-/// Read legacy settings.json and import repos, backup plans, and restic path into SQLite.
-fn migrate_from_settings_json(app: &AppHandle, db: &AppDb, key: &[u8; 32]) -> Result<(), String> {
-    let Ok(store) = app.store("settings.json") else {
-        return Ok(());
-    };
-
-    // Migrate repos
-    let repos: Vec<serde_json::Value> = store
-        .get("repos")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-
-    for repo_val in &repos {
-        let id = repo_val["id"].as_str().unwrap_or_default();
-        let name = repo_val["name"].as_str().unwrap_or_default();
-        let path = repo_val["path"].as_str().unwrap_or_default();
-        let password = repo_val["password"].as_str().unwrap_or_default();
-
-        if id.is_empty() || path.is_empty() {
-            continue;
-        }
-        let (nonce, ciphertext) = crypto::encrypt(key, password.as_bytes())?;
-        db.add_repo(id, name, path, &nonce, &ciphertext)?;
-    }
-
-    // Migrate backup plans
-    let plans: Vec<BackupPlan> = store
-        .get("backup_plans")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-
-    for plan in &plans {
-        db.save_backup_plan(plan)?;
-    }
-
-    // Migrate restic path
-    if let Some(restic_path) = store.get("restic_path").and_then(|v| v.as_str().map(str::to_string)) {
-        db.set_setting("restic_path", &restic_path)?;
-    }
-
-    Ok(())
 }

@@ -19,9 +19,10 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | State management | URL-based nav (no global store) |
 | Routing | React Router v6 |
 | Rust backend | Tauri v2 `#[tauri::command]` |
-| Settings persistence | SQLite (`app_data.db`) via `AppDb`; `tauri-plugin-store` kept only for legacy migration |
+| Settings persistence | SQLite (`app_data.db`) via `AppDb` |
 | File picker | `tauri-plugin-dialog` |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
+| Memory safety | `zeroize` crate — `MasterKey` and `FullRepository` zeroize sensitive bytes on drop/replace |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag |
@@ -43,6 +44,8 @@ src/
     types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, CheckResult,
                               #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper
     invoke.ts                 # Typed wrappers over tauri invoke()
+    format.ts                 # Shared display formatters: formatBytes, formatSize, formatDate, formatTimestamp,
+                              #   formatDuration (fractional param for sub-minute precision); used by all pages
   pages/
     AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.);
@@ -79,7 +82,7 @@ src-tauri/
     commands/
       mod.rs                  # shared get_restic_path() helper used by all command modules
       auth.rs                 # is_app_setup, setup_master_password, unlock_app, lock_app,
-                              #   change_master_password, reset_app; migrates legacy settings.json on first setup;
+                              #   change_master_password, reset_app;
                               #   unlock_app runs restic unlock on all repos in the background to clear stale locks from crashes
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
@@ -97,7 +100,9 @@ src-tauri/
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
                               #   run_schedule_now (accepts BackupHandle, calls execute_backup for each plan in the schedule),
                               #   describe_cron_expr; cron helpers next_fire_time + describe_cron
-      cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory); CopyHandle (in-memory, for cancel);
+      cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory, zeroizes key bytes on set/clear);
+                              #   FullRepository derives ZeroizeOnDrop so password is wiped from memory when dropped;
+                              #   CopyHandle (in-memory, for cancel);
                               #   MirrorHandle (in-memory, for mirror cancellation);
                               #   BackupHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for backup cancellation);
                               #   AppDb::recalculate_overdue_schedules — advances overdue next_run_at to next future fire time at startup (skips missed backups);
@@ -129,7 +134,7 @@ src-tauri/
 - All commands set both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
-- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is used to extract `snapshot_id` and stats. Returns the raw stdout as a `String`. On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks.
+- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is captured and returned (all other lines are discarded as they arrive — not buffered). On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks.
 - `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.
@@ -144,7 +149,7 @@ src-tauri/
 - App requires a **master password** set on first launch (`setup_master_password`). Subsequent launches call `unlock_app` to load the key into memory.
 - Master password is never stored. Instead: Argon2id derives a 32-byte key from password + random salt; AES-GCM encrypts a known verification plaintext; the salt + nonce + ciphertext are stored in the `master_key` table.
 - All repo passwords are encrypted with the master key (AES-GCM) and stored in the `repositories` table. They are decrypted on-demand via `db.get_full_repo(&repo_id, &key)`.
-- `MasterKey` is an in-memory `Mutex<Option<[u8; 32]>>` managed as `tauri::State`. It is `None` when locked; any command that calls restic will fail with "App is locked" until `unlock_app` succeeds.
+- `MasterKey` is an in-memory `Mutex<Option<[u8; 32]>>` managed as `tauri::State`. It is `None` when locked; any command that calls restic will fail with "App is locked" until `unlock_app` succeeds. Key bytes are zeroized (via the `zeroize` crate) when replaced or cleared.
 - `change_master_password` re-derives a new key and re-encrypts all repo passwords atomically in a SQLite transaction.
 - `reset_app` wipes all SQLite tables and clears the in-memory key, returning to first-launch state.
 - On first `setup_master_password`, any existing `settings.json` data (repos, backup plans, restic path) is migrated into SQLite and encrypted.
@@ -153,7 +158,7 @@ src-tauri/
 
 - Single SQLite database (`app_data.db`) in the Tauri app data directory, opened at startup and managed as `tauri::State<AppDb>`.
 - Tables: `master_key`, `repositories` (encrypted passwords), `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `browse_cache`, `repo_stats_cache`, `backup_history`.
-- `tauri-plugin-store` (`settings.json`) is still registered but only used by `migrate_from_settings_json` during first-time setup. All new reads/writes go through `AppDb`.
+- All reads/writes go through `AppDb`. `tauri-plugin-store` has been removed entirely (legacy `settings.json` migration code was dropped).
 
 ## Caching Layer
 

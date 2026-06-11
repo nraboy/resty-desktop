@@ -3,15 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { cancelBackup, forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
 import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
+import { formatDuration } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
-
-function formatSeconds(secs: number): string {
-  if (secs < 60) return `${secs}s`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
-  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
-}
 
 export default function BackupPlansPage() {
   const navigate = useNavigate();
@@ -265,9 +260,9 @@ export default function BackupPlansPage() {
                     </span>
                     <span>
                       {progress && progress.secondsRemaining != null
-                        ? `~${formatSeconds(progress.secondsRemaining)} remaining`
+                        ? `~${formatDuration(progress.secondsRemaining)} remaining`
                         : progress
-                        ? `${formatSeconds(progress.secondsElapsed)} elapsed`
+                        ? `${formatDuration(progress.secondsElapsed)} elapsed`
                         : ""}
                     </span>
                   </div>

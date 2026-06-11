@@ -5,22 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
+import { formatBytes, formatDate } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString();
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 export default function SnapshotsPage() {
   const navigate = useNavigate();

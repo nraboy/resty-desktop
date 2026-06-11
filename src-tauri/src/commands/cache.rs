@@ -6,6 +6,8 @@ use cron::Schedule as CronSchedule;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use super::browse::FileEntry;
 use super::crypto;
 
@@ -72,7 +74,9 @@ pub struct Schedule {
 
 // ── internal type (never serialised) ───────────────────────────────────────
 
+#[derive(ZeroizeOnDrop)]
 pub struct FullRepository {
+    #[zeroize(skip)]
     pub path: String,
     pub password: String,
 }
@@ -138,12 +142,18 @@ impl MasterKey {
     }
 
     pub fn set(&self, key: [u8; 32]) -> Result<(), String> {
-        *self.0.lock().map_err(|e| e.to_string())? = Some(key);
+        let mut guard = self.0.lock().map_err(|e| e.to_string())?;
+        if let Some(mut old) = guard.replace(key) {
+            old.zeroize();
+        }
         Ok(())
     }
 
     pub fn clear(&self) -> Result<(), String> {
-        *self.0.lock().map_err(|e| e.to_string())? = None;
+        let mut guard = self.0.lock().map_err(|e| e.to_string())?;
+        if let Some(mut key) = guard.take() {
+            key.zeroize();
+        }
         Ok(())
     }
 }

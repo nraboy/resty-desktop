@@ -91,7 +91,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
             </svg>
           </div>
           <h1 className="text-xl font-semibold text-gray-100">
-            {isSetup ? "Set Up Restic GUI" : "Welcome Back"}
+            {isSetup ? "Set Up Resty Desktop" : "Welcome Back"}
           </h1>
           <p className="text-sm text-gray-500 mt-1">
             {isSetup

@@ -1,14 +1,16 @@
-# Restic GUI
+# Resty Desktop
 
-A cross-platform desktop client for [Restic](https://restic.net/), the fast and secure backup tool. Restic GUI wraps the Restic CLI to provide a visual interface for managing repositories, creating backups, browsing snapshots, and restoring files — without touching the command line.
+A cross-platform desktop client for [Restic](https://restic.net/), the fast and secure backup tool. Resty Desktop wraps the Restic CLI to provide a visual interface for managing repositories, creating backups, browsing snapshots, and restoring files — without touching the command line.
 
 ## Features
 
-- **Repository management** — add local or remote repositories (S3, SFTP, B2, etc.), initialize new ones, check integrity, and rename or remove them
-- **Backups** — define backup plans with source paths, tags, and exclude patterns; run plans on demand
-- **Snapshots** — browse all snapshots in a repository, filter by host/path/tag, add or remove tags, and delete with optional pruning
-- **File browser** — navigate the file tree inside any snapshot and restore individual files or directories
-- **Retention policies** — configure keep-last/daily/weekly/monthly/yearly rules per backup plan
+- **Master password** — all repository passwords are encrypted at rest; a single master password unlocks the app on each launch
+- **Repository management** — add local or remote repositories (S3, SFTP, B2, etc.), initialize new ones, check integrity, rename, remove, or mirror to another repo
+- **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
+- **Schedules** — attach backup plans to a cron schedule; runs happen in the background even while the UI is closed
+- **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning
+- **File browser** — navigate the file tree inside any snapshot and restore individual files, directories, or entire snapshots
+- **Logs** — persistent history of every backup run with duration, file counts, bytes added, and snapshot ID
 
 ## Requirements
 
@@ -49,11 +51,9 @@ The packaged app will be written to `src-tauri/target/release/bundle/`.
 | Build tool | Vite |
 | Routing | React Router v6 |
 | Rust backend | Tauri v2 `#[tauri::command]` |
-| Settings persistence | `tauri-plugin-store` |
+| Settings persistence | SQLite (`app_data.db`) — repos, plans, schedules, encrypted passwords |
 | Restic integration | `std::process::Command` with `--json` flag |
 
 ## Configuration
 
 The Restic binary path defaults to `restic` on `$PATH`. You can override it in the Settings page if Restic is installed elsewhere.
-
-Repository passwords and settings are stored locally in `settings.json` via `tauri-plugin-store`.

@@ -1,26 +1,9 @@
 import { Fragment, useEffect, useState } from "react";
 import { listBackupHistory } from "../lib/invoke";
 import type { BackupHistoryEntry } from "../lib/types";
+import { formatBytes, formatDate, formatDuration } from "../lib/format";
 import Button from "../components/Button";
 import EmptyState from "../components/EmptyState";
-
-function formatDate(ts: number): string {
-  return new Date(ts * 1000).toLocaleString();
-}
-
-function formatDuration(secs: number): string {
-  if (secs < 60) return `${secs.toFixed(1)}s`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ${Math.floor(secs % 60)}s`;
-  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 export default function LogsPage() {
   const [entries, setEntries] = useState<BackupHistoryEntry[]>([]);
@@ -100,7 +83,7 @@ export default function LogsPage() {
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(entry.startedAt)}</td>
                     <td className="px-4 py-3 text-gray-300">{entry.planName ?? <span className="text-gray-600 italic">Manual</span>}</td>
                     <td className="px-4 py-3 text-gray-400">{entry.repoName ?? entry.repoId}</td>
-                    <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatDuration(entry.durationSeconds)}</td>
+                    <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatDuration(entry.durationSeconds, true)}</td>
                     <td className="px-4 py-3 text-gray-400">{entry.filesNew.toLocaleString()}</td>
                     <td className="px-4 py-3 text-gray-400">{entry.filesChanged.toLocaleString()}</td>
                     <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatBytes(entry.bytesAdded)}</td>

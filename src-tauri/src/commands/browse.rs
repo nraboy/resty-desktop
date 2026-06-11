@@ -143,14 +143,14 @@ pub async fn restore_snapshot(
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-        let stderr = child.stderr.take().unwrap();
+        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
         let stderr_thread = std::thread::spawn(move || {
             let mut s = String::new();
             BufReader::new(stderr).read_to_string(&mut s).ok();
             s
         });
 
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(|e| e.to_string())?;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {

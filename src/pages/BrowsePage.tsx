@@ -3,18 +3,11 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
 import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
+import { formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
-
-function formatSize(bytes?: number) {
-  if (!bytes) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
-  return `${(bytes / 1073741824).toFixed(2)} GB`;
-}
 
 const FileIcon = ({ type }: { type: string }) => {
   if (type === "dir") {

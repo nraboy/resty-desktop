@@ -88,7 +88,7 @@ export default function SettingsPage() {
     <div className="p-6">
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-gray-100">Settings</h1>
-        <p className="text-sm text-gray-500 mt-0.5">Configure Restic GUI behavior</p>
+        <p className="text-sm text-gray-500 mt-0.5">Configure Resty Desktop behavior</p>
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-5">

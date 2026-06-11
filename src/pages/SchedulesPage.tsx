@@ -2,14 +2,10 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listSchedules, removeSchedule, toggleSchedule } from "../lib/invoke";
 import type { Schedule } from "../lib/types";
+import { formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
-
-function formatTimestamp(ts: number | undefined): string {
-  if (!ts) return "Never";
-  return new Date(ts * 1000).toLocaleString();
-}
 
 export default function SchedulesPage() {
   const navigate = useNavigate();

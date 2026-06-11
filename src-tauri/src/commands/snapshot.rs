@@ -172,20 +172,23 @@ pub async fn execute_backup(
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-        let stderr = child.stderr.take().unwrap();
+        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
         let stderr_thread = std::thread::spawn(move || {
             let mut s = String::new();
             BufReader::new(stderr).read_to_string(&mut s).ok();
             s
         });
 
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
 
         // Store child so cancel_backup can reach it.
-        *child_arc.lock().unwrap() = Some(child);
+        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
 
         let reader = BufReader::new(stdout);
-        let mut all_lines: Vec<String> = Vec::new();
+        // Only the final `summary` line is needed downstream; the (potentially
+        // huge) stream of `status` lines is processed and discarded as it
+        // arrives rather than buffered.
+        let mut summary_line: Option<String> = None;
 
         for line in reader.lines() {
             if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
@@ -193,27 +196,30 @@ pub async fn execute_backup(
             }
             let line = line.map_err(|e| e.to_string())?;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                if v["message_type"].as_str() == Some("status") {
-                    let progress = BackupProgress {
-                        percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
-                        files_done: v["files_done"].as_u64().unwrap_or(0),
-                        total_files: v["total_files"].as_u64().unwrap_or(0),
-                        bytes_done: v["bytes_done"].as_u64().unwrap_or(0),
-                        total_bytes: v["total_bytes"].as_u64().unwrap_or(0),
-                        seconds_elapsed: v["seconds_elapsed"].as_u64().unwrap_or(0),
-                        seconds_remaining: v["seconds_remaining"].as_u64(),
-                        current_files: v["current_files"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
-                            .unwrap_or_default(),
-                    };
-                    let _ = app_inner.emit("backup:progress", &progress);
+                match v["message_type"].as_str() {
+                    Some("status") => {
+                        let progress = BackupProgress {
+                            percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
+                            files_done: v["files_done"].as_u64().unwrap_or(0),
+                            total_files: v["total_files"].as_u64().unwrap_or(0),
+                            bytes_done: v["bytes_done"].as_u64().unwrap_or(0),
+                            total_bytes: v["total_bytes"].as_u64().unwrap_or(0),
+                            seconds_elapsed: v["seconds_elapsed"].as_u64().unwrap_or(0),
+                            seconds_remaining: v["seconds_remaining"].as_u64(),
+                            current_files: v["current_files"]
+                                .as_array()
+                                .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+                                .unwrap_or_default(),
+                        };
+                        let _ = app_inner.emit("backup:progress", &progress);
+                    }
+                    Some("summary") => summary_line = Some(line),
+                    _ => {}
                 }
             }
-            all_lines.push(line);
         }
 
-        let status = match child_arc.lock().unwrap().take() {
+        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
             Some(mut c) => c.wait().map_err(|e| e.to_string())?,
             None => return Err("cancelled".to_string()),
         };
@@ -224,7 +230,7 @@ pub async fn execute_backup(
         }
 
         if status.success() {
-            Ok(all_lines.join("\n"))
+            Ok(summary_line.unwrap_or_default())
         } else {
             let msg = stderr_str.trim();
             Err(if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() })
@@ -382,8 +388,8 @@ pub async fn copy_snapshot(
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-        let stderr = child.stderr.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
 
         let stderr_thread = std::thread::spawn(move || {
             let mut s = String::new();
@@ -392,13 +398,13 @@ pub async fn copy_snapshot(
         });
 
         // Store child so cancel_copy can reach it.
-        *child_arc.lock().unwrap() = Some(child);
+        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
 
         // Drain stdout so the process isn't blocked on a full pipe buffer.
         for _ in BufReader::new(stdout).lines() {}
 
         // stdout exhausted (process ended or was killed); take child back to call wait().
-        let status = match child_arc.lock().unwrap().take() {
+        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
             Some(mut c) => c.wait().map_err(|e| e.to_string())?,
             None => return Err("cancelled".to_string()),
         };
@@ -484,8 +490,8 @@ pub async fn mirror_repo(
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-        let stderr = child.stderr.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
 
         let stderr_thread = std::thread::spawn(move || {
             let mut s = String::new();
@@ -493,12 +499,12 @@ pub async fn mirror_repo(
             s
         });
 
-        *child_arc.lock().unwrap() = Some(child);
+        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
 
         // Drain stdout to avoid blocking the process on a full pipe buffer.
         for _ in BufReader::new(stdout).lines() {}
 
-        let status = match child_arc.lock().unwrap().take() {
+        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
             Some(mut c) => c.wait().map_err(|e| e.to_string())?,
             None => return Err("cancelled".to_string()),
         };
