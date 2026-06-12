@@ -65,7 +65,8 @@ src/
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events);
                               #   per-snapshot copy to another repo with cancellation support;
-                              #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos
+                              #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos;
+                              #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo navigation
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
@@ -78,7 +79,8 @@ src/
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
     SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately
     ScheduleEditPage.tsx      # Create/edit a schedule (name, cron expression, backup plans to run); scheduleId="new" for creation
-    LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows
+    LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows;
+                              #   paginated at PAGE_SIZE=10 rows per page with Previous/Next controls and a "Page X of Y · N total entries" counter
     SettingsPage.tsx          # Restic binary path override; shows detected restic version below path input;
                               #   install instructions section hidden when restic is found;
                               #   global backup compression selector (off/fastest/auto/better/max) persisted to app_settings;

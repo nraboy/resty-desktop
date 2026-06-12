@@ -11,6 +11,8 @@ import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 
+const PAGE_SIZE = 10;
+
 export default function SnapshotsPage() {
   const navigate = useNavigate();
   const { repoId } = useParams<{ repoId: string }>();
@@ -27,6 +29,7 @@ export default function SnapshotsPage() {
   const [newTag, setNewTag] = useState("");
   const [tagging, setTagging] = useState(false);
   const [filter, setFilter] = useState("");
+  const [page, setPage] = useState(0);
   const [unlockConfirm, setUnlockConfirm] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -216,6 +219,8 @@ export default function SnapshotsPage() {
       : snapshots,
     [snapshots, filter]);
 
+  useEffect(() => setPage(0), [filter, repoId]);
+
   if (!repoId || (!repo && !loading)) {
     return (
       <EmptyState
@@ -268,7 +273,11 @@ export default function SnapshotsPage() {
           title="No snapshots"
           description="Run a backup to create the first snapshot."
         />
-      ) : (
+      ) : (() => {
+        const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+        const pageEntries = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+        return (
+          <>
         <div className="rounded-xl border border-gray-800 overflow-hidden">
           <table className="w-full text-sm">
             <thead>
@@ -282,7 +291,7 @@ export default function SnapshotsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {filtered.map((snap) => (
+              {pageEntries.map((snap) => (
                 <tr key={snap.id} className="hover:bg-gray-900/50 transition-colors">
                   <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
                   <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
@@ -362,7 +371,24 @@ export default function SnapshotsPage() {
             </tbody>
           </table>
         </div>
-      )}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between mt-4">
+            <p className="text-sm text-gray-500">
+              Page {page + 1} of {totalPages} · {filtered.length} snapshot{filtered.length !== 1 ? "s" : ""}
+            </p>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={() => setPage(p => p - 1)} disabled={page === 0}>
+                Previous
+              </Button>
+              <Button variant="secondary" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1}>
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+          </>
+        );
+      })()}
 
       <Modal
         title="Delete Snapshot"
