@@ -31,7 +31,9 @@ A cross-platform desktop client for the Restic CLI backup tool.
 
 ```
 src/
-  App.tsx                     # Router + layout shell; handles auth state machine (loading/setup/locked/unlocked)
+  App.tsx                     # Router + layout shell; handles auth state machine (loading/setup/locked/unlocked);
+                              #   on unlock, calls getResticVersion and shows a dismissable warning banner if the
+                              #   detected version is below MIN_RESTIC_MAJOR.MIN_RESTIC_MINOR (from config.ts)
   main.tsx                    # React entry point
   index.css                   # Tailwind directives + global styles
   components/
@@ -46,6 +48,8 @@ src/
     invoke.ts                 # Typed wrappers over tauri invoke()
     format.ts                 # Shared display formatters: formatBytes, formatSize, formatDate, formatTimestamp,
                               #   formatDuration (fractional param for sub-minute precision); used by all pages
+    config.ts                 # App-level constants: MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR — bump to change minimum
+                              #   supported restic version; consumed by App.tsx version warning banner
   pages/
     AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.);
@@ -63,7 +67,10 @@ src/
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
                               #   backup modal with streaming progress bar (backup:progress events), cancellation support
-                              #   (cancel_backup), and completion/error confirmation UI
+                              #   (cancel_backup), and completion/error confirmation UI;
+                              #   "Apply Retention" funnel button shown per-plan when a retention policy with at least one
+                              #   keep rule is configured; opens a modal that runs forget_by_plan standalone (no backup);
+                              #   row icons use 24px outline stroke style matching RepositoriesPage
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
     SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately
@@ -103,7 +110,8 @@ src-tauri/
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
-                              #   forget_by_plan, unlock_repo,
+                              #   forget_by_plan (when filtering by tags, passes --group-by tags so retention is applied
+                              #   per tag-group across all hosts/paths — avoids per-host grouping surprises), unlock_repo,
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
                               #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks

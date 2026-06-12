@@ -14,7 +14,7 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 
 ## Requirements
 
-- [Restic](https://restic.readthedocs.io/en/latest/020_installation.html) installed and available on `$PATH` (or configured via Settings)
+- [Restic](https://restic.readthedocs.io/en/latest/020_installation.html) 0.17 or newer, installed and available on `$PATH` (or configured via Settings)
 - [Rust](https://rustup.rs/) (for building from source)
 - Node.js 18+
 

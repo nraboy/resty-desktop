@@ -596,6 +596,8 @@ pub async fn forget_by_plan(
         vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
 
     if !tags.is_empty() {
+        args.push("--group-by".to_string());
+        args.push("tags".to_string());
         args.push("--tag".to_string());
         args.push(tags.join(","));
     } else {

@@ -13,7 +13,8 @@ import ScheduleEditPage from "./pages/ScheduleEditPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, getResticVersion } from "./lib/invoke";
+import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
 
 function MenuEventHandler() {
   const navigate = useNavigate();
@@ -41,6 +42,7 @@ type AuthState = "loading" | "setup" | "locked" | "unlocked";
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [menuResetTriggered, setMenuResetTriggered] = useState(false);
+  const [showVersionWarning, setShowVersionWarning] = useState(false);
 
   useEffect(() => {
     isAppSetup()
@@ -51,6 +53,15 @@ export default function App() {
   useEffect(() => {
     if (authState === "loading") return;
     setMenuAuthState(authState === "unlocked").catch(() => {});
+    if (authState === "unlocked") {
+      getResticVersion().then((v) => {
+        const m = v.match(/restic (\d+)\.(\d+)/);
+        if (m) {
+          const [major, minor] = [parseInt(m[1]), parseInt(m[2])];
+          if (major === MIN_RESTIC_MAJOR && minor < MIN_RESTIC_MINOR) setShowVersionWarning(true);
+        }
+      }).catch(() => {});
+    }
   }, [authState]);
 
   useEffect(() => {
@@ -88,8 +99,25 @@ export default function App() {
           <MenuEventHandler />
           <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
             <Sidebar />
-            <main className="flex-1 overflow-y-auto">
-              <Routes>
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {showVersionWarning && (
+                <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">
+                  <span>
+                    For the best experience, upgrade to <strong>restic {MIN_RESTIC_MAJOR}.{MIN_RESTIC_MINOR} or newer</strong>. Some retention and grouping features may not work correctly on older versions.
+                  </span>
+                  <button
+                    onClick={() => setShowVersionWarning(false)}
+                    className="flex-shrink-0 text-yellow-300 hover:text-yellow-100 transition-colors"
+                    aria-label="Dismiss"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+              <main className="flex-1 overflow-y-auto">
+                <Routes>
                 <Route path="/" element={<RepositoriesPage />} />
                 <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
                 <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
@@ -100,7 +128,8 @@ export default function App() {
                 <Route path="/logs" element={<LogsPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
-            </main>
+              </main>
+            </div>
           </div>
         </BrowserRouter>
       )}
