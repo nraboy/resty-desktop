@@ -119,6 +119,34 @@ fn validate_snapshot_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotStats {
+    pub total_size: u64,
+    pub total_file_count: u64,
+}
+
+#[tauri::command]
+pub async fn get_snapshot_stats(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    snapshot_id: String,
+) -> Result<SnapshotStats, String> {
+    validate_snapshot_id(&snapshot_id)?;
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+    let stdout = run_restic_with_path(&repo, vec!["stats", "--json", &snapshot_id], &restic_path)?;
+    let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
+        .ok_or_else(|| "No output from restic stats".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
+    Ok(SnapshotStats {
+        total_size: v["total_size"].as_u64().unwrap_or(0),
+        total_file_count: v["total_file_count"].as_u64().unwrap_or(0),
+    })
+}
+
 pub async fn execute_backup(
     app: &tauri::AppHandle,
     db: &AppDb,

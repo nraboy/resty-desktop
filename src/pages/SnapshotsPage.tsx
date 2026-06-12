@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
-import type { CheckResult, Repository, RestoreProgress, Snapshot } from "../lib/types";
+import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
 import Button from "../components/Button";
+import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
@@ -45,6 +46,11 @@ export default function SnapshotsPage() {
   const [copying, setCopying] = useState(false);
   const [copyDone, setCopyDone] = useState(false);
   const [copyCancelled, setCopyCancelled] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ snap: Snapshot; x: number; y: number } | null>(null);
+  const [statsTarget, setStatsTarget] = useState<Snapshot | null>(null);
+  const [snapshotStats, setSnapshotStats] = useState<SnapshotStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
 
   useEffect(() => {
     if (!repoId) return;
@@ -220,6 +226,11 @@ export default function SnapshotsPage() {
     [snapshots, filter]);
 
   useEffect(() => setPage(0), [filter, repoId]);
+  useEffect(() => {
+    if (filtered.length === 0) return;
+    const lastPage = Math.ceil(filtered.length / PAGE_SIZE) - 1;
+    if (page > lastPage) setPage(lastPage);
+  }, [filtered.length, page]);
 
   if (!repoId || (!repo && !loading)) {
     return (
@@ -292,7 +303,15 @@ export default function SnapshotsPage() {
             </thead>
             <tbody className="divide-y divide-gray-800">
               {pageEntries.map((snap) => (
-                <tr key={snap.id} className="hover:bg-gray-900/50 transition-colors">
+                <tr
+                  key={snap.id}
+                  className="hover:bg-gray-900/50 transition-colors"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu({ snap, x: e.clientX, y: e.clientY });
+                  }}
+                >
                   <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
                   <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
                   <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
@@ -651,6 +670,94 @@ export default function SnapshotsPage() {
               <Button onClick={handleCopy} loading={copying} disabled={!copyDestRepoId}>
                 Copy
               </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={[
+            {
+              label: "Browse Files",
+              onClick: () => navigate(`/snapshots/${repoId}/${contextMenu.snap.id}/browse`, { state: { snapshot: contextMenu.snap } }),
+            },
+            {
+              label: "Restore…",
+              onClick: () => { setRestoreTarget(contextMenu.snap); setRestoreDir(""); setRestoreDone(false); },
+            },
+            {
+              label: "Copy to Repository…",
+              disabled: allRepos.filter((r) => r.id !== repoId).length === 0,
+              onClick: () => { setCopyTarget(contextMenu.snap); setCopyDestRepoId(""); setCopyDone(false); },
+            },
+            {
+              label: "Add Tag…",
+              onClick: () => { setTagTarget(contextMenu.snap); setNewTag(""); },
+            },
+            { separator: true },
+            {
+              label: "Snapshot Stats",
+              onClick: () => {
+                const snap = contextMenu.snap;
+                setStatsTarget(snap);
+                setSnapshotStats(null);
+                setStatsError("");
+                setStatsLoading(true);
+                getSnapshotStats(repoId!, snap.id)
+                  .then(setSnapshotStats)
+                  .catch((err) => setStatsError(String(err)))
+                  .finally(() => setStatsLoading(false));
+              },
+            },
+            { separator: true },
+            {
+              label: "Delete",
+              variant: "danger",
+              onClick: () => setDeleteTarget(contextMenu.snap),
+            },
+          ] satisfies ContextMenuItemDef[]}
+        />
+      )}
+
+      <Modal
+        title={`Snapshot Stats: ${statsTarget?.short_id ?? ""}`}
+        open={statsTarget !== null}
+        onClose={() => { setStatsTarget(null); setSnapshotStats(null); setStatsError(""); }}
+      >
+        {statsLoading ? (
+          <div className="flex flex-col items-center justify-center py-10 gap-3 text-sm text-gray-400">
+            <svg className="animate-spin w-6 h-6 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+            Running restic stats…
+          </div>
+        ) : statsError ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{statsError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setStatsTarget(null); setStatsError(""); }}>Close</Button>
+            </div>
+          </>
+        ) : snapshotStats && (
+          <>
+            <div className="space-y-3 mb-6">
+              <div className="flex items-center justify-between py-2 border-b border-gray-800">
+                <span className="text-sm text-gray-400">Total size</span>
+                <span className="text-sm font-medium text-gray-100">{formatBytes(snapshotStats.totalSize)}</span>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-gray-800">
+                <span className="text-sm text-gray-400">File count</span>
+                <span className="text-sm font-medium text-gray-100">{snapshotStats.totalFileCount.toLocaleString()}</span>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 mb-4">Size reflects all data in this snapshot, including data shared with other snapshots.</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setStatsTarget(null); setSnapshotStats(null); }}>Close</Button>
             </div>
           </>
         )}

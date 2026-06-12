@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +80,9 @@ export const checkRepo = (repoId: string): Promise<CheckResult> =>
 export const pruneAllRepos = (): Promise<void> =>
   invoke("prune_all_repos");
 
+export const pruneRepo = (repoId: string): Promise<void> =>
+  invoke("prune_repo", { repoId });
+
 export const cancelPrune = (): Promise<void> =>
   invoke("cancel_prune");
 
@@ -87,6 +90,9 @@ export const cancelPrune = (): Promise<void> =>
 
 export const listSnapshots = (repoId: string): Promise<Snapshot[]> =>
   invoke("list_snapshots", { repoId });
+
+export const getSnapshotStats = (repoId: string, snapshotId: string): Promise<SnapshotStats> =>
+  invoke("get_snapshot_stats", { repoId, snapshotId });
 
 export const refreshSnapshots = (repoId: string): Promise<Snapshot[]> =>
   invoke("refresh_snapshots", { repoId });

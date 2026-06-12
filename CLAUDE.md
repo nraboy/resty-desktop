@@ -49,7 +49,7 @@ src/
     Modal.tsx                 # Overlay modal dialog
     Sidebar.tsx               # Left nav with app icon + "Resty Desktop" title; active repo indicator
   lib/
-    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, CheckResult,
+    types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
                               #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper
     invoke.ts                 # Typed wrappers over tauri invoke()
     format.ts                 # Shared display formatters: formatBytes, formatSize, formatDate, formatTimestamp,
@@ -67,14 +67,19 @@ src/
                               #   and a text input for remote URLs; password pre-loaded (masked) via get_repo_password;
                               #   Test Connection button validates the current path+password before saving;
                               #   right-click context menu on each repo row: Open Snapshots, Refresh Stats, Check Repository,
-                              #   Edit, Mirror, Delete — Check Repository runs check_repo and shows result in a modal
-                              #   (spinner while running, then success/error UI matching SnapshotsPage); Check only appears in
-                              #   the context menu, not as a row button
+                              #   Edit, Mirror, Prune, Delete — Check Repository runs check_repo and shows result in a modal
+                              #   (spinner while running, then success/error UI matching SnapshotsPage); Check and Prune only appear in
+                              #   the context menu, not as row buttons; Prune modal has confirmation → indeterminate progress + elapsed
+                              #   timer + Cancel → done/cancelled states, uses PruneHandle + cancel_prune for cancellation
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events);
                               #   per-snapshot copy to another repo with cancellation support;
                               #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos;
-                              #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo navigation
+                              #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo
+                              #   navigation; page is clamped to last valid page when filtered set shrinks (e.g. after delete) to avoid empty-page trap;
+                              #   right-click context menu on each snapshot row: Browse Files, Restore…, Copy to Repository…, Add Tag…,
+                              #   Snapshot Stats, Delete — Snapshot Stats calls get_snapshot_stats (restic stats --json <id>) and shows
+                              #   total size + file count in a modal (spinner while running, note that size includes shared data)
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
@@ -83,7 +88,7 @@ src/
                               #   "Apply Retention" funnel button shown per-plan when a retention policy with at least one
                               #   keep rule is configured; opens a modal that runs forget_by_plan standalone (no backup);
                               #   row icons use 24px outline stroke style matching RepositoriesPage;
-                              #   right-click context menu on each plan row: Edit Plan, Run Backup, Apply Retention
+                              #   right-click context menu on each plan row: Edit Plan, Run Backup, Apply Retention Rules
                               #   (only shown when plan has at least one keep rule), Delete
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
@@ -121,10 +126,12 @@ src-tauri/
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo, get_compression, set_compression,
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
-                              #   cancellable via PruneHandle), cancel_prune;
+                              #   cancellable via PruneHandle), prune_repo (runs restic prune on a single repo, same
+                              #   PruneHandle + cancel_prune cancellation pattern), cancel_prune;
                               #   set_restic_path validates non-empty and checks file existence for absolute paths before saving;
                               #   run_restic_with_path uses String::from_utf8 (strict) for stdout and from_utf8_lossy for stderr
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
+                              #   get_snapshot_stats (runs restic stats --json <id>, returns SnapshotStats { totalSize, totalFileCount }),
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
                               #   forget_by_plan (when filtering by tags, passes --group-by tags so retention is applied
@@ -132,8 +139,8 @@ src-tauri/
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
                               #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks;
-                              #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot — rejects anything
-                              #   outside 8–64 lowercase hex characters before any crypto or restic work
+                              #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot, get_snapshot_stats —
+                              #   rejects anything outside 8–64 lowercase hex characters before any crypto or restic work
       browse.rs               # list_files, restore_path, restore_snapshot
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
@@ -182,6 +189,8 @@ src-tauri/
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.
 - `mirror_repo` runs `restic copy` (no specific snapshot ID) with `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots from src to dest, skipping those already present. A `MirrorHandle` state (same pattern as `CopyHandle`) allows `cancel_mirror`. Also runs `restic unlock` on both repos after cancel.
 - `prune_all_repos` runs `restic prune` on each repo sequentially, emitting `prune:progress` events (consumed by the SettingsPage modal). A `PruneHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `BackupHandle`) allows `cancel_prune` to kill the child mid-run; after a cancel-kill, `restic unlock` is called on the affected repo to clear stale locks.
+- `prune_repo` runs `restic prune` on a single repo (triggered from the RepositoriesPage right-click context menu); reuses the same `PruneHandle` and `cancel_prune` command. No progress events — the frontend shows an indeterminate progress bar with elapsed timer.
+- `get_snapshot_stats` runs `restic stats --json <snapshot_id>` for a single snapshot; returns `SnapshotStats { totalSize, totalFileCount }`. Guarded by `validate_snapshot_id`. Note: size includes all data referenced by the snapshot, including blobs shared with other snapshots.
 - `unlock_app` runs `restic unlock` on all repos in the background immediately after the master password is verified, clearing any stale locks left by a previous crash or force-quit.
 - `get_restic_version` runs `restic version` and returns the trimmed stdout string (e.g. `restic 0.18.1 compiled with go1.25.1 on darwin/arm64`). Used by `SettingsPage` to verify the configured binary path is valid.
 - Repos, backup plans, schedules, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.
@@ -266,4 +275,10 @@ Build a distributable:
 
 ```bash
 npm run tauri build
+```
+
+Remove build artifacts (`dist/` and `src-tauri/target/`):
+
+```bash
+npm run clean
 ```

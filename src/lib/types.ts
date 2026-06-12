@@ -34,6 +34,11 @@ export interface ResticStats {
   snapshots_count: number;
 }
 
+export interface SnapshotStats {
+  totalSize: number;
+  totalFileCount: number;
+}
+
 export interface BackupHistoryEntry {
   id: string;
   repoId: string;

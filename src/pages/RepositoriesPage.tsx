@@ -5,12 +5,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   addRepo,
   cancelMirror,
+  cancelPrune,
   checkRepo,
   getRepoPassword,
   getRepoStats,
   initRepo,
   listRepos,
   mirrorRepo,
+  pruneRepo,
   refreshRepoStats,
   refreshSnapshots,
   removeRepo,
@@ -65,6 +67,13 @@ export default function RepositoriesPage() {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [checkRepoName, setCheckRepoName] = useState("");
+  const [pruneTarget, setPruneTarget] = useState<Repository | null>(null);
+  const [pruning, setPruning] = useState(false);
+  const [pruneDone, setPruneDone] = useState(false);
+  const [pruneCancelled, setPruneCancelled] = useState(false);
+  const [pruneError, setPruneError] = useState("");
+  const [pruneElapsed, setPruneElapsed] = useState(0);
+  const pruneStartRef = useRef<number>(0);
 
   const load = () =>
     listRepos()
@@ -243,6 +252,16 @@ export default function RepositoriesPage() {
     return () => clearInterval(id);
   }, [mirroring]);
 
+  useEffect(() => {
+    if (!pruning) return;
+    pruneStartRef.current = Date.now();
+    setPruneElapsed(0);
+    const id = setInterval(() => {
+      setPruneElapsed(Math.floor((Date.now() - pruneStartRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [pruning]);
+
   const handleMirror = async () => {
     if (!mirrorSource || !mirrorDestId) return;
     setMirroring(true);
@@ -279,6 +298,39 @@ export default function RepositoriesPage() {
     setMirrorDone(false);
     setMirrorCancelled(false);
     setMirrorError("");
+  };
+
+  const handlePrune = async () => {
+    if (!pruneTarget) return;
+    setPruning(true);
+    setPruneDone(false);
+    setPruneCancelled(false);
+    setPruneError("");
+    try {
+      await pruneRepo(pruneTarget.id);
+      setPruneDone(true);
+    } catch (err: any) {
+      const msg = String(err);
+      if (msg === "Cancelled") {
+        setPruneCancelled(true);
+      } else {
+        setPruneError(msg);
+      }
+    } finally {
+      setPruning(false);
+    }
+  };
+
+  const handleCancelPrune = async () => {
+    try { await cancelPrune(); } catch {}
+  };
+
+  const closePruneModal = () => {
+    if (pruning) return;
+    setPruneTarget(null);
+    setPruneDone(false);
+    setPruneCancelled(false);
+    setPruneError("");
   };
 
   return (
@@ -705,6 +757,66 @@ export default function RepositoriesPage() {
         )}
       </Modal>
 
+      <Modal
+        title={`Prune: ${pruneTarget?.name ?? ""}`}
+        open={pruneTarget !== null}
+        onClose={closePruneModal}
+      >
+        {pruneDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              Prune complete
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Unreferenced data has been removed from{" "}
+              <span className="font-semibold text-gray-50">{pruneTarget?.name}</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={closePruneModal}>Close</Button>
+            </div>
+          </>
+        ) : pruneCancelled ? (
+          <>
+            <p className="text-sm text-gray-400 mb-4">Prune was cancelled.</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={closePruneModal}>Close</Button>
+            </div>
+          </>
+        ) : pruning ? (
+          <>
+            <p className="text-xs text-gray-400 mb-1">Pruning repository…</p>
+            <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden mb-4">
+              <div className="h-2 w-1/3 rounded-full bg-blue-500 animate-[slide_1.4s_ease-in-out_infinite]" />
+            </div>
+            {pruneError && <p className="text-sm text-red-300 mb-3">{pruneError}</p>}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-gray-500">
+                {pruneElapsed < 60
+                  ? `${pruneElapsed}s elapsed`
+                  : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
+              </span>
+              <Button variant="secondary" onClick={handleCancelPrune}>Cancel</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-5">
+              Remove unreferenced data from{" "}
+              <span className="font-semibold text-gray-50">{pruneTarget?.name}</span>? This frees disk space
+              by deleting pack files that are no longer referenced by any snapshot.
+            </p>
+            {pruneError && <p className="text-sm text-red-300 mb-3">{pruneError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={closePruneModal}>Cancel</Button>
+              <Button onClick={handlePrune}>Prune</Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -754,6 +866,15 @@ export default function RepositoriesPage() {
                 setMirrorDone(false);
                 setMirrorCancelled(false);
                 setMirrorError("");
+              },
+            },
+            {
+              label: "Prune…",
+              onClick: () => {
+                setPruneTarget(contextMenu.repo);
+                setPruneDone(false);
+                setPruneCancelled(false);
+                setPruneError("");
               },
             },
             { separator: true },

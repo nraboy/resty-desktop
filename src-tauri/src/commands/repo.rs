@@ -380,6 +380,74 @@ pub async fn prune_all_repos(
 }
 
 #[tauri::command]
+pub async fn prune_repo(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    prune_handle: State<'_, PruneHandle>,
+    repo_id: String,
+) -> Result<(), String> {
+    prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let key = master_key.get()?;
+    let full = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    let path_for_unlock = full.path.clone();
+    let pass_for_unlock = full.password.clone();
+    let restic_path_for_unlock = restic_path.clone();
+
+    let child = std::process::Command::new(&restic_path)
+        .arg("prune")
+        .env("RESTIC_REPOSITORY", &full.path)
+        .env("RESTIC_PASSWORD", &full.password)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run restic: {e}"))?;
+
+    {
+        let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+
+    let status = loop {
+        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            break None;
+        }
+        let maybe_status = {
+            let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
+            if let Some(ref mut c) = *guard {
+                c.try_wait().map_err(|e| e.to_string())?
+            } else {
+                break None;
+            }
+        };
+        if let Some(s) = maybe_status {
+            break Some(s);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    };
+
+    {
+        let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
+        *guard = None;
+    }
+
+    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        let unlock_repo = FullRepository { path: path_for_unlock, password: pass_for_unlock };
+        let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path_for_unlock);
+        return Err("Cancelled".to_string());
+    }
+
+    let status = status.unwrap();
+    if !status.success() {
+        return Err("Prune failed".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
     prune_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = prune_handle.child.lock() {

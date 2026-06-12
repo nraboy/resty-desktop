@@ -292,7 +292,7 @@ export default function BackupPlansPage() {
               onClick: () => openBackupModal(contextMenu.plan),
             },
             ...(hasRetentionRules(contextMenu.plan)
-              ? [{ label: "Apply Retention", onClick: () => openRetentionModal(contextMenu.plan) }]
+              ? [{ label: "Apply Retention Rules", onClick: () => openRetentionModal(contextMenu.plan) }]
               : []),
             { separator: true },
             {
