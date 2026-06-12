@@ -37,6 +37,9 @@ export default function SettingsPage() {
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const pruneStartRef = useRef<number>(0);
   const pruneUnlistenRef = useRef<(() => void) | null>(null);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -63,6 +66,15 @@ export default function SettingsPage() {
     return () => clearInterval(id);
   }, [pruning]);
 
+  useEffect(() => {
+    return () => {
+      pruneUnlistenRef.current?.();
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
+      if (passwordTimerRef.current !== null) clearTimeout(passwordTimerRef.current);
+    };
+  }, []);
+
   const handleSave = async () => {
     setSaving(true);
     setError("");
@@ -71,7 +83,8 @@ export default function SettingsPage() {
       await setResticPath(resticPath);
       await saveCompression(compression);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2000);
       getResticVersion()
         .then((v) => { setResticVersion(v); setVersionError(""); })
         .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -87,7 +100,8 @@ export default function SettingsPage() {
     try {
       await clearBrowseCache();
       setCacheCleared(true);
-      setTimeout(() => setCacheCleared(false), 2000);
+      if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
+      cacheTimerRef.current = setTimeout(() => setCacheCleared(false), 2000);
     } finally {
       setClearingCache(false);
     }
@@ -164,7 +178,8 @@ export default function SettingsPage() {
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      setTimeout(() => setPasswordChanged(false), 3000);
+      if (passwordTimerRef.current !== null) clearTimeout(passwordTimerRef.current);
+      passwordTimerRef.current = setTimeout(() => setPasswordChanged(false), 3000);
     } catch (err: any) {
       setPasswordError(String(err));
     } finally {

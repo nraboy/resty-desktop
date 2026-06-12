@@ -23,9 +23,9 @@ pub fn run_restic_with_path(
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        String::from_utf8(output.stdout).map_err(|e| format!("restic output contained invalid UTF-8: {e}"))
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
     }
 }
 
@@ -114,7 +114,7 @@ pub async fn init_repo(
         .map_err(|e| format!("Failed to run restic: {e}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
 
     let key = master_key.get()?;
@@ -243,7 +243,17 @@ pub fn get_restic_path(db: State<'_, AppDb>) -> Result<String, String> {
 
 #[tauri::command]
 pub fn set_restic_path(db: State<'_, AppDb>, path: String) -> Result<(), String> {
-    db.set_setting("restic_path", &path)
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Restic path must not be empty".to_string());
+    }
+    // If the value looks like an absolute path, verify the file exists.
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(":\\") {
+        if !std::path::Path::new(trimmed).is_file() {
+            return Err(format!("No file found at '{trimmed}'"));
+        }
+    }
+    db.set_setting("restic_path", trimmed)
 }
 
 #[tauri::command]
@@ -264,9 +274,9 @@ pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
         .output()
         .map_err(|_| format!("restic not found at '{restic_path}'"))?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
     }
 }
 

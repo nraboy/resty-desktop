@@ -64,6 +64,7 @@ pub async fn delete_snapshot(
     snapshot_id: String,
     prune: bool,
 ) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
@@ -87,6 +88,7 @@ pub async fn tag_snapshot(
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
 ) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
@@ -106,6 +108,13 @@ pub async fn tag_snapshot(
             vec!["tag", "--remove", &tag_str, &snapshot_id],
             &restic_path,
         )?;
+    }
+    Ok(())
+}
+
+fn validate_snapshot_id(id: &str) -> Result<(), String> {
+    if id.len() < 8 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("Invalid snapshot ID: '{id}'"));
     }
     Ok(())
 }
@@ -195,9 +204,6 @@ pub async fn execute_backup(
         *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
 
         let reader = BufReader::new(stdout);
-        // Only the final `summary` line is needed downstream; the (potentially
-        // huge) stream of `status` lines is processed and discarded as it
-        // arrives rather than buffered.
         let mut summary_line: Option<String> = None;
 
         for line in reader.lines() {
@@ -372,6 +378,7 @@ pub async fn copy_snapshot(
     dest_repo_id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
     let key = master_key.get()?;
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;

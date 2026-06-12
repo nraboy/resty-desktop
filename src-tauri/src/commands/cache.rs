@@ -706,7 +706,7 @@ impl AppDb {
                  LEFT JOIN repositories r ON r.id = h.repo_id
                  LEFT JOIN backup_plans p ON p.id = h.plan_id
                  ORDER BY h.started_at DESC
-                 LIMIT 500",
+                 LIMIT 1000",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt

@@ -33,7 +33,9 @@ A cross-platform desktop client for the Restic CLI backup tool.
 src/
   App.tsx                     # Router + layout shell; handles auth state machine (loading/setup/locked/unlocked);
                               #   on unlock, calls getResticVersion and shows a dismissable warning banner if the
-                              #   detected version is below MIN_RESTIC_MAJOR.MIN_RESTIC_MINOR (from config.ts)
+                              #   detected version is below MIN_RESTIC_MAJOR.MIN_RESTIC_MINOR (from config.ts);
+                              #   routes are wrapped in an ErrorBoundary class component that catches unhandled render
+                              #   errors and shows a "Something went wrong / Try again" fallback instead of a white screen
   main.tsx                    # React entry point
   index.css                   # Tailwind directives + global styles
   components/
@@ -62,7 +64,8 @@ src/
                               #   Test Connection button validates the current path+password before saving
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events);
-                              #   per-snapshot copy to another repo with cancellation support
+                              #   per-snapshot copy to another repo with cancellation support;
+                              #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
@@ -106,7 +109,9 @@ src-tauri/
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo, get_compression, set_compression,
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
-                              #   cancellable via PruneHandle), cancel_prune
+                              #   cancellable via PruneHandle), cancel_prune;
+                              #   set_restic_path validates non-empty and checks file existence for absolute paths before saving;
+                              #   run_restic_with_path uses String::from_utf8 (strict) for stdout and from_utf8_lossy for stderr
       snapshot.rs             # list_snapshots, refresh_snapshots, delete_snapshot, tag_snapshot,
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
@@ -114,7 +119,9 @@ src-tauri/
                               #   per tag-group across all hosts/paths — avoids per-host grouping surprises), unlock_repo,
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
-                              #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks
+                              #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks;
+                              #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot — rejects anything
+                              #   outside 8–64 lowercase hex characters before any crypto or restic work
       browse.rs               # list_files, restore_path, restore_snapshot
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
@@ -122,6 +129,7 @@ src-tauri/
                               #   describe_cron_expr; cron helpers next_fire_time + describe_cron
       cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory, zeroizes key bytes on set/clear);
                               #   FullRepository derives ZeroizeOnDrop so password is wiped from memory when dropped;
+                              #   list_backup_history returns up to 1000 rows (LIMIT 1000), ordered newest-first;
                               #   CopyHandle (in-memory, for cancel);
                               #   MirrorHandle (in-memory, for mirror cancellation);
                               #   BackupHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for backup cancellation);

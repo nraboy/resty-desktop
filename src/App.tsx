@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Component, type ReactNode, type ErrorInfo } from "react";
 import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
 import { ThemeProvider } from "./lib/theme";
 import { listen } from "@tauri-apps/api/event";
@@ -15,6 +15,39 @@ import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
 import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Unhandled render error:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-screen w-screen bg-gray-950 gap-4 p-8">
+          <p className="text-gray-100 font-semibold">Something went wrong</p>
+          <p className="text-gray-400 text-sm text-center max-w-md">{this.state.error.message}</p>
+          <button
+            className="text-blue-400 text-sm hover:underline"
+            onClick={() => this.setState({ error: null })}
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function MenuEventHandler() {
   const navigate = useNavigate();
@@ -117,17 +150,19 @@ export default function App() {
                 </div>
               )}
               <main className="flex-1 overflow-y-auto">
-                <Routes>
-                <Route path="/" element={<RepositoriesPage />} />
-                <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
-                <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
-                <Route path="/backup-plans" element={<BackupPlansPage />} />
-                <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
-                <Route path="/schedules" element={<SchedulesPage />} />
-                <Route path="/schedules/:scheduleId" element={<ScheduleEditPage />} />
-                <Route path="/logs" element={<LogsPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-              </Routes>
+                <ErrorBoundary>
+                  <Routes>
+                    <Route path="/" element={<RepositoriesPage />} />
+                    <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
+                    <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
+                    <Route path="/backup-plans" element={<BackupPlansPage />} />
+                    <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
+                    <Route path="/schedules" element={<SchedulesPage />} />
+                    <Route path="/schedules/:scheduleId" element={<ScheduleEditPage />} />
+                    <Route path="/logs" element={<LogsPage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                  </Routes>
+                </ErrorBoundary>
               </main>
             </div>
           </div>

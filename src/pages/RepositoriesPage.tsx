@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -87,7 +87,7 @@ export default function RepositoriesPage() {
     }
   }, [searchParams]);
 
-  const handleRefreshRow = async (e: React.MouseEvent, repo: Repository) => {
+  const handleRefreshRow = async (e: MouseEvent, repo: Repository) => {
     e.stopPropagation();
     setRefreshingRow(repo.id);
     setStatsMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
@@ -128,7 +128,7 @@ export default function RepositoriesPage() {
     setRefreshingAll(false);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!form.name || !form.path || !form.password) {
       setError("All fields are required.");
@@ -171,7 +171,7 @@ export default function RepositoriesPage() {
     }
   };
 
-  const handleRename = async (e: React.FormEvent) => {
+  const handleRename = async (e: FormEvent) => {
     e.preventDefault();
     if (!editTarget || !editName.trim() || !editPath.trim() || !editPassword.trim()) return;
     setRenaming(true);

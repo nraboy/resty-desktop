@@ -45,6 +45,8 @@ export default function SnapshotsPage() {
 
   useEffect(() => {
     if (!repoId) return;
+    setSnapshots([]);
+    setLoading(true);
     listRepos().then((repos) => {
       setAllRepos(repos);
       const found = repos.find((r) => r.id === repoId) ?? null;
