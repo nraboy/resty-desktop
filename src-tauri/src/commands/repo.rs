@@ -62,6 +62,38 @@ pub async fn rename_repo(
     db.rename_repo(&repo_id, &new_name)
 }
 
+#[tauri::command]
+pub async fn update_repo_path(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    new_path: String,
+) -> Result<(), String> {
+    db.update_repo_path(&repo_id, &new_path)
+}
+
+#[tauri::command]
+pub async fn get_repo_password(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+) -> Result<String, String> {
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    Ok(repo.password.clone())
+}
+
+#[tauri::command]
+pub async fn update_repo_password(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    new_password: String,
+) -> Result<(), String> {
+    let key = master_key.get()?;
+    let (nonce, ciphertext) = crypto::encrypt(&key, new_password.as_bytes())?;
+    db.update_repo_password(&repo_id, &nonce, &ciphertext)
+}
+
 /// Initialise a new restic repository, then persist it.
 #[tauri::command]
 pub async fn init_repo(

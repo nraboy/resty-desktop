@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   addRepo,
   cancelMirror,
+  getRepoPassword,
   getRepoStats,
   initRepo,
   listRepos,
@@ -12,6 +13,8 @@ import {
   refreshSnapshots,
   removeRepo,
   renameRepo,
+  updateRepoPassword,
+  updateRepoPath,
   testRepoConnection,
 } from "../lib/invoke";
 import type { Repository, ResticStats } from "../lib/types";
@@ -39,6 +42,10 @@ export default function RepositoriesPage() {
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   const [editTarget, setEditTarget] = useState<Repository | null>(null);
   const [editName, setEditName] = useState("");
+  const [editPath, setEditPath] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Repository | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -166,10 +173,19 @@ export default function RepositoriesPage() {
 
   const handleRename = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editTarget || !editName.trim()) return;
+    if (!editTarget || !editName.trim() || !editPath.trim() || !editPassword.trim()) return;
     setRenaming(true);
     try {
-      await renameRepo(editTarget.id, editName.trim());
+      if (editName.trim() !== editTarget.name) {
+        await renameRepo(editTarget.id, editName.trim());
+      }
+      if (editPath.trim() !== editTarget.path) {
+        await updateRepoPath(editTarget.id, editPath.trim());
+      }
+      const originalPassword = await getRepoPassword(editTarget.id);
+      if (editPassword.trim() !== originalPassword) {
+        await updateRepoPassword(editTarget.id, editPassword.trim());
+      }
       await load();
       setEditTarget(null);
     } finally {
@@ -354,6 +370,10 @@ export default function RepositoriesPage() {
                       e.stopPropagation();
                       setEditTarget(repo);
                       setEditName(repo.name);
+                      setEditPath(repo.path);
+                      setEditPassword("");
+                      setEditTestResult(null);
+                      getRepoPassword(repo.id).then(setEditPassword).catch(() => {});
                     }}
                     className="text-gray-500 hover:text-blue-400"
                     title="Rename"
@@ -425,7 +445,7 @@ export default function RepositoriesPage() {
       </Modal>
 
       <Modal
-        title="Rename Repository"
+        title="Edit Repository"
         open={editTarget !== null}
         onClose={() => setEditTarget(null)}
       >
@@ -437,13 +457,82 @@ export default function RepositoriesPage() {
             onChange={(e) => setEditName(e.target.value)}
             autoFocus
           />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" type="button" onClick={() => setEditTarget(null)}>
-              Cancel
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Path</label>
+            {editTarget && isRemoteRepo(editTarget.path) ? (
+              <input
+                type="text"
+                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
+                value={editPath}
+                onChange={(e) => setEditPath(e.target.value)}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+              />
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${editPath ? "text-gray-300" : "text-gray-600"}`}>
+                  {editPath || "No folder selected"}
+                </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={async () => {
+                    const selected = await open({ directory: true, multiple: false });
+                    if (selected) setEditPath(selected as string);
+                  }}
+                >
+                  Browse…
+                </Button>
+              </div>
+            )}
+          </div>
+          <Input
+            label="Password"
+            type="password"
+            placeholder="Repository password"
+            value={editPassword}
+            onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
+          />
+          {editTestResult && (
+            <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
+              {editTestResult.message}
+            </div>
+          )}
+          <div className="flex items-center justify-between pt-2">
+            <Button
+              type="button"
+              variant="secondary"
+              loading={editTesting}
+              onClick={async () => {
+                if (!editPath.trim() || !editPassword.trim()) {
+                  setEditTestResult({ ok: false, message: "Path and password are required to test." });
+                  return;
+                }
+                setEditTesting(true);
+                setEditTestResult(null);
+                try {
+                  await testRepoConnection(editPath.trim(), editPassword.trim());
+                  setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
+                } catch (err: any) {
+                  setEditTestResult({ ok: false, message: String(err) });
+                } finally {
+                  setEditTesting(false);
+                }
+              }}
+            >
+              Test Connection
             </Button>
-            <Button type="submit" loading={renaming}>
-              Save
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="secondary" type="button" onClick={() => setEditTarget(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={renaming}>
+                Save
+              </Button>
+            </div>
           </div>
         </form>
       </Modal>

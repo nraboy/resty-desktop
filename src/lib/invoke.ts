@@ -38,6 +38,15 @@ export const removeRepo = (repoId: string): Promise<void> =>
 export const renameRepo = (repoId: string, newName: string): Promise<void> =>
   invoke("rename_repo", { repoId, newName });
 
+export const updateRepoPath = (repoId: string, newPath: string): Promise<void> =>
+  invoke("update_repo_path", { repoId, newPath });
+
+export const getRepoPassword = (repoId: string): Promise<string> =>
+  invoke("get_repo_password", { repoId });
+
+export const updateRepoPassword = (repoId: string, newPassword: string): Promise<void> =>
+  invoke("update_repo_password", { repoId, newPassword });
+
 export const initRepo = (id: string, name: string, path: string, password: string): Promise<void> =>
   invoke("init_repo", { id, name, path, password });
 

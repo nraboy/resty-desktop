@@ -52,7 +52,10 @@ src/
                               #   per-row refresh stats button shown for all repos (not just remote); "Refresh Stats" header button
                               #   refreshes all repos in parallel via Promise.allSettled; refreshingAll state disables per-row buttons during bulk refresh;
                               #   mirror repository modal: copies all snapshots from one repo to another with indeterminate progress bar,
-                              #   elapsed timer, cancellation support, and completion/cancellation confirmation UI
+                              #   elapsed timer, cancellation support, and completion/cancellation confirmation UI;
+                              #   edit repository modal: allows changing name, path, and password; path shows Browse button for local repos
+                              #   and a text input for remote URLs; password pre-loaded (masked) via get_repo_password;
+                              #   Test Connection button validates the current path+password before saving
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events);
                               #   per-snapshot copy to another repo with cancellation support
@@ -91,6 +94,8 @@ src-tauri/
                               #   unlock_app runs restic unlock on all repos in the background to clear stale locks from crashes
       crypto.rs               # Argon2id key derivation, AES-GCM encrypt/decrypt helpers
       repo.rs                 # list_repos, add_repo, remove_repo, init_repo, rename_repo,
+                              #   update_repo_path, get_repo_password (decrypts + returns stored password),
+                              #   update_repo_password (re-encrypts new password with master key),
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo, get_compression, set_compression,
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
@@ -114,6 +119,7 @@ src-tauri/
                               #   BackupHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for backup cancellation);
                               #   PruneHandle (in-memory, same Arc<Mutex<Child>> + AtomicBool pattern, for prune cancellation);
                               #   AppDb::recalculate_overdue_schedules — advances overdue next_run_at to next future fire time at startup (skips missed backups);
+                              #   AppDb helpers: rename_repo, update_repo_path, update_repo_password (UPDATE queries for individual repo fields);
                               #   Repository, FullRepository, BackupPlan, RetentionPolicy, BackupHistoryEntry,
                               #   Schedule types; clear_browse_cache, list_backup_history commands
   scheduler.rs                # Background tokio task (60s tick) that calls execute_backup for due schedules;

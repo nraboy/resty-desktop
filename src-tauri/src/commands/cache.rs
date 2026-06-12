@@ -380,6 +380,31 @@ impl AppDb {
         Ok(())
     }
 
+    pub fn update_repo_path(&self, repo_id: &str, new_path: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET path = ?1 WHERE id = ?2",
+            params![new_path, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_repo_password(
+        &self,
+        repo_id: &str,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET password_nonce = ?1, password_ciphertext = ?2 WHERE id = ?3",
+            params![nonce, ciphertext, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn reencrypt_repo_passwords(
         &self,
         old_key: &[u8; 32],
