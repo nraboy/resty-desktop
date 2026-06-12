@@ -16,8 +16,8 @@ export default function Modal({ title, open, onClose, children }: ModalProps) {
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="relative z-10 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-md mx-4 p-6">
-        <div className="flex items-center justify-between mb-4">
+      <div className="relative z-10 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-md mx-4 flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between flex-shrink-0 px-6 pt-6 pb-4">
           <h2 className="text-lg font-semibold text-gray-100">{title}</h2>
           <button
             onClick={onClose}
@@ -28,7 +28,9 @@ export default function Modal({ title, open, onClose, children }: ModalProps) {
             </svg>
           </button>
         </div>
-        {children}
+        <div className="overflow-y-auto overflow-x-hidden px-6 pb-6 min-w-0 break-words">
+          {children}
+        </div>
       </div>
     </div>
   );

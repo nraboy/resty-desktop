@@ -115,7 +115,7 @@ export default function SchedulesPage() {
                   variant="ghost"
                   size="sm"
                   onClick={() => setDeleteTarget(sched)}
-                  className="text-gray-500 hover:text-red-400"
+                  className="text-gray-500 hover:text-red-300"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

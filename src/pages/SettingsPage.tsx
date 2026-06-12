@@ -196,7 +196,7 @@ export default function SettingsPage() {
             <p className="mt-2 text-xs text-green-400 font-mono">{resticVersion}</p>
           )}
           {versionError && (
-            <p className="mt-2 text-xs text-red-400">{versionError}</p>
+            <p className="mt-2 text-xs text-red-300">{versionError}</p>
           )}
         </div>
         <div>
@@ -222,7 +222,7 @@ export default function SettingsPage() {
             </svg>
           </div>
         </div>
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-sm text-red-300">{error}</p>}
         <div className="flex items-center gap-3">
           <Button onClick={handleSave} loading={saving}>Save Settings</Button>
           {saved && (
@@ -286,7 +286,7 @@ export default function SettingsPage() {
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
           />
-          {passwordError && <p className="text-sm text-red-400">{passwordError}</p>}
+          {passwordError && <p className="text-sm text-red-300">{passwordError}</p>}
           <div className="flex items-center gap-3 pt-1">
             <Button type="submit" loading={changingPassword}>Change Password</Button>
             {passwordChanged && (
@@ -364,7 +364,7 @@ export default function SettingsPage() {
           </div>
         ) : pruneError ? (
           <div className="space-y-4">
-            <p className="text-sm text-red-400">{pruneError}</p>
+            <p className="text-sm text-red-300">{pruneError}</p>
             <div className="flex items-center justify-between">
               <p className="text-xs text-gray-500">
                 {pruneElapsed < 60

@@ -351,7 +351,7 @@ export default function BackupPlanEditPage() {
                 <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
                 <button
                   onClick={() => removePath(p)}
-                  className="text-gray-500 hover:text-red-400 transition-colors ml-2 flex-shrink-0"
+                  className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
                 >
                   ×
                 </button>
@@ -477,7 +477,7 @@ export default function BackupPlanEditPage() {
                     <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
                     <button
                       onClick={() => removeExclude(p)}
-                      className="text-gray-500 hover:text-red-400 transition-colors ml-2 flex-shrink-0"
+                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
                     >
                       ×
                     </button>

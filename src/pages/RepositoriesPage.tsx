@@ -389,7 +389,7 @@ export default function RepositoriesPage() {
                       e.stopPropagation();
                       setDeleteTarget(repo);
                     }}
-                    className="text-gray-500 hover:text-red-400"
+                    className="text-gray-500 hover:text-red-300"
                     title="Remove"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -502,7 +502,7 @@ export default function RepositoriesPage() {
               </div>
             </div>
             {mirrorError && (
-              <p className="text-sm text-red-400 mb-3">{mirrorError}</p>
+              <p className="text-sm text-red-300 mb-3">{mirrorError}</p>
             )}
             {mirroring && (
               <div className="mb-4">
@@ -611,7 +611,7 @@ export default function RepositoriesPage() {
               {testResult.message}
             </div>
           )}
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-red-300">{error}</p>}
           <div className="flex items-center justify-between pt-2">
             {modalMode === "add" && (
               <Button type="button" variant="secondary" loading={testing} onClick={handleTest}>

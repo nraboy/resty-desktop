@@ -447,7 +447,7 @@ export default function ScheduleEditPage() {
             {!isNew && (
               <button
                 onClick={() => setShowDelete(true)}
-                className="text-sm text-red-500 hover:text-red-400 transition-colors"
+                className="text-sm text-red-300 hover:text-red-300 transition-colors"
               >
                 Delete schedule
               </button>

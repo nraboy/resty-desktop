@@ -70,7 +70,7 @@ export default function LogsPage() {
                     <td className="px-4 py-3">
                       {entry.error ? (
                         <span title={entry.error}>
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-red-400">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-red-300">
                             <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
                           </svg>
                         </span>
@@ -92,9 +92,9 @@ export default function LogsPage() {
                     </td>
                   </tr>
                   {expanded === entry.id && entry.error && (
-                    <tr className="bg-red-950/20">
+                    <tr className="bg-red-900/20">
                       <td colSpan={9} className="px-4 py-3">
-                        <p className="text-xs font-mono text-red-300 whitespace-pre-wrap">{entry.error}</p>
+                        <p className="text-xs font-mono text-red-300 whitespace-pre-wrap break-all">{entry.error}</p>
                       </td>
                     </tr>
                   )}

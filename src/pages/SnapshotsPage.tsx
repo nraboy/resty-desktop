@@ -298,7 +298,7 @@ export default function SnapshotsPage() {
                           {tag}
                           <button
                             onClick={() => handleRemoveTag(snap, tag)}
-                            className="text-gray-500 hover:text-red-400 transition-colors"
+                            className="text-gray-500 hover:text-red-300 transition-colors"
                           >
                             ×
                           </button>
@@ -347,7 +347,7 @@ export default function SnapshotsPage() {
                       <button
                         title="Delete snapshot"
                         onClick={() => setDeleteTarget(snap)}
-                        className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-gray-800 transition-colors"
+                        className="p-1.5 rounded text-gray-600 hover:text-red-300 hover:bg-gray-800 transition-colors"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
                           <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193v-.443A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
@@ -409,7 +409,7 @@ export default function SnapshotsPage() {
         {checkResult && (
           <>
             {checkResult.errors.length === 0 ? (
-              <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
+              <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
                 {checkResult.success ? (
                   <>
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
@@ -428,7 +428,7 @@ export default function SnapshotsPage() {
               </div>
             ) : (
               <>
-                <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-400"}`}>
+                <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
                   </svg>
@@ -436,7 +436,7 @@ export default function SnapshotsPage() {
                 </div>
                 <div className="mb-4 space-y-2">
                   {checkResult.errors.map((err, i) => (
-                    <div key={i} className="text-xs font-mono bg-red-950/40 border border-red-800 rounded p-2 text-red-300 whitespace-pre-wrap break-all">
+                    <div key={i} className="text-xs font-mono bg-red-900/30 border border-red-700 rounded p-2 text-red-300 whitespace-pre-wrap break-all">
                       {err}
                     </div>
                   ))}
@@ -562,7 +562,7 @@ export default function SnapshotsPage() {
           </>
         ) : copyCancelled ? (
           <>
-            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-yellow-400">
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
                 <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
               </svg>

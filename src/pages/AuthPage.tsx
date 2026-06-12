@@ -119,7 +119,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
             />
           )}
 
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-red-300">{error}</p>}
 
           <Button type="submit" loading={loading} className="w-full justify-center">
             {isSetup ? "Create & Unlock" : "Unlock"}
@@ -153,13 +153,13 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
         <div className="space-y-4">
           <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg">
             <p className="text-sm text-red-300 font-medium mb-1">This will permanently delete:</p>
-            <ul className="text-xs text-red-400 space-y-0.5 list-disc list-inside">
+            <ul className="text-xs text-red-300 space-y-0.5 list-disc list-inside">
               <li>All saved repositories</li>
               <li>All backup plans</li>
               <li>All app settings</li>
               <li>All cached snapshot data</li>
             </ul>
-            <p className="text-xs text-red-400 mt-2">
+            <p className="text-xs text-red-300 mt-2">
               Your actual restic repositories and their data on disk are not affected.
             </p>
           </div>
@@ -174,7 +174,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
             autoFocus
           />
 
-          {resetError && <p className="text-sm text-red-400">{resetError}</p>}
+          {resetError && <p className="text-sm text-red-300">{resetError}</p>}
 
           <div className="flex justify-end gap-2 pt-1">
             <Button
