@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type MouseEvent, type FormEvent } from "react";
+import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   addRepo,
   cancelMirror,
+  checkRepo,
   getRepoPassword,
   getRepoStats,
   initRepo,
@@ -17,7 +19,7 @@ import {
   updateRepoPath,
   testRepoConnection,
 } from "../lib/invoke";
-import type { Repository, ResticStats } from "../lib/types";
+import type { CheckResult, Repository, ResticStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import Button from "../components/Button";
@@ -59,6 +61,10 @@ export default function RepositoriesPage() {
   const [mirrorError, setMirrorError] = useState("");
   const [mirrorElapsed, setMirrorElapsed] = useState(0);
   const mirrorStartRef = useRef<number>(0);
+  const [contextMenu, setContextMenu] = useState<{ repo: Repository; x: number; y: number } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
+  const [checkRepoName, setCheckRepoName] = useState("");
 
   const load = () =>
     listRepos()
@@ -87,8 +93,7 @@ export default function RepositoriesPage() {
     }
   }, [searchParams]);
 
-  const handleRefreshRow = async (e: MouseEvent, repo: Repository) => {
-    e.stopPropagation();
+  const refreshRow = (repo: Repository) => {
     setRefreshingRow(repo.id);
     setStatsMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
     setStatsErrorMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
@@ -99,6 +104,11 @@ export default function RepositoriesPage() {
         setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
       })
       .finally(() => setRefreshingRow(null));
+  };
+
+  const handleRefreshRow = (e: MouseEvent, repo: Repository) => {
+    e.stopPropagation();
+    refreshRow(repo);
   };
 
   const handleRefreshAll = async () => {
@@ -316,6 +326,11 @@ export default function RepositoriesPage() {
               key={repo.id}
               className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors cursor-pointer"
               onClick={() => navigate(`/snapshots/${repo.id}`)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu({ repo, x: e.clientX, y: e.clientY });
+              }}
             >
               <div className="flex items-center gap-3">
                 <div>
@@ -423,6 +438,64 @@ export default function RepositoriesPage() {
           ))}
         </div>
       )}
+
+      <Modal
+        title={`Check: ${checkRepoName}`}
+        open={checking || checkResult !== null}
+        onClose={() => { if (!checking) setCheckResult(null); }}
+      >
+        {checking ? (
+          <div className="flex flex-col items-center justify-center py-10 gap-3 text-sm text-gray-400">
+            <svg className="animate-spin w-6 h-6 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+            Checking repository…
+          </div>
+        ) : checkResult && (
+          <>
+            {checkResult.errors.length === 0 ? (
+              <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
+                {checkResult.success ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                    </svg>
+                    No errors found
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                    </svg>
+                    Errors found
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                  </svg>
+                  Errors found
+                </div>
+                <div className="mb-4 space-y-2">
+                  {checkResult.errors.map((err, i) => (
+                    <div key={i} className="text-xs font-mono bg-red-900/30 border border-red-700 rounded p-2 text-red-300 whitespace-pre-wrap break-all">
+                      {err}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            <div className="flex items-center justify-between mt-4">
+              <span className="text-xs text-gray-500">Completed in {checkResult.duration_seconds.toFixed(1)}s</span>
+              <Button variant="secondary" onClick={() => setCheckResult(null)}>Close</Button>
+            </div>
+          </>
+        )}
+      </Modal>
 
       <Modal
         title="Remove Repository"
@@ -631,6 +704,67 @@ export default function RepositoriesPage() {
           </>
         )}
       </Modal>
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={[
+            {
+              label: "Open Snapshots",
+              onClick: () => navigate(`/snapshots/${contextMenu.repo.id}`),
+            },
+            { separator: true },
+            {
+              label: "Refresh Stats",
+              disabled: refreshingAll || refreshingRow === contextMenu.repo.id,
+              onClick: () => refreshRow(contextMenu.repo),
+            },
+            {
+              label: "Check Repository",
+              onClick: () => {
+                const repo = contextMenu.repo;
+                setCheckRepoName(repo.name);
+                setCheckResult(null);
+                setChecking(true);
+                checkRepo(repo.id)
+                  .then(setCheckResult)
+                  .catch((err) => setCheckResult({ success: false, errors: [String(err)], duration_seconds: 0 }))
+                  .finally(() => setChecking(false));
+              },
+            },
+            {
+              label: "Edit",
+              onClick: () => {
+                const repo = contextMenu.repo;
+                setEditTarget(repo);
+                setEditName(repo.name);
+                setEditPath(repo.path);
+                setEditPassword("");
+                setEditTestResult(null);
+                getRepoPassword(repo.id).then(setEditPassword).catch(() => {});
+              },
+            },
+            {
+              label: "Mirror…",
+              onClick: () => {
+                setMirrorSource(contextMenu.repo);
+                setMirrorDestId("");
+                setMirrorDone(false);
+                setMirrorCancelled(false);
+                setMirrorError("");
+              },
+            },
+            { separator: true },
+            {
+              label: "Delete",
+              variant: "danger",
+              onClick: () => setDeleteTarget(contextMenu.repo),
+            },
+          ] satisfies ContextMenuItemDef[]}
+        />
+      )}
 
       <Modal
         title={modalMode === "init" ? "Create New Repository" : "Open Existing Repository"}

@@ -7,6 +7,7 @@ import { formatDuration } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 
 export default function BackupPlansPage() {
   const navigate = useNavigate();
@@ -25,6 +26,8 @@ export default function BackupPlansPage() {
   const [backupDone, setBackupDone] = useState(false);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ plan: BackupPlan; x: number; y: number } | null>(null);
 
   const [retentionPlan, setRetentionPlan] = useState<BackupPlan | null>(null);
   const [retentionRunning, setRetentionRunning] = useState(false);
@@ -181,6 +184,11 @@ export default function BackupPlansPage() {
             <div
               key={plan.id}
               className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-4 flex items-center gap-4"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu({ plan, x: e.clientX, y: e.clientY });
+              }}
             >
               <div
                 className="flex-1 min-w-0 cursor-pointer"
@@ -266,6 +274,34 @@ export default function BackupPlansPage() {
             </div>
           ))}
         </div>
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={[
+            {
+              label: "Edit Plan",
+              onClick: () => navigate(`/backup-plans/${contextMenu.plan.id}`),
+            },
+            { separator: true },
+            {
+              label: "Run Backup",
+              onClick: () => openBackupModal(contextMenu.plan),
+            },
+            ...(hasRetentionRules(contextMenu.plan)
+              ? [{ label: "Apply Retention", onClick: () => openRetentionModal(contextMenu.plan) }]
+              : []),
+            { separator: true },
+            {
+              label: "Delete",
+              variant: "danger" as const,
+              onClick: () => setDeleteTarget(contextMenu.plan),
+            },
+          ] satisfies ContextMenuItemDef[]}
+        />
       )}
 
       <Modal

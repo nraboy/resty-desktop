@@ -36,10 +36,14 @@ src/
                               #   detected version is below MIN_RESTIC_MAJOR.MIN_RESTIC_MINOR (from config.ts);
                               #   routes are wrapped in an ErrorBoundary class component that catches unhandled render
                               #   errors and shows a "Something went wrong / Try again" fallback instead of a white screen
-  main.tsx                    # React entry point
+  main.tsx                    # React entry point; suppresses the default browser/WebKit context menu globally
+                              #   via document.addEventListener("contextmenu", e => e.preventDefault())
   index.css                   # Tailwind directives + global styles
   components/
     Button.tsx                # Reusable button (primary/secondary/danger/ghost variants)
+    ContextMenu.tsx           # Right-click context menu rendered via React portal into document.body;
+                              #   accepts x/y position + ContextMenuItemDef[] (label/onClick/variant/disabled or separator);
+                              #   auto-nudges onto screen if it would overflow an edge; closes on click-outside or Escape
     EmptyState.tsx            # Empty list placeholder
     Input.tsx                 # Labeled input with error state
     Modal.tsx                 # Overlay modal dialog
@@ -61,7 +65,11 @@ src/
                               #   elapsed timer, cancellation support, and completion/cancellation confirmation UI;
                               #   edit repository modal: allows changing name, path, and password; path shows Browse button for local repos
                               #   and a text input for remote URLs; password pre-loaded (masked) via get_repo_password;
-                              #   Test Connection button validates the current path+password before saving
+                              #   Test Connection button validates the current path+password before saving;
+                              #   right-click context menu on each repo row: Open Snapshots, Refresh Stats, Check Repository,
+                              #   Edit, Mirror, Delete — Check Repository runs check_repo and shows result in a modal
+                              #   (spinner while running, then success/error UI matching SnapshotsPage); Check only appears in
+                              #   the context menu, not as a row button
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events);
                               #   per-snapshot copy to another repo with cancellation support;
@@ -74,7 +82,9 @@ src/
                               #   (cancel_backup), and completion/error confirmation UI;
                               #   "Apply Retention" funnel button shown per-plan when a retention policy with at least one
                               #   keep rule is configured; opens a modal that runs forget_by_plan standalone (no backup);
-                              #   row icons use 24px outline stroke style matching RepositoriesPage
+                              #   row icons use 24px outline stroke style matching RepositoriesPage;
+                              #   right-click context menu on each plan row: Edit Plan, Run Backup, Apply Retention
+                              #   (only shown when plan has at least one keep rule), Delete
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
     SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately
