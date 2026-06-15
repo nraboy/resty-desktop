@@ -3,8 +3,10 @@ mod scheduler;
 
 use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot};
 use rusqlite::Connection;
+use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{Emitter, Manager};
+use tauri::tray::TrayIconBuilder;
 
 struct MenuState {
     app_submenu: tauri::menu::Submenu<tauri::Wry>,
@@ -15,9 +17,22 @@ struct MenuState {
     reset_app: tauri::menu::MenuItem<tauri::Wry>,
 }
 
+// Keeps the TrayIcon alive; None until the app has been unlocked.
+struct TrayState(Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>);
+
+static TRAY_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn show_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
 #[tauri::command]
 fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> Result<(), String> {
-    // Remove all managed items first (ignore errors if already absent)
     let _ = menu_state.app_submenu.remove(&menu_state.settings);
     let _ = menu_state.file_submenu.remove(&menu_state.new_repository);
     let _ = menu_state.file_submenu.remove(&menu_state.new_backup_plan);
@@ -30,6 +45,75 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     } else {
         menu_state.file_submenu.append(&menu_state.reset_app).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Hides and drops the tray icon (called when the user disables the tray toggle).
+#[tauri::command]
+fn deactivate_tray(tray_state: tauri::State<TrayState>) -> Result<(), String> {
+    let mut guard = tray_state.0.lock().unwrap();
+    if let Some(tray) = guard.as_ref() {
+        let _ = tray.set_visible(false);
+    }
+    *guard = None;
+    Ok(())
+}
+
+/// Called from the frontend after successful unlock/setup, and when the tray toggle is
+/// turned on. Always recreates fresh — set_visible(true) is unreliable on macOS.
+/// The caller is responsible for checking tray_enabled before invoking.
+#[tauri::command]
+fn activate_tray(
+    app: tauri::AppHandle,
+    tray_state: tauri::State<TrayState>,
+) -> Result<(), String> {
+    let mut guard = tray_state.0.lock().unwrap();
+    // Drop any existing icon before recreating.
+    *guard = None;
+    // Use a unique generation suffix so menu item IDs don't collide with the previous instance.
+    let gen = TRAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let open_id = format!("tray_open_{gen}");
+    let settings_id = format!("tray_settings_{gen}");
+    let quit_id = format!("tray_quit_{gen}");
+    let tray_open = MenuItemBuilder::with_id(&open_id, "Open").build(&app).map_err(|e| e.to_string())?;
+    let tray_settings = MenuItemBuilder::with_id(&settings_id, "Settings").build(&app).map_err(|e| e.to_string())?;
+    let tray_quit = MenuItemBuilder::with_id(&quit_id, "Quit Resty Desktop").build(&app).map_err(|e| e.to_string())?;
+    let tray_menu = MenuBuilder::new(&app)
+        .item(&tray_open)
+        .item(&tray_settings)
+        .separator()
+        .item(&tray_quit)
+        .build()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let png_bytes = include_bytes!("../icons/tray-icon.png");
+    #[cfg(not(target_os = "macos"))]
+    let png_bytes = include_bytes!("../icons/32x32.png");
+    let decoded = image::load_from_memory(png_bytes)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
+    let (w, h) = decoded.dimensions();
+    let icon = tauri::image::Image::new_owned(decoded.into_raw(), w, h);
+    let tray = TrayIconBuilder::new()
+        .icon(icon)
+        .icon_as_template(true)
+        .show_menu_on_left_click(true)
+        .tooltip("Resty Desktop")
+        .menu(&tray_menu)
+        .on_menu_event(move |app, event| {
+            let id = event.id().as_ref();
+            if id == open_id || id == settings_id {
+                show_window(app);
+                if id == settings_id {
+                    app.emit("menu:settings", ()).ok();
+                }
+            } else if id == quit_id {
+                app.exit(0);
+            }
+        })
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    *guard = Some(tray);
     Ok(())
 }
 
@@ -88,6 +172,36 @@ pub fn run() {
             app.manage(cache::MirrorHandle::new());
             app.manage(cache::BackupHandle::new());
             app.manage(cache::PruneHandle::new());
+
+            // Tray is created lazily after unlock via activate_tray command.
+            app.manage(TrayState(Mutex::new(None)));
+
+            // Intercept window close: hide to tray only after tray has been activated
+            // (i.e. the user has unlocked the app). Before unlock, close quits the app.
+            if let Some(window) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let tray = app_handle.state::<TrayState>();
+                        let tray_active = tray.0.lock().unwrap().is_some();
+                        if tray_active {
+                            let db = app_handle.state::<cache::AppDb>();
+                            let tray_on = db
+                                .get_setting("tray_enabled", "true")
+                                .unwrap_or_else(|_| "true".to_string())
+                                == "true";
+                            if tray_on {
+                                api.prevent_close();
+                                let _ = win.hide();
+                                #[cfg(target_os = "macos")]
+                                let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                            }
+                        }
+                    }
+                });
+            }
+
             scheduler::spawn(app.handle().clone());
             Ok(())
         })
@@ -126,6 +240,8 @@ pub fn run() {
             repo::get_restic_version,
             repo::get_compression,
             repo::set_compression,
+            repo::get_tray_enabled,
+            repo::set_tray_enabled,
             repo::check_repo,
             repo::prune_all_repos,
             repo::prune_repo,
@@ -162,9 +278,19 @@ pub fn run() {
             // cache
             cache::clear_browse_cache,
             cache::list_backup_history,
-            // menu
+            // menu / tray
             set_menu_auth_state,
+            activate_tray,
+            deactivate_tray,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error building tauri application")
+        .run(|app_handle, event| {
+            // macOS dock click while window is hidden — restore window and dock presence
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    show_window(app_handle);
+                }
+            }
+        });
 }

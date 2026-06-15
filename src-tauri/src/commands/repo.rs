@@ -448,6 +448,16 @@ pub async fn prune_repo(
 }
 
 #[tauri::command]
+pub fn get_tray_enabled(db: State<'_, AppDb>) -> Result<bool, String> {
+    Ok(db.get_setting("tray_enabled", "true")? == "true")
+}
+
+#[tauri::command]
+pub fn set_tray_enabled(db: State<'_, AppDb>, value: bool) -> Result<(), String> {
+    db.set_setting("tray_enabled", if value { "true" } else { "false" })
+}
+
+#[tauri::command]
 pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
     prune_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = prune_handle.child.lock() {

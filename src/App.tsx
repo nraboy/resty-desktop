@@ -13,7 +13,7 @@ import ScheduleEditPage from "./pages/ScheduleEditPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, getResticVersion } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -87,6 +87,7 @@ export default function App() {
     if (authState === "loading") return;
     setMenuAuthState(authState === "unlocked").catch(() => {});
     if (authState === "unlocked") {
+      getTrayEnabled().then(enabled => { if (enabled) activateTray().catch(() => {}); }).catch(() => {});
       getResticVersion().then((v) => {
         const m = v.match(/restic (\d+)\.(\d+)/);
         if (m) {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
-import { cancelPrune, changeMasterPassword, clearBrowseCache, getCompression, getResticPath, getResticVersion, pruneAllRepos, setCompression as saveCompression, setResticPath } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getResticPath, getResticVersion, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setResticPath, setTrayEnabled } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -41,6 +41,8 @@ export default function SettingsPage() {
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [trayEnabled, setTrayEnabledLocal] = useState(true);
+
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -51,6 +53,7 @@ export default function SettingsPage() {
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
     getCompression().then(setCompression).catch(() => {});
+    getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -92,6 +95,16 @@ export default function SettingsPage() {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTrayToggle = async (enabled: boolean) => {
+    setTrayEnabledLocal(enabled);
+    await setTrayEnabled(enabled).catch(() => {});
+    if (enabled) {
+      await activateTray().catch(() => {});
+    } else {
+      await deactivateTray().catch(() => {});
     }
   };
 
@@ -194,7 +207,65 @@ export default function SettingsPage() {
         <p className="text-sm text-gray-500 mt-0.5">Configure Resty Desktop behavior</p>
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-5">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Appearance</h2>
+        <p className="text-xs text-gray-500 mb-3">Choose the color theme for the application.</p>
+        <div className="flex gap-2">
+          {THEMES.map(({ value, label, description }) => (
+            <button
+              key={value}
+              onClick={() => setTheme(value)}
+              className={[
+                "flex-1 rounded-lg border px-3 py-3 text-left transition-colors",
+                theme === value
+                  ? "border-blue-500 bg-blue-600/20 text-blue-400"
+                  : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600 hover:text-gray-300",
+              ].join(" ")}
+            >
+              <p className={`text-sm font-medium ${theme === value ? "text-blue-300" : "text-gray-300"}`}>{label}</p>
+              <p className="text-xs mt-0.5">{description}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Toggles</h2>
+        <div className="space-y-4">
+          <div>
+            <p className="text-xs text-gray-500 mb-3">
+              When enabled, closing the window keeps the app running in the system tray so scheduled
+              backups continue to run. Disabling this will quit the app when the window is closed.
+            </p>
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <button
+                role="switch"
+                aria-checked={trayEnabled}
+                onClick={() => handleTrayToggle(!trayEnabled)}
+                className={[
+                  "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
+                  trayEnabled ? "bg-blue-600" : "bg-gray-700",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                    trayEnabled ? "translate-x-4" : "translate-x-1",
+                  ].join(" ")}
+                />
+              </button>
+              <span className="text-sm text-gray-300">Keep app running in tray when window is closed</span>
+            </label>
+            {!trayEnabled && (
+              <p className="mt-3 text-xs text-amber-500">
+                Warning: scheduled backups will not run while the app is closed.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-5">
         <div>
           <h2 className="text-sm font-medium text-gray-300 mb-1">Restic Binary Path</h2>
           <p className="text-xs text-gray-500 mb-3">
@@ -248,28 +319,6 @@ export default function SettingsPage() {
               Saved
             </span>
           )}
-        </div>
-      </div>
-
-      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Appearance</h2>
-        <p className="text-xs text-gray-500 mb-3">Choose the color theme for the application.</p>
-        <div className="flex gap-2">
-          {THEMES.map(({ value, label, description }) => (
-            <button
-              key={value}
-              onClick={() => setTheme(value)}
-              className={[
-                "flex-1 rounded-lg border px-3 py-3 text-left transition-colors",
-                theme === value
-                  ? "border-blue-500 bg-blue-600/20 text-blue-400"
-                  : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600 hover:text-gray-300",
-              ].join(" ")}
-            >
-              <p className={`text-sm font-medium ${theme === value ? "text-blue-300" : "text-gray-300"}`}>{label}</p>
-              <p className="text-xs mt-0.5">{description}</p>
-            </button>
-          ))}
         </div>
       </div>
 

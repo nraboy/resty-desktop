@@ -92,15 +92,19 @@ src/
                               #   (only shown when plan has at least one keep rule), Delete
     BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
                               #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
-    SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately
+    SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately;
+                              #   shows an amber warning banner when tray_enabled=false, with a link to Settings,
+                              #   because schedules cannot run while the window is closed without the tray
     ScheduleEditPage.tsx      # Create/edit a schedule (name, cron expression, backup plans to run); scheduleId="new" for creation
     LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows;
                               #   paginated at PAGE_SIZE=10 rows per page with Previous/Next controls and a "Page X of Y · N total entries" counter
-    SettingsPage.tsx          # Restic binary path override; shows detected restic version below path input;
-                              #   install instructions section hidden when restic is found;
-                              #   global backup compression selector (off/fastest/auto/better/max) persisted to app_settings;
-                              #   prune all repositories: runs restic prune on every repo sequentially with a modal showing
-                              #   progress bar, elapsed timer, per-repo name, and cancellation support (prune:progress events)
+    SettingsPage.tsx          # Appearance (theme selector) shown first; Toggles section with system tray toggle
+                              #   (get/set_tray_enabled + activate_tray/deactivate_tray on change); Restic binary path
+                              #   override; shows detected restic version below path input; install instructions section
+                              #   hidden when restic is found; global backup compression selector
+                              #   (off/fastest/auto/better/max) persisted to app_settings; prune all repositories: runs
+                              #   restic prune on every repo sequentially with a modal showing progress bar, elapsed timer,
+                              #   per-repo name, and cancellation support (prune:progress events)
 
 src-tauri/
   Cargo.toml
@@ -113,7 +117,14 @@ src-tauri/
                               #   builds native menu bar (MenuState) with "Resty Desktop" and "File" submenus; items are auth-aware
                               #   (Settings/New Repository/New Backup Plan shown when unlocked; Reset Application shown when locked);
                               #   menu events emitted as menu:new-repository, menu:new-backup-plan, menu:settings, menu:reset-app Tauri events;
-                              #   set_menu_auth_state command called from frontend after auth transitions
+                              #   set_menu_auth_state command called from frontend after auth transitions;
+                              #   system tray (TrayState) is created lazily after unlock via activate_tray command — no tray before unlock,
+                              #   so closing the window pre-unlock exits the app normally; after unlock, window close hides to tray if
+                              #   tray_enabled=true (checked via AppDb), otherwise exits; activate_tray always recreates fresh using a
+                              #   TRAY_GEN atomic counter for unique menu item IDs (avoids Tauri global-registry collisions on re-creation);
+                              #   deactivate_tray calls set_visible(false) then drops the icon; macOS uses icons/tray-icon.png
+                              #   (black template icon), other platforms use icons/32x32.png (colorful); show_window helper restores
+                              #   the window and macOS activation policy; RunEvent::Reopen handles macOS dock-click while window is hidden
     commands/
       mod.rs                  # shared get_restic_path() helper used by all command modules
       auth.rs                 # is_app_setup, setup_master_password, unlock_app, lock_app,
@@ -125,6 +136,7 @@ src-tauri/
                               #   update_repo_password (re-encrypts new password with master key),
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo, get_compression, set_compression,
+                              #   get_tray_enabled / set_tray_enabled (read/write "tray_enabled" key in app_settings),
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
                               #   cancellable via PruneHandle), prune_repo (runs restic prune on a single repo, same
                               #   PruneHandle + cancel_prune cancellation pattern), cancel_prune;

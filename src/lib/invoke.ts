@@ -9,6 +9,12 @@ export const isAppSetup = (): Promise<boolean> =>
 export const setMenuAuthState = (unlocked: boolean): Promise<void> =>
   invoke("set_menu_auth_state", { unlocked });
 
+export const activateTray = (): Promise<void> =>
+  invoke("activate_tray");
+
+export const deactivateTray = (): Promise<void> =>
+  invoke("deactivate_tray");
+
 export const setupMasterPassword = (password: string): Promise<void> =>
   invoke("setup_master_password", { password });
 
@@ -73,6 +79,12 @@ export const getCompression = (): Promise<string> =>
 
 export const setCompression = (value: string): Promise<void> =>
   invoke("set_compression", { value });
+
+export const getTrayEnabled = (): Promise<boolean> =>
+  invoke("get_tray_enabled");
+
+export const setTrayEnabled = (value: boolean): Promise<void> =>
+  invoke("set_tray_enabled", { value });
 
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
