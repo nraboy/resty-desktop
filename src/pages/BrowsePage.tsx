@@ -12,7 +12,7 @@ import EmptyState from "../components/EmptyState";
 const FileIcon = ({ type }: { type: string }) => {
   if (type === "dir") {
     return (
-      <svg className="w-4 h-4 text-amber-300 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+      <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
         <path d="M2 6a2 2 0 012-2h4l2 2h6a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
       </svg>
     );
