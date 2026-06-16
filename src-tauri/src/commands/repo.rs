@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
@@ -264,6 +264,26 @@ pub fn get_compression(db: State<'_, AppDb>) -> Result<String, String> {
 #[tauri::command]
 pub fn set_compression(db: State<'_, AppDb>, value: String) -> Result<(), String> {
     db.set_setting("compression", &value)
+}
+
+#[tauri::command]
+pub fn get_restore_path(app: tauri::AppHandle, db: State<'_, AppDb>) -> Result<String, String> {
+    let stored = db.get_setting("restore_path", "")?;
+    if !stored.is_empty() {
+        return Ok(stored);
+    }
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("Could not determine home directory: {e}"))?;
+    let default_path = home.join("restores").to_string_lossy().into_owned();
+    db.set_setting("restore_path", &default_path)?;
+    Ok(default_path)
+}
+
+#[tauri::command]
+pub fn set_restore_path(db: State<'_, AppDb>, path: String) -> Result<(), String> {
+    db.set_setting("restore_path", path.trim())
 }
 
 #[tauri::command]

@@ -72,7 +72,8 @@ src/
                               #   the context menu, not as row buttons; Prune modal has confirmation → indeterminate progress + elapsed
                               #   timer + Cancel → done/cancelled states, uses PruneHandle + cancel_prune for cancellation
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
-                              #   full-snapshot restore modal with streaming progress bar (restore:progress events);
+                              #   full-snapshot restore modal with streaming progress bar (restore:progress events); restore
+                              #   target dir pre-filled from get_restore_path setting (user can override per-restore via Browse);
                               #   per-snapshot copy to another repo with cancellation support;
                               #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos;
                               #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo
@@ -80,7 +81,8 @@ src/
                               #   right-click context menu on each snapshot row: Browse Files, Restore…, Copy to Repository…, Add Tag…,
                               #   Snapshot Stats, Delete — Snapshot Stats calls get_snapshot_stats (restic stats --json <id>) and shows
                               #   total size + file count in a modal (spinner while running, note that size includes shared data)
-    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore; breadcrumb nav;
+    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore with native directory picker
+                              #   (Browse button, target pre-filled from get_restore_path setting); breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
                               #   backup modal with streaming progress bar (backup:progress events), cancellation support
@@ -102,9 +104,11 @@ src/
                               #   (get/set_tray_enabled + activate_tray/deactivate_tray on change); Restic binary path
                               #   override; shows detected restic version below path input; install instructions section
                               #   hidden when restic is found; global backup compression selector
-                              #   (off/fastest/auto/better/max) persisted to app_settings; prune all repositories: runs
-                              #   restic prune on every repo sequentially with a modal showing progress bar, elapsed timer,
-                              #   per-repo name, and cancellation support (prune:progress events)
+                              #   (off/fastest/auto/better/max) persisted to app_settings; default restore path
+                              #   (get/set_restore_path) with Browse button — pre-fills target dir in all restore modals,
+                              #   defaults to <home>/restores on first use (computed via Tauri's app.path().home_dir());
+                              #   prune all repositories: runs restic prune on every repo sequentially with a modal showing
+                              #   progress bar, elapsed timer, per-repo name, and cancellation support (prune:progress events)
 
 src-tauri/
   Cargo.toml
@@ -136,6 +140,9 @@ src-tauri/
                               #   update_repo_password (re-encrypts new password with master key),
                               #   test_repo_connection, get_repo_stats, refresh_repo_stats, get/set_restic_path,
                               #   get_restic_version, check_repo, get_compression, set_compression,
+                              #   get_restore_path / set_restore_path (read/write "restore_path" key in app_settings;
+                              #   get_restore_path computes <home>/restores via app.path().home_dir() on first call and
+                              #   stores it so subsequent calls are fast and the value is editable in Settings),
                               #   get_tray_enabled / set_tray_enabled (read/write "tray_enabled" key in app_settings),
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
                               #   cancellable via PruneHandle), prune_repo (runs restic prune on a single repo, same

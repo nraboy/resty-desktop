@@ -80,6 +80,12 @@ export const getCompression = (): Promise<string> =>
 export const setCompression = (value: string): Promise<void> =>
   invoke("set_compression", { value });
 
+export const getRestorePath = (): Promise<string> =>
+  invoke("get_restore_path");
+
+export const setRestorePath = (path: string): Promise<void> =>
+  invoke("set_restore_path", { path });
+
 export const getTrayEnabled = (): Promise<boolean> =>
   invoke("get_tray_enabled");
 

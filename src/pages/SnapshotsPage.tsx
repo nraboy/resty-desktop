@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRestorePath, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
@@ -37,6 +37,7 @@ export default function SnapshotsPage() {
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<Snapshot | null>(null);
   const [restoreDir, setRestoreDir] = useState("");
+  const [defaultRestoreDir, setDefaultRestoreDir] = useState("");
   const [restoring, setRestoring] = useState(false);
   const [restoreDone, setRestoreDone] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
@@ -51,6 +52,10 @@ export default function SnapshotsPage() {
   const [snapshotStats, setSnapshotStats] = useState<SnapshotStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState("");
+
+  useEffect(() => {
+    getRestorePath().then(setDefaultRestoreDir).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!repoId) return;
@@ -355,7 +360,7 @@ export default function SnapshotsPage() {
                       </button>
                       <button
                         title="Restore snapshot"
-                        onClick={() => { setRestoreTarget(snap); setRestoreDir(""); setRestoreDone(false); }}
+                        onClick={() => { setRestoreTarget(snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); }}
                         className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -544,7 +549,7 @@ export default function SnapshotsPage() {
             <p className="text-sm text-gray-300 mb-4">
               Restore all files from snapshot{" "}
               <span className="font-mono text-blue-400">{restoreTarget?.short_id}</span> to a target directory.
-              Existing files in the target will be overwritten.
+              Only files that conflict with the restored content will be overwritten; other files in the target are left untouched.
             </p>
             <div className="flex gap-2 mb-4">
               <div className="flex-1">
@@ -687,7 +692,7 @@ export default function SnapshotsPage() {
             },
             {
               label: "Restore…",
-              onClick: () => { setRestoreTarget(contextMenu.snap); setRestoreDir(""); setRestoreDone(false); },
+              onClick: () => { setRestoreTarget(contextMenu.snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); },
             },
             {
               label: "Copy to Repository…",

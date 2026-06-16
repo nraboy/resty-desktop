@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getRestorePath, listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
 import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import { formatSize } from "../lib/format";
@@ -37,13 +38,18 @@ export default function BrowsePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<FileEntry | null>(null);
-  const [targetDir, setTargetDir] = useState("/tmp/restic-restore");
+  const [targetDir, setTargetDir] = useState("");
+  const [defaultTargetDir, setDefaultTargetDir] = useState("");
   const [restoring, setRestoring] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [tags, setTags] = useState<string[]>(snapshot?.tags ?? []);
   const [showTagModal, setShowTagModal] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [tagging, setTagging] = useState(false);
+
+  useEffect(() => {
+    getRestorePath().then(setDefaultTargetDir).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!repoId) return;
@@ -114,8 +120,13 @@ export default function BrowsePage() {
     }
   };
 
+  const handlePickTargetDir = async () => {
+    const dir = await openDialog({ directory: true, multiple: false });
+    if (typeof dir === "string") setTargetDir(dir);
+  };
+
   const handleRestore = async () => {
-    if (!repoId || !snapshotId || !restoreTarget) return;
+    if (!repoId || !snapshotId || !restoreTarget || !targetDir) return;
     setRestoring(true);
     try {
       await restorePath(repoId, snapshotId, restoreTarget.path, targetDir);
@@ -265,7 +276,7 @@ export default function BrowsePage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => { setRestoreTarget(entry); setTargetDir("/tmp/restic-restore"); }}
+                      onClick={() => { setRestoreTarget(entry); setTargetDir(defaultTargetDir); }}
                     >
                       Restore
                     </Button>
@@ -304,20 +315,26 @@ export default function BrowsePage() {
       <Modal
         title="Restore"
         open={restoreTarget !== null}
-        onClose={() => setRestoreTarget(null)}
+        onClose={() => { if (!restoring) setRestoreTarget(null); }}
       >
         <p className="text-sm text-gray-300 mb-4">
-          Restore <span className="font-mono text-blue-400 text-xs break-all">{restoreTarget?.path}</span> to:
+          Restore <span className="font-mono text-blue-400 text-xs break-all">{restoreTarget?.path}</span> to a target directory.
+          Only files that conflict with the restored content will be overwritten; other files in the target are left untouched.
         </p>
-        <Input
-          label="Target directory"
-          value={targetDir}
-          onChange={(e) => setTargetDir(e.target.value)}
-          placeholder="/tmp/restic-restore"
-        />
-        <div className="flex justify-end gap-2 mt-4">
-          <Button variant="secondary" onClick={() => setRestoreTarget(null)}>Cancel</Button>
-          <Button loading={restoring} onClick={handleRestore}>Restore</Button>
+        <div className="flex gap-2 mb-4">
+          <div className="flex-1">
+            <Input
+              placeholder="Select a target directory…"
+              value={targetDir}
+              onChange={(e) => setTargetDir(e.target.value)}
+              className="w-full"
+            />
+          </div>
+          <Button variant="secondary" onClick={handlePickTargetDir}>Browse</Button>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
+          <Button loading={restoring} onClick={handleRestore} disabled={!targetDir}>Restore</Button>
         </div>
       </Modal>
     </div>

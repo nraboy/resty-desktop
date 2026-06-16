@@ -240,6 +240,8 @@ pub fn run() {
             repo::get_restic_version,
             repo::get_compression,
             repo::set_compression,
+            repo::get_restore_path,
+            repo::set_restore_path,
             repo::get_tray_enabled,
             repo::set_tray_enabled,
             repo::check_repo,

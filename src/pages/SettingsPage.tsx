@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
-import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getResticPath, getResticVersion, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setResticPath, setTrayEnabled } from "../lib/invoke";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -18,6 +19,7 @@ export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [resticPath, setResticPathLocal] = useState("restic");
   const [compression, setCompression] = useState("auto");
+  const [restorePath, setRestorePathLocal] = useState("");
   const [resticVersion, setResticVersion] = useState<string | null>(null);
   const [versionError, setVersionError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -53,6 +55,7 @@ export default function SettingsPage() {
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
     getCompression().then(setCompression).catch(() => {});
+    getRestorePath().then(setRestorePathLocal).catch(() => {});
     getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
@@ -85,6 +88,7 @@ export default function SettingsPage() {
     try {
       await setResticPath(resticPath);
       await saveCompression(compression);
+      await setRestorePath(restorePath);
       setSaved(true);
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => setSaved(false), 2000);
@@ -306,6 +310,32 @@ export default function SettingsPage() {
             <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
+          </div>
+        </div>
+        <div>
+          <h2 className="text-sm font-medium text-gray-300 mb-1">Default Restore Path</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            Pre-filled target directory when restoring a snapshot or file. You can still override it
+            per restore.
+          </p>
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <Input
+                value={restorePath}
+                onChange={(e) => setRestorePathLocal(e.target.value)}
+                placeholder="Select a directory…"
+                className="w-full"
+              />
+            </div>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                const dir = await openDialog({ directory: true, multiple: false });
+                if (typeof dir === "string") setRestorePathLocal(dir);
+              }}
+            >
+              Browse
+            </Button>
           </div>
         </div>
         {error && <p className="text-sm text-red-300">{error}</p>}

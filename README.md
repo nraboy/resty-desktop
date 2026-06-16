@@ -64,3 +64,7 @@ This GUI wrapper for Restic was created by [Nic Raboy](https://www.nraboy.com). 
 
 - [PayPal](https://paypal.me/nraboy)
 - [Square Cash](https://cash.app/$nraboy)
+
+## Special Note
+
+AI was used in the development of this application. Resty Desktop is a GUI wrapper to the already existing and battle-tested Restic backup application. None of the heavy lifting happens in Resty Desktop, so AI or not, your data should be fine unless the underlying Restic application is faulty.
