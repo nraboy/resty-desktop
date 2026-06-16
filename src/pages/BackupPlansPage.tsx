@@ -25,6 +25,7 @@ export default function BackupPlansPage() {
   const [backupError, setBackupError] = useState("");
   const [backupDone, setBackupDone] = useState(false);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
+  const [applyingRetention, setApplyingRetention] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   const [contextMenu, setContextMenu] = useState<{ plan: BackupPlan; x: number; y: number } | null>(null);
@@ -118,6 +119,7 @@ export default function BackupPlansPage() {
     setBackupError("");
     setBackupDone(false);
     setProgress(null);
+    setApplyingRetention(false);
 
     const unlisten = await listen<BackupProgress>("backup:progress", (event) => {
       setProgress(event.payload);
@@ -127,11 +129,14 @@ export default function BackupPlansPage() {
     try {
       await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.id);
       if (backupPlan.retention) {
+        setApplyingRetention(true);
         try {
           await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention);
         } catch (pruneErr: any) {
           setBackupError("Backup succeeded but pruning failed: " + String(pruneErr));
           return;
+        } finally {
+          setApplyingRetention(false);
         }
       }
       setBackupDone(true);
@@ -448,9 +453,13 @@ export default function BackupPlansPage() {
                       style={{ width: `${((progress?.percentDone ?? 0) * 100).toFixed(1)}%` }}
                     />
                   </div>
-                  <p className="text-xs text-gray-500 font-mono truncate" title={progress?.currentFiles[0] ?? ""}>
-                    {progress && progress.currentFiles.length > 0 ? progress.currentFiles[0] : " "}
-                  </p>
+                  {applyingRetention ? (
+                    <p className="text-xs text-gray-400">Applying retention rules…</p>
+                  ) : (
+                    <p className="text-xs text-gray-500 font-mono truncate" title={progress?.currentFiles[0] ?? ""}>
+                      {progress?.currentFiles[0] ?? "Backing up…"}
+                    </p>
+                  )}
                 </div>
               )}
 
