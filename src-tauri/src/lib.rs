@@ -262,6 +262,7 @@ pub fn run() {
             snapshot::mirror_repo,
             snapshot::cancel_mirror,
             snapshot::cancel_backup,
+            snapshot::diff_snapshots,
             // browse
             browse::list_files,
             browse::restore_path,

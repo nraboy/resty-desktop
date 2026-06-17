@@ -80,6 +80,19 @@ export interface CheckResult {
   duration_seconds: number;
 }
 
+export interface DiffEntry {
+  path: string;
+  change: "added" | "removed" | "modified";
+}
+
+export interface DiffResult {
+  entries: DiffEntry[];
+  totalAdded: number;
+  totalRemoved: number;
+  totalModified: number;
+  truncated: boolean;
+}
+
 export interface RetentionPolicy {
   keepLast?: number;
   keepDaily?: number;

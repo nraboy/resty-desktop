@@ -51,7 +51,8 @@ src/
   lib/
     types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
                               #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper;
-                              #   BackupPlan includes optional limitUpload and limitDownload (KiB/s); 0 and undefined both mean unlimited
+                              #   BackupPlan includes optional limitUpload and limitDownload (KiB/s); 0 and undefined both mean unlimited;
+                              #   DiffEntry { path, change } and DiffResult { entries, totalAdded, totalRemoved, totalModified, truncated }
     invoke.ts                 # Typed wrappers over tauri invoke()
     format.ts                 # Shared display formatters: formatBytes, formatSize, formatDate, formatTimestamp,
                               #   formatDuration (fractional param for sub-minute precision); used by all pages
@@ -80,11 +81,21 @@ src/
                               #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo
                               #   navigation; page is clamped to last valid page when filtered set shrinks (e.g. after delete) to avoid empty-page trap;
                               #   right-click context menu on each snapshot row: Browse Files, Restore…, Copy to Repository…, Add Tag…,
-                              #   Snapshot Stats, Delete — Snapshot Stats calls get_snapshot_stats (restic stats --json <id>) and shows
-                              #   total size + file count in a modal (spinner while running, note that size includes shared data)
+                              #   Compare with…, Snapshot Stats, Delete — Snapshot Stats calls get_snapshot_stats (restic stats --json <id>) and shows
+                              #   total size + file count in a modal (spinner while running, note that size includes shared data);
+                              #   Compare with… opens a modal to select a second snapshot and navigates to DiffPage; always diffs older→newer
+                              #   regardless of which snapshot was right-clicked (timestamps compared to determine order)
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore with native directory picker
                               #   (Browse button, target pre-filled from get_restore_path setting); breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
+    DiffPage.tsx              # Snapshot diff viewer at route /snapshots/:repoId/diff/:snapshotA/:snapshotB;
+                              #   calls diff_snapshots on mount and builds a client-side tree from the flat entry list;
+                              #   summary bar shows colored counts (green=added, red=removed, amber=modified);
+                              #   amber truncation warning shown when result.truncated is true (>500 changes);
+                              #   tree navigation via breadcrumb; directories show aggregated change type
+                              #   (all-same→that type, mixed→"mixed" in gray); right-click any entry to Restore —
+                              #   "removed" files restore from snapshotA (older), all others from snapshotB (newer);
+                              #   restore modal pre-filled from get_restore_path, uses restorePath invoke (same as BrowsePage)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
                               #   backup modal with streaming progress bar (backup:progress events), cancellation support
                               #   (cancel_backup), and completion/error confirmation UI;
@@ -166,8 +177,12 @@ src-tauri/
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
                               #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks;
-                              #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot, get_snapshot_stats —
-                              #   rejects anything outside 8–64 lowercase hex characters before any crypto or restic work
+                              #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot, get_snapshot_stats,
+                              #   diff_snapshots — rejects anything outside 8–64 lowercase hex characters before any crypto or restic work;
+                              #   diff_snapshots runs restic diff <snapshotA> <snapshotB> (plain text output, no --json),
+                              #   parses lines by prefix (+  /−  /M  /T  ), counts totals for all lines, stores up to
+                              #   DIFF_ENTRY_LIMIT=500 entries with path.trim() to handle whitespace variations;
+                              #   returns DiffResult { entries, totalAdded, totalRemoved, totalModified, truncated }
       browse.rs               # list_files, restore_path, restore_snapshot
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite;
                               #   list_backup_plans returns plans sorted alphabetically by name (ORDER BY name COLLATE NOCASE)
@@ -198,6 +213,7 @@ src-tauri/
 | `/` | RepositoriesPage |
 | `/snapshots/:repoId` | SnapshotsPage |
 | `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
+| `/snapshots/:repoId/diff/:snapshotA/:snapshotB` | DiffPage |
 | `/backup-plans` | BackupPlansPage |
 | `/backup-plans/:planId` | BackupPlanEditPage (`planId="new"` for creation) |
 | `/schedules` | SchedulesPage |
@@ -219,6 +235,7 @@ src-tauri/
 - `prune_all_repos` runs `restic prune` on each repo sequentially, emitting `prune:progress` events (consumed by the SettingsPage modal). A `PruneHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `BackupHandle`) allows `cancel_prune` to kill the child mid-run; after a cancel-kill, `restic unlock` is called on the affected repo to clear stale locks.
 - `prune_repo` runs `restic prune` on a single repo (triggered from the RepositoriesPage right-click context menu); reuses the same `PruneHandle` and `cancel_prune` command. No progress events — the frontend shows an indeterminate progress bar with elapsed timer.
 - `get_snapshot_stats` runs `restic stats --json <snapshot_id>` for a single snapshot; returns `SnapshotStats { totalSize, totalFileCount }`. Guarded by `validate_snapshot_id`. Note: size includes all data referenced by the snapshot, including blobs shared with other snapshots.
+- `diff_snapshots` runs `restic diff <snapshotA> <snapshotB>` (no `--json` support); output is plain text with lines prefixed by `+  ` (added), `-  ` (removed), `M  ` or `T  ` (modified). Both IDs are guarded by `validate_snapshot_id`. Paths are extracted with `.trim()` to handle whitespace variations in restic output. Totals are counted from all lines; entries are capped at `DIFF_ENTRY_LIMIT=500` with a `truncated` flag when the cap is hit. The frontend (DiffPage) always navigates with the older snapshot as `snapshotA` and newer as `snapshotB` so `+` consistently means "added in the newer snapshot."
 - `unlock_app` runs `restic unlock` on all repos in the background immediately after the master password is verified, clearing any stale locks left by a previous crash or force-quit.
 - `get_restic_version` runs `restic version` and returns the trimmed stdout string (e.g. `restic 0.18.1 compiled with go1.25.1 on darwin/arm64`). Used by `SettingsPage` to verify the configured binary path is valid.
 - Repos, backup plans, schedules, and app settings are stored in SQLite (`app_data.db`) via `AppDb`. Repo passwords are AES-GCM encrypted with the master key before storage.

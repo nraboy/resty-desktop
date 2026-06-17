@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -158,6 +158,9 @@ export const cancelMirror = (): Promise<void> =>
 
 export const cancelBackup = (): Promise<void> =>
   invoke("cancel_backup");
+
+export const diffSnapshots = (repoId: string, snapshotA: string, snapshotB: string): Promise<DiffResult> =>
+  invoke("diff_snapshots", { repoId, snapshotA, snapshotB });
 
 export const forgetByPlan = (
   repoId: string,

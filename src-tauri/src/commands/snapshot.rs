@@ -126,6 +126,70 @@ pub struct SnapshotStats {
     pub total_file_count: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffEntry {
+    pub path: String,
+    pub change: String, // "added" | "removed" | "modified"
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffResult {
+    pub entries: Vec<DiffEntry>,
+    pub total_added: u32,
+    pub total_removed: u32,
+    pub total_modified: u32,
+    pub truncated: bool,
+}
+
+const DIFF_ENTRY_LIMIT: usize = 500;
+
+#[tauri::command]
+pub async fn diff_snapshots(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    snapshot_a: String,
+    snapshot_b: String,
+) -> Result<DiffResult, String> {
+    validate_snapshot_id(&snapshot_a)?;
+    validate_snapshot_id(&snapshot_b)?;
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+    let stdout = run_restic_with_path(&repo, vec!["diff", &snapshot_a, &snapshot_b], &restic_path)?;
+
+    let mut entries: Vec<DiffEntry> = Vec::new();
+    let mut total_added = 0u32;
+    let mut total_removed = 0u32;
+    let mut total_modified = 0u32;
+
+    for line in stdout.lines() {
+        let (change, path) = if line.starts_with("+  ") {
+            total_added += 1;
+            ("added", &line[3..])
+        } else if line.starts_with("-  ") {
+            total_removed += 1;
+            ("removed", &line[3..])
+        } else if line.starts_with("M  ") || line.starts_with("T  ") {
+            total_modified += 1;
+            ("modified", &line[3..])
+        } else {
+            continue;
+        };
+
+        if entries.len() < DIFF_ENTRY_LIMIT {
+            entries.push(DiffEntry { path: path.trim().to_string(), change: change.to_string() });
+        }
+    }
+
+    let total = total_added + total_removed + total_modified;
+    let truncated = total as usize > entries.len();
+
+    Ok(DiffResult { entries, total_added, total_removed, total_modified, truncated })
+}
+
 #[tauri::command]
 pub async fn get_snapshot_stats(
     db: State<'_, AppDb>,

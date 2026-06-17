@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import SnapshotsPage from "./pages/SnapshotsPage";
 import BrowsePage from "./pages/BrowsePage";
+import DiffPage from "./pages/DiffPage";
 import BackupPlansPage from "./pages/BackupPlansPage";
 import BackupPlanEditPage from "./pages/BackupPlanEditPage";
 import SchedulesPage from "./pages/SchedulesPage";
@@ -156,6 +157,7 @@ export default function App() {
                     <Route path="/" element={<RepositoriesPage />} />
                     <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
                     <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
+                    <Route path="/snapshots/:repoId/diff/:snapshotA/:snapshotB" element={<DiffPage />} />
                     <Route path="/backup-plans" element={<BackupPlansPage />} />
                     <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
                     <Route path="/schedules" element={<SchedulesPage />} />

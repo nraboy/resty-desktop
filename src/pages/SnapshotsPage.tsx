@@ -52,6 +52,8 @@ export default function SnapshotsPage() {
   const [snapshotStats, setSnapshotStats] = useState<SnapshotStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState("");
+  const [compareSource, setCompareSource] = useState<Snapshot | null>(null);
+  const [compareTargetId, setCompareTargetId] = useState("");
 
   useEffect(() => {
     getRestorePath().then(setDefaultRestoreDir).catch(() => {});
@@ -703,6 +705,17 @@ export default function SnapshotsPage() {
               label: "Add Tag…",
               onClick: () => { setTagTarget(contextMenu.snap); setNewTag(""); },
             },
+            {
+              label: "Compare with…",
+              disabled: snapshots.length < 2,
+              onClick: () => {
+                const snap = contextMenu.snap;
+                const idx = snapshots.findIndex((s) => s.id === snap.id);
+                const adjacent = snapshots[idx + 1] ?? snapshots[idx - 1] ?? null;
+                setCompareSource(snap);
+                setCompareTargetId(adjacent?.id ?? "");
+              },
+            },
             { separator: true },
             {
               label: "Snapshot Stats",
@@ -766,6 +779,56 @@ export default function SnapshotsPage() {
             </div>
           </>
         )}
+      </Modal>
+
+      <Modal
+        title="Compare Snapshots"
+        open={compareSource !== null}
+        onClose={() => setCompareSource(null)}
+      >
+        <p className="text-sm text-gray-300 mb-4">
+          Compare <span className="font-mono text-blue-400">{compareSource?.short_id}</span> against:
+        </p>
+        <div className="relative mb-4">
+          <select
+            value={compareTargetId}
+            onChange={(e) => setCompareTargetId(e.target.value)}
+            className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-8"
+          >
+            <option value="" disabled>Select a snapshot…</option>
+            {snapshots
+              .filter((s) => s.id !== compareSource?.id)
+              .map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.short_id} — {formatDate(s.time)} — {s.hostname}
+                </option>
+              ))}
+          </select>
+          <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setCompareSource(null)}>Cancel</Button>
+          <Button
+            disabled={!compareTargetId}
+            onClick={() => {
+              if (!repoId || !compareSource || !compareTargetId) return;
+              const targetSnap = snapshots.find((s) => s.id === compareTargetId);
+              if (!targetSnap) return;
+              // Always diff older→newer so + means "added in newer" and - means "removed in newer"
+              const sourceIsOlder = new Date(compareSource.time) <= new Date(targetSnap.time);
+              const [idA, idB, snapA, snapB] = sourceIsOlder
+                ? [compareSource.id, compareTargetId, compareSource, targetSnap]
+                : [compareTargetId, compareSource.id, targetSnap, compareSource];
+              navigate(
+                `/snapshots/${repoId}/diff/${idA}/${idB}`,
+                { state: { snapshotA: snapA, snapshotB: snapB } }
+              );
+              setCompareSource(null);
+            }}
+          >
+            Compare
+          </Button>
+        </div>
       </Modal>
     </div>
   );
