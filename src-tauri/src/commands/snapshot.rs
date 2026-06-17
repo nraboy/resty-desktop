@@ -157,6 +157,8 @@ pub async fn execute_backup(
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
+    limit_upload: Option<u32>,
+    limit_download: Option<u32>,
 ) -> Result<String, String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
@@ -174,6 +176,14 @@ pub async fn execute_backup(
             args.push("--exclude".to_string());
             args.push(trimmed.to_string());
         }
+    }
+    if let Some(kib) = limit_upload.filter(|&v| v > 0) {
+        args.push("--limit-upload".to_string());
+        args.push(kib.to_string());
+    }
+    if let Some(kib) = limit_download.filter(|&v| v > 0) {
+        args.push("--limit-download".to_string());
+        args.push(kib.to_string());
     }
     for path in &paths {
         args.push(path.clone());
@@ -382,8 +392,10 @@ pub async fn run_backup(
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
+    limit_upload: Option<u32>,
+    limit_download: Option<u32>,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &backup_handle, &repo_id, plan_id.as_deref(), paths, tags, excludes).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download).await
 }
 
 #[tauri::command]

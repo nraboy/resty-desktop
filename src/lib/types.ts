@@ -96,6 +96,8 @@ export interface BackupPlan {
   tags: string[];
   excludes: string[];
   retention?: RetentionPolicy;
+  limitUpload?: number;
+  limitDownload?: number;
 }
 
 export interface Schedule {

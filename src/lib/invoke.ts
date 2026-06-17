@@ -132,8 +132,10 @@ export const runBackup = (
   tags: string[],
   excludes: string[],
   planId?: string,
+  limitUpload?: number,
+  limitDownload?: number,
 ): Promise<string> =>
-  invoke("run_backup", { repoId, paths, tags, excludes, planId: planId ?? null });
+  invoke("run_backup", { repoId, paths, tags, excludes, planId: planId ?? null, limitUpload: limitUpload ?? null, limitDownload: limitDownload ?? null });
 
 export const unlockRepo = (repoId: string): Promise<void> =>
   invoke("unlock_repo", { repoId });

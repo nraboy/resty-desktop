@@ -50,7 +50,8 @@ src/
     Sidebar.tsx               # Left nav with app icon + "Resty Desktop" title; active repo indicator
   lib/
     types.ts                  # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
-                              #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper
+                              #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan; isRemoteRepo() helper;
+                              #   BackupPlan includes optional limitUpload and limitDownload (KiB/s); 0 and undefined both mean unlimited
     invoke.ts                 # Typed wrappers over tauri invoke()
     format.ts                 # Shared display formatters: formatBytes, formatSize, formatDate, formatTimestamp,
                               #   formatDuration (fractional param for sub-minute precision); used by all pages
@@ -87,13 +88,20 @@ src/
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
                               #   backup modal with streaming progress bar (backup:progress events), cancellation support
                               #   (cancel_backup), and completion/error confirmation UI;
+                              #   retention is automatically applied after every successful backup run — if the plan has a
+                              #   retention policy, forgetByPlan is called immediately after runBackup resolves (applyingRetention
+                              #   state shown in the modal during this phase); no separate user action needed;
                               #   "Apply Retention" funnel button shown per-plan when a retention policy with at least one
                               #   keep rule is configured; opens a modal that runs forget_by_plan standalone (no backup);
                               #   row icons use 24px outline stroke style matching RepositoriesPage;
                               #   right-click context menu on each plan row: Edit Plan, Run Backup, Apply Retention Rules
                               #   (only shown when plan has at least one keep rule), Delete
-    BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy); planId="new" for creation;
-                              #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI
+    BackupPlanEditPage.tsx    # Create/edit a backup plan (name, repo, paths, tags, excludes, retention policy, bandwidth limits); planId="new" for creation;
+                              #   exclude patterns use tabbed Simple (tag list) / Expert (freeform textarea) UI;
+                              #   Simple tab includes EXCLUDE_SUGGESTIONS presets (Development assets: node_modules/.git/build output/etc.;
+                              #   System files: .DS_Store/Thumbs.db; Log files: *.log variants) that can be one-click added to the pattern list;
+                              #   bandwidth limits section: optional upload/download caps in KiB/s (limitUpload, limitDownload); blank or 0 = unlimited;
+                              #   note shown that limits only affect remote repos — no effect on local filesystem repos
     SchedulesPage.tsx         # List scheduled backups; toggle enabled/disabled; delete; run immediately;
                               #   shows an amber warning banner when tray_enabled=false, with a link to Settings,
                               #   because schedules cannot run while the window is closed without the tray
@@ -161,7 +169,8 @@ src-tauri/
                               #   validate_snapshot_id() guards delete_snapshot, tag_snapshot, copy_snapshot, get_snapshot_stats —
                               #   rejects anything outside 8–64 lowercase hex characters before any crypto or restic work
       browse.rs               # list_files, restore_path, restore_snapshot
-      backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite
+      backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite;
+                              #   list_backup_plans returns plans sorted alphabetically by name (ORDER BY name COLLATE NOCASE)
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
                               #   run_schedule_now (accepts BackupHandle, calls execute_backup for each plan in the schedule),
                               #   describe_cron_expr; cron helpers next_fire_time + describe_cron
@@ -202,7 +211,7 @@ src-tauri/
 - All commands set both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - Structured output parsed via `restic --json`; `serde_json` deserializes responses into typed Rust structs.
 - `restic ls --json` outputs NDJSON (one JSON object per line); the first line is a snapshot summary and is skipped; subsequent lines are `FileEntry` objects filtered to direct children only.
-- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is captured and returned (all other lines are discarded as they arrive — not buffered). On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks. `execute_backup` reads the `compression` setting from `app_settings` (default `auto`) and passes it as `RESTIC_COMPRESSION` env var to the restic process.
+- `run_backup` delegates to `execute_backup` (a shared `pub async fn` also used by `run_schedule_now` and `scheduler.rs`). `execute_backup` streams NDJSON from restic stdout line-by-line; `status` lines are parsed and emitted as `backup:progress` Tauri events (consumed by the frontend progress bar); the final `summary` line is captured and returned (all other lines are discarded as they arrive — not buffered). On completion, fires a system notification (success or failure) via `tauri-plugin-notification` and writes a row to `backup_history`. A `BackupHandle` state (same `Arc<Mutex<Option<Child>>>` + `AtomicBool` pattern as `CopyHandle`) allows `cancel_backup` to kill the child process mid-run; after cancel-kill, `restic unlock` is called on the repo to clear stale locks. `execute_backup` reads the `compression` setting from `app_settings` (default `auto`) and passes it as `RESTIC_COMPRESSION` env var to the restic process. `execute_backup` also accepts `limit_upload: Option<u32>` and `limit_download: Option<u32>` (KiB/s); values of `Some(0)` are treated as `None` — the `--limit-upload`/`--limit-download` flags are only passed to restic when the value is non-zero; only meaningful for remote repos.
 - `check_repo` runs `restic check --json`; progress/status lines go to stderr (ignored), only the summary lands on stdout. Duration is measured via `std::time::Instant` since the summary message contains no timing field. Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore <id> --target <dir> --json` stdout line-by-line; `status` lines are parsed and emitted as `restore:progress` Tauri events (consumed by the frontend progress bar in the restore modal). Stderr is drained on a background thread and surfaced as the error message on non-zero exit.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo; streams stdout and surfaces errors via stderr. A `CopyHandle` Tauri state (Arc<Mutex<Option<Child>>> + AtomicBool cancelled) allows `cancel_copy` to kill the child process mid-run. After a cancel-kill, `restic unlock` is called on both repos to clear stale locks.

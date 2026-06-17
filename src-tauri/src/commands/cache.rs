@@ -57,6 +57,8 @@ pub struct BackupPlan {
     pub tags: Vec<String>,
     pub excludes: Vec<String>,
     pub retention: Option<RetentionPolicy>,
+    pub limit_upload: Option<u32>,
+    pub limit_download: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,13 +204,15 @@ impl AppDb {
                 password_ciphertext BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS backup_plans (
-                id             TEXT PRIMARY KEY,
-                name           TEXT NOT NULL,
-                repo_id        TEXT NOT NULL,
-                paths_json     TEXT NOT NULL,
-                tags_json      TEXT NOT NULL,
-                excludes_json  TEXT NOT NULL,
-                retention_json TEXT
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                repo_id         TEXT NOT NULL,
+                paths_json      TEXT NOT NULL,
+                tags_json       TEXT NOT NULL,
+                excludes_json   TEXT NOT NULL,
+                retention_json  TEXT,
+                limit_upload    INTEGER,
+                limit_download  INTEGER
             );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
@@ -255,7 +259,11 @@ impl AppDb {
                 next_run_at   INTEGER,
                 created_at    INTEGER NOT NULL
             );",
-        )
+        )?;
+        // Migrations for existing installs — silently ignored if columns already exist.
+        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;");
+        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;");
+        Ok(())
     }
 
     // ── master key ──────────────────────────────────────────────────────────
@@ -450,7 +458,7 @@ impl AppDb {
     pub fn list_backup_plans(&self) -> Result<Vec<BackupPlan>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json FROM backup_plans ORDER BY rowid")
+            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download FROM backup_plans ORDER BY name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let plans = stmt
             .query_map([], |row| {
@@ -462,6 +470,8 @@ impl AppDb {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<u32>>(7)?,
+                    row.get::<_, Option<u32>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -470,7 +480,7 @@ impl AppDb {
 
         plans
             .into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -483,6 +493,8 @@ impl AppDb {
                         .map(|s| serde_json::from_str(s))
                         .transpose()
                         .map_err(|e: serde_json::Error| e.to_string())?,
+                    limit_upload,
+                    limit_download,
                 })
             })
             .collect()
@@ -502,8 +514,8 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO backup_plans
-             (id, name, repo_id, paths_json, tags_json, excludes_json, retention_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 plan.id,
                 plan.name,
@@ -511,7 +523,9 @@ impl AppDb {
                 paths_json,
                 tags_json,
                 excludes_json,
-                retention_json
+                retention_json,
+                plan.limit_upload,
+                plan.limit_download,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -938,7 +952,7 @@ impl AppDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json
+            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download
              FROM backup_plans WHERE id IN ({})",
             placeholders
         );
@@ -954,6 +968,8 @@ impl AppDb {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<u32>>(7)?,
+                    row.get::<_, Option<u32>>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -961,7 +977,7 @@ impl AppDb {
             .map_err(|e| e.to_string())?;
 
         rows.into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -974,6 +990,8 @@ impl AppDb {
                         .map(|s| serde_json::from_str(s))
                         .transpose()
                         .map_err(|e: serde_json::Error| e.to_string())?,
+                    limit_upload,
+                    limit_download,
                 })
             })
             .collect()

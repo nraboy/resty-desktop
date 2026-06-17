@@ -67,6 +67,8 @@ async fn tick(app: &tauri::AppHandle) {
                 plan.paths,
                 plan.tags,
                 plan.excludes,
+                plan.limit_upload,
+                plan.limit_download,
             )
             .await;
         }

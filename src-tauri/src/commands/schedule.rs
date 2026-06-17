@@ -102,6 +102,7 @@ pub async fn run_schedule_now(
             &app, &db, &master_key, &backup_handle,
             &plan.repo_id, Some(plan.id.as_str()),
             plan.paths, plan.tags, plan.excludes,
+            plan.limit_upload, plan.limit_download,
         )
         .await
         {

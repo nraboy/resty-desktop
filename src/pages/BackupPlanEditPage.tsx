@@ -89,6 +89,8 @@ export default function BackupPlanEditPage() {
   const [keepWeekly, setKeepWeekly] = useState("");
   const [keepMonthly, setKeepMonthly] = useState("");
   const [keepYearly, setKeepYearly] = useState("");
+  const [limitUpload, setLimitUpload] = useState("");
+  const [limitDownload, setLimitDownload] = useState("");
 
   useEffect(() => {
     const init = async () => {
@@ -115,6 +117,8 @@ export default function BackupPlanEditPage() {
             setKeepWeekly(plan.retention?.keepWeekly?.toString() ?? "");
             setKeepMonthly(plan.retention?.keepMonthly?.toString() ?? "");
             setKeepYearly(plan.retention?.keepYearly?.toString() ?? "");
+            setLimitUpload(plan.limitUpload?.toString() ?? "");
+            setLimitDownload(plan.limitDownload?.toString() ?? "");
           } else {
             setError("Backup plan not found.");
           }
@@ -232,6 +236,8 @@ export default function BackupPlanEditPage() {
         tags,
         excludes,
         retention,
+        limitUpload: toNum(limitUpload),
+        limitDownload: toNum(limitDownload),
       };
       await saveBackupPlan(plan);
       navigate("/backup-plans");
@@ -535,6 +541,33 @@ export default function BackupPlanEditPage() {
                 className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
               />
               <span className="text-xs text-gray-500">{unit}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Bandwidth limits */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Bandwidth Limits (optional)</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Limits are in KiB/s. Leave blank for unlimited. These settings only affect remote repositories (S3, SFTP, etc.) — they have no effect on local repos.
+        </p>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+          {[
+            { label: "Upload limit", value: limitUpload, set: setLimitUpload },
+            { label: "Download limit", value: limitDownload, set: setLimitDownload },
+          ].map(({ label, value, set }) => (
+            <div key={label} className="flex items-center gap-3">
+              <label className="text-xs text-gray-400 w-28 flex-shrink-0">{label}</label>
+              <input
+                type="number"
+                min="0"
+                value={value}
+                onChange={(e) => set(e.target.value)}
+                placeholder="—"
+                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+              />
+              <span className="text-xs text-gray-500">KiB/s</span>
             </div>
           ))}
         </div>

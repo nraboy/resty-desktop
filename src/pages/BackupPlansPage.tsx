@@ -127,7 +127,7 @@ export default function BackupPlansPage() {
     unlistenRef.current = unlisten;
 
     try {
-      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.id);
+      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.id, backupPlan.limitUpload, backupPlan.limitDownload);
       if (backupPlan.retention) {
         setApplyingRetention(true);
         try {
