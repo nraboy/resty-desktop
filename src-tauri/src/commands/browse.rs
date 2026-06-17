@@ -84,6 +84,7 @@ pub async fn restore_path(
     snapshot_id: String,
     include_path: String,
     target_dir: String,
+    strip_leading_path: bool,
 ) -> Result<(), String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
@@ -100,7 +101,38 @@ pub async fn restore_path(
         ],
         &restic_path,
     )
-    .map(|_| ())
+    .map(|_| ())?;
+
+    if strip_leading_path {
+        let clean = include_path.trim_start_matches('/');
+        let restored_at = std::path::Path::new(&target_dir).join(clean);
+        let basename = std::path::Path::new(clean)
+            .file_name()
+            .ok_or("Cannot determine basename of restore path")?;
+        let dest = std::path::Path::new(&target_dir).join(basename);
+
+        if restored_at != dest {
+            std::fs::rename(&restored_at, &dest)
+                .map_err(|e| format!("Failed to move restored item: {e}"))?;
+
+            // Remove the now-empty ancestor directories up to (but not including) target_dir.
+            let target_path = std::path::PathBuf::from(&target_dir);
+            let mut cursor = restored_at
+                .parent()
+                .map(|p| p.to_path_buf());
+            while let Some(p) = cursor {
+                if p == target_path {
+                    break;
+                }
+                if std::fs::remove_dir(&p).is_err() {
+                    break;
+                }
+                cursor = p.parent().map(|pp| pp.to_path_buf());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]

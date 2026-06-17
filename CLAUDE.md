@@ -86,7 +86,10 @@ src/
                               #   Compare with… opens a modal to select a second snapshot and navigates to DiffPage; always diffs older→newer
                               #   regardless of which snapshot was right-clicked (timestamps compared to determine order)
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore with native directory picker
-                              #   (Browse button, target pre-filled from get_restore_path setting); breadcrumb nav;
+                              #   (Browse button, target pre-filled from get_restore_path setting); restore modal includes
+                              #   "Restore file/folder only" checkbox (default checked) — when checked, strips the original
+                              #   path structure so the item lands directly in the target dir instead of nested under its
+                              #   full original path; breadcrumb nav;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     DiffPage.tsx              # Snapshot diff viewer at route /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                               #   calls diff_snapshots on mount and builds a client-side tree from the flat entry list;
@@ -95,7 +98,8 @@ src/
                               #   tree navigation via breadcrumb; directories show aggregated change type
                               #   (all-same→that type, mixed→"mixed" in gray); right-click any entry to Restore —
                               #   "removed" files restore from snapshotA (older), all others from snapshotB (newer);
-                              #   restore modal pre-filled from get_restore_path, uses restorePath invoke (same as BrowsePage)
+                              #   restore modal pre-filled from get_restore_path, uses restorePath invoke (same as BrowsePage);
+                              #   restore modal includes "Restore file/folder only" checkbox (default checked, same behavior as BrowsePage)
     BackupPlansPage.tsx       # List saved backup plans; run a plan immediately; delete plans;
                               #   backup modal with streaming progress bar (backup:progress events), cancellation support
                               #   (cancel_backup), and completion/error confirmation UI;
@@ -183,7 +187,11 @@ src-tauri/
                               #   parses lines by prefix (+  /−  /M  /T  ), counts totals for all lines, stores up to
                               #   DIFF_ENTRY_LIMIT=500 entries with path.trim() to handle whitespace variations;
                               #   returns DiffResult { entries, totalAdded, totalRemoved, totalModified, truncated }
-      browse.rs               # list_files, restore_path, restore_snapshot
+      browse.rs               # list_files, restore_path, restore_snapshot;
+                              #   restore_path accepts strip_leading_path: bool — when true, after restic finishes it moves
+                              #   the restored item from <target>/<original/full/path> to <target>/<basename> and removes
+                              #   the now-empty ancestor directories; source and dest are always under target_dir so
+                              #   std::fs::rename never crosses filesystems
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite;
                               #   list_backup_plans returns plans sorted alphabetically by name (ORDER BY name COLLATE NOCASE)
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,

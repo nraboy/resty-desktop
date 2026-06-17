@@ -91,9 +91,10 @@ export default function DiffPage() {
   const [error, setError] = useState("");
   const [currentPath, setCurrentPath] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
-  const [restoreTarget, setRestoreTarget] = useState<{ path: string; snapshotId: string } | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<{ path: string; snapshotId: string; isDir: boolean } | null>(null);
   const [targetDir, setTargetDir] = useState("");
   const [defaultTargetDir, setDefaultTargetDir] = useState("");
+  const [stripLeadingPath, setStripLeadingPath] = useState(true);
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState("");
 
@@ -121,7 +122,7 @@ export default function DiffPage() {
     setRestoring(true);
     setRestoreError("");
     try {
-      await restorePathInvoke(repoId, restoreTarget.snapshotId, restoreTarget.path, targetDir);
+      await restorePathInvoke(repoId, restoreTarget.snapshotId, restoreTarget.path, targetDir, stripLeadingPath);
       setRestoreTarget(null);
     } catch (err: any) {
       setRestoreError(String(err));
@@ -133,8 +134,9 @@ export default function DiffPage() {
   const openRestoreModal = (node: TreeNode) => {
     // "removed" files only exist in snapshotA (older); everything else restores from snapshotB (newer)
     const snapId = node.change === "removed" ? (snapshotA ?? "") : (snapshotB ?? "");
-    setRestoreTarget({ path: node.fullPath, snapshotId: snapId });
+    setRestoreTarget({ path: node.fullPath, snapshotId: snapId, isDir: node.isDir });
     setTargetDir(defaultTargetDir);
+    setStripLeadingPath(true);
     setRestoreError("");
   };
 
@@ -311,7 +313,7 @@ export default function DiffPage() {
         {restoreError && (
           <div className="mb-3 p-2 bg-red-900/30 border border-red-700 rounded text-sm text-red-300">{restoreError}</div>
         )}
-        <div className="flex gap-2 mb-4">
+        <div className="flex gap-2 mb-3">
           <div className="flex-1">
             <Input
               placeholder="Select a target directory…"
@@ -321,6 +323,15 @@ export default function DiffPage() {
           </div>
           <Button variant="secondary" onClick={handlePickTargetDir}>Browse</Button>
         </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+          <input
+            type="checkbox"
+            checked={stripLeadingPath}
+            onChange={(e) => setStripLeadingPath(e.target.checked)}
+            className="w-4 h-4 accent-blue-500"
+          />
+          Restore {restoreTarget?.isDir ? "folder" : "file"} only (skip original path structure)
+        </label>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
           <Button loading={restoring} onClick={handleRestore} disabled={!targetDir}>Restore</Button>

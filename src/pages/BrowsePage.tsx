@@ -40,6 +40,7 @@ export default function BrowsePage() {
   const [restoreTarget, setRestoreTarget] = useState<FileEntry | null>(null);
   const [targetDir, setTargetDir] = useState("");
   const [defaultTargetDir, setDefaultTargetDir] = useState("");
+  const [stripLeadingPath, setStripLeadingPath] = useState(true);
   const [restoring, setRestoring] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [tags, setTags] = useState<string[]>(snapshot?.tags ?? []);
@@ -129,7 +130,7 @@ export default function BrowsePage() {
     if (!repoId || !snapshotId || !restoreTarget || !targetDir) return;
     setRestoring(true);
     try {
-      await restorePath(repoId, snapshotId, restoreTarget.path, targetDir);
+      await restorePath(repoId, snapshotId, restoreTarget.path, targetDir, stripLeadingPath);
       setRestoreTarget(null);
     } catch (err: any) {
       setError(String(err));
@@ -276,7 +277,7 @@ export default function BrowsePage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => { setRestoreTarget(entry); setTargetDir(defaultTargetDir); }}
+                      onClick={() => { setRestoreTarget(entry); setTargetDir(defaultTargetDir); setStripLeadingPath(true); }}
                     >
                       Restore
                     </Button>
@@ -321,7 +322,7 @@ export default function BrowsePage() {
           Restore <span className="font-mono text-blue-400 text-xs break-all">{restoreTarget?.path}</span> to a target directory.
           Only files that conflict with the restored content will be overwritten; other files in the target are left untouched.
         </p>
-        <div className="flex gap-2 mb-4">
+        <div className="flex gap-2 mb-3">
           <div className="flex-1">
             <Input
               placeholder="Select a target directory…"
@@ -332,6 +333,15 @@ export default function BrowsePage() {
           </div>
           <Button variant="secondary" onClick={handlePickTargetDir}>Browse</Button>
         </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+          <input
+            type="checkbox"
+            checked={stripLeadingPath}
+            onChange={(e) => setStripLeadingPath(e.target.checked)}
+            className="w-4 h-4 accent-blue-500"
+          />
+          Restore {restoreTarget?.type === "dir" ? "folder" : "file"} only (skip original path structure)
+        </label>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
           <Button loading={restoring} onClick={handleRestore} disabled={!targetDir}>Restore</Button>

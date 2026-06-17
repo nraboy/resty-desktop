@@ -179,9 +179,10 @@ export const restorePath = (
   repoId: string,
   snapshotId: string,
   includePath: string,
-  targetDir: string
+  targetDir: string,
+  stripLeadingPath: boolean
 ): Promise<void> =>
-  invoke("restore_path", { repoId, snapshotId, includePath, targetDir });
+  invoke("restore_path", { repoId, snapshotId, includePath, targetDir, stripLeadingPath });
 
 export const restoreSnapshot = (
   repoId: string,
