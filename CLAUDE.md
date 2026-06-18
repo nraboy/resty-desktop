@@ -85,8 +85,9 @@ src/
                               #   total size + file count in a modal (spinner while running, note that size includes shared data);
                               #   Compare with… opens a modal to select a second snapshot and navigates to DiffPage; always diffs older→newer
                               #   regardless of which snapshot was right-clicked (timestamps compared to determine order)
-    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore with native directory picker
-                              #   (Browse button, target pre-filled from get_restore_path setting); restore modal includes
+    BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore via icon button (download glyph)
+                              #   and right-click context menu ("Restore…" item); native directory picker (Browse button),
+                              #   target pre-filled from get_restore_path setting; restore modal includes
                               #   "Restore file/folder only" checkbox (default checked) — when checked, strips the original
                               #   path structure so the item lands directly in the target dir instead of nested under its
                               #   full original path; breadcrumb nav;

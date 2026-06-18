@@ -9,7 +9,11 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 - **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
 - **Schedules** — attach backup plans to a cron schedule; runs happen in the background even while the UI is closed
 - **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning
+- **Snapshot diff** — compare any two snapshots to see exactly what was added, removed, or modified, with per-entry restore directly from the diff view
 - **File browser** — navigate the file tree inside any snapshot and restore individual files, directories, or entire snapshots
+- **Bandwidth limits** — optionally throttle upload and download speeds per backup plan for remote repositories
+- **System tray** — optionally minimize to the system tray so scheduled backups continue running while the window is closed
+- **Themes** — dark, light, and system appearance modes
 - **Logs** — persistent history of every backup run with duration, file counts, bytes added, and snapshot ID
 
 ## Requirements
