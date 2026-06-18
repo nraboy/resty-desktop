@@ -152,7 +152,8 @@ src-tauri/
                               #   TRAY_GEN atomic counter for unique menu item IDs (avoids Tauri global-registry collisions on re-creation);
                               #   deactivate_tray calls set_visible(false) then drops the icon; macOS uses icons/tray-icon.png
                               #   (black template icon), other platforms use icons/32x32.png (colorful); show_window helper restores
-                              #   the window and macOS activation policy; RunEvent::Reopen handles macOS dock-click while window is hidden
+                              #   the window and macOS activation policy; RunEvent::Reopen handles macOS dock-click while window is hidden —
+                              #   gated with #[cfg(target_os = "macos")] because the variant does not exist on Windows/Linux
     commands/
       mod.rs                  # shared get_restic_path() helper used by all command modules
       auth.rs                 # is_app_setup, setup_master_password, unlock_app, lock_app,
@@ -192,7 +193,11 @@ src-tauri/
                               #   restore_path accepts strip_leading_path: bool — when true, after restic finishes it moves
                               #   the restored item from <target>/<original/full/path> to <target>/<basename> and removes
                               #   the now-empty ancestor directories; source and dest are always under target_dir so
-                              #   std::fs::rename never crosses filesystems
+                              #   std::fs::rename never crosses filesystems; on Windows, restic exits non-zero when it
+                              #   cannot apply platform-specific extended attributes (e.g. macOS EAs) — restore_path
+                              #   suppresses errors whose every stderr line is EA-related (set EA failed / extended attribute)
+                              #   because the file is fully restored despite the metadata failure; strip_leading_path uses
+                              #   an .exists() guard so it runs correctly whether restic exited cleanly or with EA-only errors
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite;
                               #   list_backup_plans returns plans sorted alphabetically by name (ORDER BY name COLLATE NOCASE)
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,

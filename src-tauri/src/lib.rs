@@ -290,10 +290,13 @@ pub fn run() {
         .expect("error building tauri application")
         .run(|app_handle, event| {
             // macOS dock click while window is hidden — restore window and dock presence
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {
                     show_window(app_handle);
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
         });
 }

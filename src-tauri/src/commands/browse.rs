@@ -89,7 +89,7 @@ pub async fn restore_path(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    run_restic_with_path(
+    let restic_result = run_restic_with_path(
         &repo,
         vec![
             "restore",
@@ -101,7 +101,24 @@ pub async fn restore_path(
         ],
         &restic_path,
     )
-    .map(|_| ())?;
+    .map(|_| ());
+
+    // On Windows, restic exits non-zero when it cannot apply platform-specific extended
+    // attributes (e.g. macOS EAs) to the restored files. The files are fully restored;
+    // only the metadata application fails. Suppress these errors so the caller sees
+    // success and the strip logic below can still run.
+    #[cfg(target_os = "windows")]
+    let restic_result = restic_result.or_else(|e| {
+        let only_ea_errors = e.lines().all(|line| {
+            let l = line.trim();
+            l.is_empty()
+                || l.contains("set EA failed")
+                || l.contains("extended attribute")
+                || l.starts_with("ignoring error")
+                || l.starts_with("Fatal: There were")
+        });
+        if only_ea_errors { Ok(()) } else { Err(e) }
+    });
 
     if strip_leading_path {
         let clean = include_path.trim_start_matches('/');
@@ -111,15 +128,13 @@ pub async fn restore_path(
             .ok_or("Cannot determine basename of restore path")?;
         let dest = std::path::Path::new(&target_dir).join(basename);
 
-        if restored_at != dest {
+        if restored_at != dest && restored_at.exists() {
             std::fs::rename(&restored_at, &dest)
                 .map_err(|e| format!("Failed to move restored item: {e}"))?;
 
             // Remove the now-empty ancestor directories up to (but not including) target_dir.
             let target_path = std::path::PathBuf::from(&target_dir);
-            let mut cursor = restored_at
-                .parent()
-                .map(|p| p.to_path_buf());
+            let mut cursor = restored_at.parent().map(|p| p.to_path_buf());
             while let Some(p) = cursor {
                 if p == target_path {
                     break;
@@ -132,7 +147,7 @@ pub async fn restore_path(
         }
     }
 
-    Ok(())
+    restic_result
 }
 
 #[derive(Clone, Serialize)]
