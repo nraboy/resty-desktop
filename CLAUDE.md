@@ -150,9 +150,11 @@ src-tauri/
                               #   so closing the window pre-unlock exits the app normally; after unlock, window close hides to tray if
                               #   tray_enabled=true (checked via AppDb), otherwise exits; activate_tray always recreates fresh using a
                               #   TRAY_GEN atomic counter for unique menu item IDs (avoids Tauri global-registry collisions on re-creation);
-                              #   deactivate_tray: on Windows calls set_visible(false) (= NIM_DELETE, synchronous removal)
-                              #   then std::mem::forget to skip Drop and avoid a second NIM_DELETE error; on macOS/Linux
-                              #   simply drops the icon via Drop; macOS uses icons/tray-icon.png
+                              #   deactivate_tray: calls set_visible(false) on all platforms for immediate visual removal,
+                              #   then on Windows uses std::mem::forget to skip Drop (set_visible = NIM_DELETE on Windows,
+                              #   so Drop would issue a second NIM_DELETE and log an error); on macOS/Linux Drop runs
+                              #   normally after set_visible since hide and delete are separate operations there;
+                              #   macOS uses icons/tray-icon.png
                               #   (black template icon), other platforms use icons/32x32.png (colorful); show_window helper restores
                               #   the window and macOS activation policy; RunEvent::Reopen handles macOS dock-click while window is hidden —
                               #   gated with #[cfg(target_os = "macos")] because the variant does not exist on Windows/Linux

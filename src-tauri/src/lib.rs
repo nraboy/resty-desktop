@@ -56,13 +56,13 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
 fn deactivate_tray(tray_state: tauri::State<TrayState>) -> Result<(), String> {
     let mut guard = tray_state.0.lock().unwrap();
     if let Some(tray) = guard.take() {
+        let _ = tray.set_visible(false);
+        // On Windows, set_visible(false) maps to NIM_DELETE (full OS removal), so Drop
+        // would issue a second NIM_DELETE and log an error — skip it with mem::forget.
+        // On macOS/Linux, set_visible(false) only hides the icon; Drop then cleans up
+        // the remaining resources cleanly with no double-removal.
         #[cfg(target_os = "windows")]
-        {
-            let _ = tray.set_visible(false);
-            std::mem::forget(tray);
-        }
-        #[cfg(not(target_os = "windows"))]
-        drop(tray);
+        std::mem::forget(tray);
     }
     Ok(())
 }
