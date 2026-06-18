@@ -3,6 +3,7 @@ use tauri::{Emitter, State};
 
 use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
 use super::repo::run_restic_with_path;
+use super::NoConsole;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -253,9 +254,10 @@ pub async fn execute_backup(
         args.push(path.clone());
     }
 
-    // Touch each path from the parent process so macOS TCC prompts appear
-    // upfront, attributed to "Resty Desktop", before restic is spawned.
-    // Child processes inherit the grants so restic won't re-trigger them.
+    // Touch each path so macOS TCC prompts appear upfront, attributed to
+    // "Resty Desktop", before restic is spawned. Child processes inherit the
+    // grants so restic won't re-trigger them. Not needed on other platforms.
+    #[cfg(target_os = "macos")]
     for path in &paths {
         let _ = std::fs::metadata(path);
     }
@@ -290,6 +292,7 @@ pub async fn execute_backup(
             .env("RESTIC_COMPRESSION", &compression_inner)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .no_console()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -511,6 +514,7 @@ pub async fn copy_snapshot(
             .env("RESTIC_FROM_PASSWORD", &src_repo.password)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .no_console()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -613,6 +617,7 @@ pub async fn mirror_repo(
             .env("RESTIC_FROM_PASSWORD", &src_repo.password)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .no_console()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 

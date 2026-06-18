@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
+use super::NoConsole;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResticStats {
@@ -20,6 +21,7 @@ pub fn run_restic_with_path(
         .args(args)
         .env("RESTIC_REPOSITORY", &repo.path)
         .env("RESTIC_PASSWORD", &repo.password)
+        .no_console()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     if output.status.success() {
@@ -110,6 +112,7 @@ pub async fn init_repo(
         .args(["init"])
         .env("RESTIC_REPOSITORY", &dummy.path)
         .env("RESTIC_PASSWORD", &dummy.password)
+        .no_console()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -199,6 +202,7 @@ pub async fn check_repo(
         .args(["check", "--json"])
         .env("RESTIC_REPOSITORY", &repo.path)
         .env("RESTIC_PASSWORD", &repo.password)
+        .no_console()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     let duration_seconds = started.elapsed().as_secs_f64();
@@ -291,6 +295,7 @@ pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
     let restic_path = super::get_restic_path(&db);
     let output = std::process::Command::new(&restic_path)
         .arg("version")
+        .no_console()
         .output()
         .map_err(|_| format!("restic not found at '{restic_path}'"))?;
     if output.status.success() {
@@ -345,6 +350,7 @@ pub async fn prune_all_repos(
             .env("RESTIC_PASSWORD", &full.password)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .no_console()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -422,6 +428,7 @@ pub async fn prune_repo(
         .env("RESTIC_PASSWORD", &full.password)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .no_console()
         .spawn()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
 

@@ -48,14 +48,22 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     Ok(())
 }
 
-/// Hides and drops the tray icon (called when the user disables the tray toggle).
+/// Removes the tray icon (called when the user disables the tray toggle).
+/// On Windows, set_visible(false) maps to NIM_DELETE and removes the icon synchronously.
+/// We then forget the value to skip Drop, which would otherwise issue a second NIM_DELETE
+/// and log "Error removing system tray icon". On macOS, Drop handles removal cleanly.
 #[tauri::command]
 fn deactivate_tray(tray_state: tauri::State<TrayState>) -> Result<(), String> {
     let mut guard = tray_state.0.lock().unwrap();
-    if let Some(tray) = guard.as_ref() {
-        let _ = tray.set_visible(false);
+    if let Some(tray) = guard.take() {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = tray.set_visible(false);
+            std::mem::forget(tray);
+        }
+        #[cfg(not(target_os = "windows"))]
+        drop(tray);
     }
-    *guard = None;
     Ok(())
 }
 
@@ -96,7 +104,7 @@ fn activate_tray(
     let icon = tauri::image::Image::new_owned(decoded.into_raw(), w, h);
     let tray = TrayIconBuilder::new()
         .icon(icon)
-        .icon_as_template(true)
+        .icon_as_template(cfg!(target_os = "macos"))
         .show_menu_on_left_click(true)
         .tooltip("Resty Desktop")
         .menu(&tray_menu)

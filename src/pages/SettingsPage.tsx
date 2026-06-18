@@ -274,13 +274,12 @@ export default function SettingsPage() {
           <h2 className="text-sm font-medium text-gray-300 mb-1">Restic Binary Path</h2>
           <p className="text-xs text-gray-500 mb-3">
             Path to the <span className="font-mono">restic</span> executable. Defaults to{" "}
-            <span className="font-mono text-gray-400">restic</span> (must be on{" "}
-            <span className="font-mono text-gray-400">$PATH</span>).
+            <span className="font-mono text-gray-400">restic</span> (must be on PATH).
           </p>
           <Input
             value={resticPath}
             onChange={(e) => setResticPathLocal(e.target.value)}
-            placeholder="/usr/local/bin/restic"
+            placeholder="restic"
           />
           {resticVersion && (
             <p className="mt-2 text-xs text-green-400 font-mono">{resticVersion}</p>

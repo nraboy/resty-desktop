@@ -3,6 +3,7 @@ use tauri::{Emitter, State};
 
 use super::cache::{AppDb, MasterKey};
 use super::repo::run_restic_with_path;
+use super::NoConsole;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -187,6 +188,7 @@ pub async fn restore_snapshot(
             .env("RESTIC_PASSWORD", &repo_password)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .no_console()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -221,6 +223,20 @@ pub async fn restore_snapshot(
         if status.success() {
             Ok(())
         } else {
+            #[cfg(target_os = "windows")]
+            {
+                let only_ea_errors = stderr_str.lines().all(|line| {
+                    let l = line.trim();
+                    l.is_empty()
+                        || l.contains("set EA failed")
+                        || l.contains("extended attribute")
+                        || l.starts_with("ignoring error")
+                        || l.starts_with("Fatal: There were")
+                });
+                if only_ea_errors {
+                    return Ok(());
+                }
+            }
             let msg = stderr_str.trim();
             Err(if msg.is_empty() { "restic restore failed".to_string() } else { msg.to_string() })
         }
