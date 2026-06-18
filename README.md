@@ -2,6 +2,17 @@
 
 A cross-platform desktop client for [Restic](https://restic.net/), the fast and secure backup tool. Resty Desktop wraps the Restic CLI to provide a visual interface for managing repositories, creating backups, browsing snapshots, and restoring files — without touching the command line.
 
+## Screenshots
+
+| | | |
+|:---:|:---:|:---:|
+| ![List Repositories](screenshots/repository-list.jpg) | ![List Snapshots](screenshots/snapshot-list.jpg) | ![Browse Files within Snapshots](screenshots/snapshot-file-browser.jpg) |
+| List Repositories | List Snapshots | Browse Files within Snapshots |
+| ![Define Backup Plans](screenshots/define-backup-plan.jpg) | ![List Backup Plans](screenshots/backup-plan-list.jpg) | ![Schedule Backups](screenshots/automated-schedule.jpg) |
+| Define Backup Plans | List Backup Plans | Schedule Backups |
+| ![Restore Snapshot](screenshots/snapshot-restore.jpg) | ![Backup History](screenshots/backup-history.jpg) | ![Unlock Application](screenshots/unlock.jpg) |
+| Restore Snapshot | Backup History | Unlock Application |
+
 ## Features
 
 - **Master password** — all repository passwords are encrypted at rest; a single master password unlocks the app on each launch
