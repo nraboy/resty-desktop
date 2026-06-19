@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -44,6 +44,7 @@ export default function SettingsPage() {
   const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [trayEnabled, setTrayEnabledLocal] = useState(true);
+  const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
 
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -57,6 +58,7 @@ export default function SettingsPage() {
     getCompression().then(setCompression).catch(() => {});
     getRestorePath().then(setRestorePathLocal).catch(() => {});
     getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
+    getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -263,6 +265,41 @@ export default function SettingsPage() {
             {!trayEnabled && (
               <p className="mt-3 text-xs text-amber-500">
                 Warning: scheduled backups will not run while the app is closed.
+              </p>
+            )}
+          </div>
+          <div className="pt-4 border-t border-gray-800">
+            <p className="text-xs text-gray-500 mb-3">
+              When enabled, snapshot lists and repository stats for remote repositories are
+              refreshed automatically on page load, the same as local repositories. Disabled by
+              default to avoid unnecessary bandwidth charges from your cloud provider.
+            </p>
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <button
+                role="switch"
+                aria-checked={remoteAutoRefresh}
+                onClick={() => {
+                  const next = !remoteAutoRefresh;
+                  setRemoteAutoRefreshLocal(next);
+                  setRemoteAutoRefresh(next).catch(() => {});
+                }}
+                className={[
+                  "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
+                  remoteAutoRefresh ? "bg-blue-600" : "bg-gray-700",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                    remoteAutoRefresh ? "translate-x-4" : "translate-x-1",
+                  ].join(" ")}
+                />
+              </button>
+              <span className="text-sm text-gray-300">Auto-refresh data for remote repositories</span>
+            </label>
+            {remoteAutoRefresh && (
+              <p className="mt-3 text-xs text-amber-500">
+                Warning: automatic refresh may incur bandwidth charges with your cloud provider.
               </p>
             )}
           </div>

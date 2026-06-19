@@ -92,6 +92,12 @@ export const getTrayEnabled = (): Promise<boolean> =>
 export const setTrayEnabled = (value: boolean): Promise<void> =>
   invoke("set_tray_enabled", { value });
 
+export const getRemoteAutoRefresh = (): Promise<boolean> =>
+  invoke("get_remote_auto_refresh");
+
+export const setRemoteAutoRefresh = (value: boolean): Promise<void> =>
+  invoke("set_remote_auto_refresh", { value });
+
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 

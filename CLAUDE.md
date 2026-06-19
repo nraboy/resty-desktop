@@ -62,7 +62,8 @@ src/
     AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.);
                               #   per-row refresh stats button shown for all repos (not just remote); "Refresh Stats" header button
-                              #   refreshes all repos in parallel via Promise.allSettled; refreshingAll state disables per-row buttons during bulk refresh;
+                              #   refreshes repos in parallel via Promise.allSettled; remote repos are excluded unless remote_auto_refresh=true;
+                              #   refreshingAll state disables per-row buttons during bulk refresh;
                               #   mirror repository modal: copies all snapshots from one repo to another with indeterminate progress bar,
                               #   elapsed timer, cancellation support, and completion/cancellation confirmation UI;
                               #   edit repository modal: allows changing name, path, and password; path shows Browse button for local repos
@@ -74,6 +75,7 @@ src/
                               #   the context menu, not as row buttons; Prune modal has confirmation → indeterminate progress + elapsed
                               #   timer + Cancel → done/cancelled states, uses PruneHandle + cancel_prune for cancellation
     SnapshotsPage.tsx         # Table of snapshots; inline tag editor; delete with prune option; stale-while-revalidate cache pattern; on-demand repo check;
+                              #   amber banner shown for remote repos when remote_auto_refresh=false, prompting manual Refresh or enabling auto-refresh in Settings;
                               #   full-snapshot restore modal with streaming progress bar (restore:progress events); restore
                               #   target dir pre-filled from get_restore_path setting (user can override per-restore via Browse);
                               #   per-snapshot copy to another repo with cancellation support;
@@ -125,7 +127,9 @@ src/
     LogsPage.tsx              # Persistent backup history log; shows date, plan, repo, duration, file counts, bytes added, snapshot ID; expandable error rows;
                               #   paginated at PAGE_SIZE=10 rows per page with Previous/Next controls and a "Page X of Y · N total entries" counter
     SettingsPage.tsx          # Appearance (theme selector) shown first; Toggles section with system tray toggle
-                              #   (get/set_tray_enabled + activate_tray/deactivate_tray on change); Restic binary path
+                              #   (get/set_tray_enabled + activate_tray/deactivate_tray on change) and remote auto-refresh toggle
+                              #   (get/set_remote_auto_refresh — default false; when true, snapshot lists and repo stats for remote
+                              #   repos refresh automatically on page load; amber warning shown when enabled); Restic binary path
                               #   override; shows detected restic version below path input; install instructions section
                               #   hidden when restic is found; global backup compression selector
                               #   (off/fastest/auto/better/max) persisted to app_settings; default restore path
@@ -173,6 +177,7 @@ src-tauri/
                               #   get_restore_path computes <home>/restores via app.path().home_dir() on first call and
                               #   stores it so subsequent calls are fast and the value is editable in Settings),
                               #   get_tray_enabled / set_tray_enabled (read/write "tray_enabled" key in app_settings),
+                              #   get_remote_auto_refresh / set_remote_auto_refresh (read/write "remote_auto_refresh" key in app_settings; default "false"),
                               #   prune_all_repos (runs restic prune on every repo sequentially, emits prune:progress events,
                               #   cancellable via PruneHandle), prune_repo (runs restic prune on a single repo, same
                               #   PruneHandle + cancel_prune cancellation pattern), cancel_prune;
@@ -279,7 +284,7 @@ src-tauri/
 
 - Three cache tables in `app_data.db`: `snapshots_cache` (per-repo snapshot list), `browse_cache` (per-snapshot directory listings keyed by path), `repo_stats_cache` (per-repo stats).
 - `list_snapshots` — returns from cache only (fast, no restic call). `refresh_snapshots` — calls restic and updates cache.
-- `SnapshotsPage` uses a stale-while-revalidate pattern: serve cache immediately, then fire `refresh_snapshots` in the background for local repos. Remote repos skip the background refresh to avoid unnecessary network calls.
+- `SnapshotsPage` uses a stale-while-revalidate pattern: serve cache immediately, then fire `refresh_snapshots` in the background for local repos. Remote repos skip the background refresh by default to avoid unnecessary network calls; enabling `remote_auto_refresh` in Settings makes them behave like local repos.
 - After `run_backup` succeeds: parse the new `snapshot_id` from the restic NDJSON summary line, fetch that single snapshot's metadata (`restic snapshots --json <id>`), and prepend it to the cached list — no full re-fetch needed.
 - After `forget_by_plan` succeeds: run `restic snapshots --json` to repopulate the snapshot cache with the post-prune list.
 - Stats cache (`get_repo_stats` / `refresh_repo_stats`): for remote repos, stats are evicted after backup/forget rather than auto-repopulated, since `restic stats` reads pack indexes which can be large on remote storage.

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRestorePath, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
@@ -54,9 +54,11 @@ export default function SnapshotsPage() {
   const [statsError, setStatsError] = useState("");
   const [compareSource, setCompareSource] = useState<Snapshot | null>(null);
   const [compareTargetId, setCompareTargetId] = useState("");
+  const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
 
   useEffect(() => {
     getRestorePath().then(setDefaultRestoreDir).catch(() => {});
+    getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export default function SnapshotsPage() {
 
   const load = useCallback(async () => {
     if (!repoId || !repo) return;
-    const willRefresh = !isRemoteRepo(repo.path);
+    const willRefresh = !isRemoteRepo(repo.path) || remoteAutoRefresh;
     setLoading(true);
     if (willRefresh) setRefreshing(true);
     try {
@@ -100,7 +102,7 @@ export default function SnapshotsPage() {
       .then((data) => setSnapshots(data.reverse()))
       .catch(() => {})
       .finally(() => setRefreshing(false));
-  }, [repoId, repo]);
+  }, [repoId, repo, remoteAutoRefresh]);
 
   useEffect(() => {
     load();
@@ -279,6 +281,17 @@ export default function SnapshotsPage() {
           </Button>
         </div>
       </div>
+
+      {repo && isRemoteRepo(repo.path) && !remoteAutoRefresh && (
+        <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-start gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 shrink-0 mt-0.5">
+            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          </svg>
+          <span>
+            Remote repositories don't auto-refresh — click <strong className="font-semibold">Refresh</strong> to load the latest snapshots, or enable auto-refresh in Settings.
+          </span>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">

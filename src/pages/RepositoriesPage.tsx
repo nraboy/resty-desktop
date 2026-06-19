@@ -7,6 +7,7 @@ import {
   cancelMirror,
   cancelPrune,
   checkRepo,
+  getRemoteAutoRefresh,
   getRepoPassword,
   getRepoStats,
   initRepo,
@@ -75,6 +76,8 @@ export default function RepositoriesPage() {
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const pruneStartRef = useRef<number>(0);
 
+  const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
+
   const load = () =>
     listRepos()
       .then((r) => { setRepos(r); return r; })
@@ -92,6 +95,7 @@ export default function RepositoriesPage() {
   };
 
   useEffect(() => {
+    getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
     load().then(fetchStatsForLocal);
   }, []);
 
@@ -122,19 +126,19 @@ export default function RepositoriesPage() {
 
   const handleRefreshAll = async () => {
     setRefreshingAll(true);
-    const localRepos = repos.filter((repo) => !isRemoteRepo(repo.path));
+    const reposToRefresh = repos.filter((repo) => !isRemoteRepo(repo.path) || remoteAutoRefresh);
     setStatsMap((prev) => {
       const next = { ...prev };
-      for (const repo of localRepos) delete next[repo.id];
+      for (const repo of reposToRefresh) delete next[repo.id];
       return next;
     });
     setStatsErrorMap((prev) => {
       const next = { ...prev };
-      for (const repo of localRepos) delete next[repo.id];
+      for (const repo of reposToRefresh) delete next[repo.id];
       return next;
     });
     await Promise.allSettled(
-      localRepos
+      reposToRefresh
         .map((repo) =>
           refreshRepoStats(repo.id)
             .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))

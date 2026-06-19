@@ -27,6 +27,10 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 - **Themes** — dark, light, and system appearance modes
 - **Logs** — persistent history of every backup run with duration, file counts, bytes added, and snapshot ID
 
+## Download
+
+Pre-built binaries for macOS, Windows, and Linux are available on the [GitHub Releases page](https://github.com/nraboy/resty-desktop/releases).
+
 ## Requirements
 
 - [Restic](https://restic.readthedocs.io/en/latest/020_installation.html) 0.17 or newer, installed and available on `$PATH` (or configured via Settings)

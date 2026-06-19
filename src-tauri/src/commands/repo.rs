@@ -485,6 +485,16 @@ pub fn set_tray_enabled(db: State<'_, AppDb>, value: bool) -> Result<(), String>
 }
 
 #[tauri::command]
+pub fn get_remote_auto_refresh(db: State<'_, AppDb>) -> Result<bool, String> {
+    Ok(db.get_setting("remote_auto_refresh", "false")? == "true")
+}
+
+#[tauri::command]
+pub fn set_remote_auto_refresh(db: State<'_, AppDb>, value: bool) -> Result<(), String> {
+    db.set_setting("remote_auto_refresh", if value { "true" } else { "false" })
+}
+
+#[tauri::command]
 pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
     prune_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = prune_handle.child.lock() {
