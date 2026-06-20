@@ -33,7 +33,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y libwebkit2gtk-4.1-dev libssl-dev \
-            libappindicator3-dev librsvg2-dev libxdo-dev
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
 
       - name: Get tag annotation
         id: tag
