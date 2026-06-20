@@ -328,6 +328,17 @@ green.400     → --tw-green-400
 - Do **not** use `hover:text-white` on interactive elements inside content areas — same reason. Use `hover:text-gray-50`.
 - Colors outside the extended set (e.g. `blue-500`, `blue-600`, `red-*`, `yellow-*`) are **not** theme-mapped and render identically in both modes. This is intentional for colored-background elements like primary buttons (`bg-blue-600 text-white`) where white text is always on a dark-colored surface.
 
+## Releases
+
+`.github/workflows/release.yml` builds and publishes releases. Triggered by pushing a `v*` tag. Runs three parallel jobs (ubuntu-22.04, macos-latest, windows-latest) using `tauri-apps/tauri-action@v0`, which creates a draft GitHub Release and uploads platform artifacts. The annotated tag message becomes the release body. Uses `Swatinem/rust-cache` for Rust dependency caching and `actions/setup-node` npm caching to speed up repeat builds.
+
+To cut a release:
+
+```bash
+git tag -a v1.0.0 -m "Release notes here"
+git push origin v1.0.0
+```
+
 ## Running the App
 
 Rust must be installed first (it is not bundled):

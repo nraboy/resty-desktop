@@ -45,6 +45,29 @@ Install Rust if you haven't already:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+### Linux Prerequisites
+
+Tauri v2 requires WebKitGTK and a few other system libraries on Linux. Install them before running `npm run tauri dev` or `npm run tauri build`.
+
+**Debian / Ubuntu:**
+
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev librsvg2-dev libxdo-dev
+```
+
+**Fedora:**
+
+```bash
+sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+```
+
+**Arch Linux:**
+
+```bash
+sudo pacman -S webkit2gtk-4.1 openssl libappindicator-gtk3 librsvg xdotool
+```
+
 Then install dependencies and start the development build:
 
 ```bash
