@@ -58,6 +58,11 @@ src/
                               #   formatDuration (fractional param for sub-minute precision); used by all pages
     config.ts                 # App-level constants: MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR — bump to change minimum
                               #   supported restic version; consumed by App.tsx version warning banner
+    theme.tsx                 # React context-based theming: exports ThemeProvider (wraps the app in App.tsx)
+                              #   and useTheme() hook (returns { theme, setTheme }); persists selection to
+                              #   localStorage under key "resty-theme"; applies "light"/"dark"/"system" class
+                              #   to <html> via applyClass(); listens to prefers-color-scheme media query
+                              #   when theme === "system" to re-apply on OS theme change
   pages/
     AuthPage.tsx              # Master password setup (first launch) and unlock screen; shown before main UI
     RepositoriesPage.tsx      # Add/open/delete repos; triggers restic init for new repos; supports remote URLs (S3, SFTP, etc.);
@@ -309,7 +314,7 @@ src-tauri/
 
 ## Theming
 
-The app supports three modes — Dark (default), Light, and System (follows OS) — stored in `localStorage` via `src/lib/theme.ts` and applied as a class (`dark`, `light`, `system`) on `<html>`.
+The app supports three modes — Dark (default), Light, and System (follows OS) — stored in `localStorage` via `src/lib/theme.tsx` and applied as a class (`dark`, `light`, `system`) on `<html>`.
 
 ### How colors are themed
 
