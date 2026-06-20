@@ -31,6 +31,14 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 
 Pre-built binaries for macOS, Windows, and Linux are available on the [GitHub Releases page](https://github.com/nraboy/resty-desktop/releases).
 
+## macOS Installation Note
+
+Pre-built macOS binaries are not code-signed or notarized. macOS Gatekeeper will block the app with a "corrupted" warning on first launch. To allow it to run, remove the quarantine attribute after installing:
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app
+```
+
 ## Requirements
 
 - [Restic](https://restic.readthedocs.io/en/latest/020_installation.html) 0.17 or newer, installed and available on `$PATH` (or configured via Settings)
@@ -99,6 +107,8 @@ The packaged app will be written to `src-tauri/target/release/bundle/`.
 ## Configuration
 
 The Restic binary path defaults to `restic` on `$PATH`. You can override it in the Settings page if Restic is installed elsewhere.
+
+The app automatically searches common installation locations (`/opt/homebrew/bin`, `/usr/local/bin`, etc.) when resolving binaries, so tools like `restic` and `rclone` installed via Homebrew or MacPorts should be found automatically even when the app is launched from Finder or a DMG.
 
 ## Support the Developer
 

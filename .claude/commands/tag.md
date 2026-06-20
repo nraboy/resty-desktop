@@ -12,7 +12,9 @@ Write the categorized list as the message of a new annotated tag on the current 
 git tag -a <new_tag> -m "<message>"
 ```
 
-The tag message should follow this style:
+The tag message should follow this style, where the first line is the title formatted as "<new_tag> - <Month Day, Year>" using today's date:
+
+v0.0.6 - June 20, 2026
 
 New Features:
 

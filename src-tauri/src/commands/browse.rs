@@ -189,6 +189,7 @@ pub async fn restore_snapshot(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .no_console()
+            .augment_path()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 

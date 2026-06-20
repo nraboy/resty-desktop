@@ -22,6 +22,7 @@ pub fn run_restic_with_path(
         .env("RESTIC_REPOSITORY", &repo.path)
         .env("RESTIC_PASSWORD", &repo.password)
         .no_console()
+        .augment_path()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     if output.status.success() {
@@ -113,6 +114,7 @@ pub async fn init_repo(
         .env("RESTIC_REPOSITORY", &dummy.path)
         .env("RESTIC_PASSWORD", &dummy.password)
         .no_console()
+        .augment_path()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -203,6 +205,7 @@ pub async fn check_repo(
         .env("RESTIC_REPOSITORY", &repo.path)
         .env("RESTIC_PASSWORD", &repo.password)
         .no_console()
+        .augment_path()
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     let duration_seconds = started.elapsed().as_secs_f64();
@@ -296,6 +299,7 @@ pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
     let output = std::process::Command::new(&restic_path)
         .arg("version")
         .no_console()
+        .augment_path()
         .output()
         .map_err(|_| format!("restic not found at '{restic_path}'"))?;
     if output.status.success() {
@@ -351,6 +355,7 @@ pub async fn prune_all_repos(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .no_console()
+            .augment_path()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -429,6 +434,7 @@ pub async fn prune_repo(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .no_console()
+        .augment_path()
         .spawn()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
 

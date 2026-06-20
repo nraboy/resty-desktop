@@ -168,7 +168,11 @@ src-tauri/
                               #   the window and macOS activation policy; RunEvent::Reopen handles macOS dock-click while window is hidden —
                               #   gated with #[cfg(target_os = "macos")] because the variant does not exist on Windows/Linux
     commands/
-      mod.rs                  # shared get_restic_path() helper used by all command modules
+      mod.rs                  # shared get_restic_path() helper used by all command modules;
+                              #   NoConsole trait adds no_console() (suppresses Windows console window) and augment_path()
+                              #   (prepends /opt/homebrew/bin, /usr/local/bin, and other common dirs to the child process
+                              #   PATH on macOS/Linux so bare binary names like "restic" and "rclone" resolve correctly
+                              #   when the app is launched from Finder/DMG where the inherited PATH is minimal)
       auth.rs                 # is_app_setup, setup_master_password, unlock_app, lock_app,
                               #   change_master_password, reset_app;
                               #   unlock_app runs restic unlock on all repos in the background to clear stale locks from crashes
@@ -335,13 +339,16 @@ green.400     → --tw-green-400
 
 ## Releases
 
-`.github/workflows/release.yml` builds and publishes releases. Triggered by pushing a `v*` tag. Runs three parallel jobs (ubuntu-22.04, macos-latest, windows-latest) using `tauri-apps/tauri-action@v0`, which creates a draft GitHub Release and uploads platform artifacts. The annotated tag message becomes the release body. Uses `Swatinem/rust-cache` for Rust dependency caching and `actions/setup-node` npm caching to speed up repeat builds.
+`.github/workflows/release.yml` builds and publishes releases. Triggered by pushing a `v*` tag. Runs three parallel jobs (ubuntu-22.04, macos-latest, windows-latest) using `tauri-apps/tauri-action@v0`, which creates a draft GitHub Release and uploads platform artifacts. The annotated tag message becomes the release body. Uses `Swatinem/rust-cache` for Rust dependency caching and `actions/setup-node` (Node 24) npm caching to speed up repeat builds. The build job is gated with `if: github.server_url == 'https://github.com'` so it is silently skipped on Gitea or other CI systems. The job requires `permissions: contents: write` so `GITHUB_TOKEN` can create releases — no manual token setup needed.
 
-To cut a release:
+Pre-built macOS binaries are not code-signed or notarized. Users must remove the quarantine attribute after installing: `sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app`. This is documented in the README. The `augment_path()` fix ensures restic and rclone resolve correctly from a downloaded build even when the app is launched from Finder (which provides a minimal PATH).
+
+To cut a release, use the `/tag` slash command to generate the annotated tag message, then push:
 
 ```bash
-git tag -a v1.0.0 -m "Release notes here"
-git push origin v1.0.0
+# e.g.: /tag v0.0.5,v0.0.6
+git push origin main      # workflow file must be on main before the tag is pushed
+git push origin v0.0.6
 ```
 
 ## Running the App

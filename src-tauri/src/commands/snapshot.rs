@@ -293,6 +293,7 @@ pub async fn execute_backup(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .no_console()
+            .augment_path()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -515,6 +516,7 @@ pub async fn copy_snapshot(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .no_console()
+            .augment_path()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
@@ -618,6 +620,7 @@ pub async fn mirror_repo(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .no_console()
+            .augment_path()
             .spawn()
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
