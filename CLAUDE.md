@@ -93,6 +93,11 @@ src/
                               #   "Restore file/folder only" checkbox (default checked) — when checked, strips the original
                               #   path structure so the item lands directly in the target dir instead of nested under its
                               #   full original path; breadcrumb nav;
+                              #   multi-select restore: "Select Multiple" toggle shows per-row checkboxes + select-all header
+                              #   checkbox; amber banner counts selected items and shows "Restore selected" button; multi-restore
+                              #   modal restores each selected path sequentially via restorePath, showing a determinate progress
+                              #   bar (current/total) and current path; selection clears on breadcrumb navigation or directory
+                              #   entry; "Cancel select" exits selection mode and clears selection;
                               #   inline tag management (add/remove tags on the snapshot directly from the browse view)
     DiffPage.tsx              # Snapshot diff viewer at route /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                               #   calls diff_snapshots on mount and builds a client-side tree from the flat entry list;

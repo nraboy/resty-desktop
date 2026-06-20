@@ -49,6 +49,14 @@ export default function BrowsePage() {
   const [showTagModal, setShowTagModal] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [tagging, setTagging] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [multiRestoreOpen, setMultiRestoreOpen] = useState(false);
+  const [multiTargetDir, setMultiTargetDir] = useState("");
+  const [multiStripLeadingPath, setMultiStripLeadingPath] = useState(true);
+  const [multiRestoring, setMultiRestoring] = useState(false);
+  const [multiRestoreProgress, setMultiRestoreProgress] = useState<{ current: number; total: number; currentPath: string } | null>(null);
+  const [multiRestoreError, setMultiRestoreError] = useState("");
 
   useEffect(() => {
     getRestorePath().then(setDefaultTargetDir).catch(() => {});
@@ -85,8 +93,23 @@ export default function BrowsePage() {
 
   const enterDir = useCallback((entry: FileEntry) => {
     setPathStack((s) => [...s, currentPath ?? ""]);
+    setSelectedPaths(new Set());
     load(entry.path);
   }, [currentPath, load]);
+
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedPaths(new Set());
+  }, []);
+
+  const toggleSelected = useCallback((path: string) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
 
   const visibleEntries = useMemo(() =>
     entries
@@ -97,6 +120,39 @@ export default function BrowsePage() {
         return a.name.localeCompare(b.name);
       }),
   [entries, showHidden]);
+
+  const allVisibleSelected = visibleEntries.length > 0 && visibleEntries.every((e) => selectedPaths.has(e.path));
+
+  const toggleSelectAll = useCallback(() => {
+    if (allVisibleSelected) {
+      setSelectedPaths(new Set());
+    } else {
+      setSelectedPaths(new Set(visibleEntries.map((e) => e.path)));
+    }
+  }, [allVisibleSelected, visibleEntries]);
+
+  const handleMultiRestore = async () => {
+    if (!repoId || !snapshotId || !multiTargetDir) return;
+    setMultiRestoring(true);
+    setMultiRestoreError("");
+    const paths = Array.from(selectedPaths);
+    for (let i = 0; i < paths.length; i++) {
+      setMultiRestoreProgress({ current: i, total: paths.length, currentPath: paths[i] });
+      try {
+        await restorePath(repoId, snapshotId, paths[i], multiTargetDir, multiStripLeadingPath);
+        setMultiRestoreProgress({ current: i + 1, total: paths.length, currentPath: paths[i] });
+      } catch (err: any) {
+        setMultiRestoreError(String(err));
+        setMultiRestoreProgress(null);
+        setMultiRestoring(false);
+        return;
+      }
+    }
+    setMultiRestoring(false);
+    setMultiRestoreProgress(null);
+    setMultiRestoreOpen(false);
+    exitSelectionMode();
+  };
 
   const handleAddTag = async () => {
     if (!repoId || !snapshotId || !newTag.trim()) return;
@@ -187,7 +243,7 @@ export default function BrowsePage() {
       </div>
 
       <div className="flex items-center gap-1 mb-4 text-sm text-gray-400 justify-between">
-        <button onClick={() => { setPathStack([]); load(); }} className="hover:text-gray-200 transition-colors">
+        <button onClick={() => { setPathStack([]); setSelectedPaths(new Set()); load(); }} className="hover:text-gray-200 transition-colors">
           root
         </button>
         {pathStack.map((p, i) => {
@@ -198,7 +254,7 @@ export default function BrowsePage() {
               <span className="text-gray-700">/</span>
               <button
                 className="hover:text-gray-200 transition-colors"
-                onClick={() => { setPathStack(pathStack.slice(0, i)); load(p); }}
+                onClick={() => { setPathStack(pathStack.slice(0, i)); setSelectedPaths(new Set()); load(p); }}
               >
                 {p.split("/").pop() || "/"}
               </button>
@@ -211,16 +267,48 @@ export default function BrowsePage() {
             <span className="text-gray-300">{currentPath.split("/").pop()}</span>
           </>
         )}
-        <label className="flex items-center gap-2 cursor-pointer select-none ml-auto pl-4">
-          <input
-            type="checkbox"
-            checked={showHidden}
-            onChange={(e) => setShowHidden(e.target.checked)}
-            className="w-4 h-4 accent-blue-500"
-          />
-          Show hidden files
-        </label>
+        <div className="ml-auto pl-4 flex items-center gap-4">
+          {selectionMode ? (
+            <button
+              onClick={exitSelectionMode}
+              className="text-blue-400 hover:text-blue-300 transition-colors font-medium"
+            >
+              Cancel select
+            </button>
+          ) : (
+            <button
+              onClick={() => setSelectionMode(true)}
+              className="hover:text-gray-200 transition-colors"
+            >
+              Select Multiple
+            </button>
+          )}
+          <div className="w-px h-4 bg-gray-700 flex-shrink-0" />
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+              className="w-4 h-4 accent-blue-500"
+            />
+            Show hidden files
+          </label>
+        </div>
       </div>
+
+      {selectionMode && selectedPaths.size > 0 && (
+        <div className="mb-3 px-4 py-2.5 rounded-lg bg-blue-900/30 border border-blue-700 flex items-center justify-between">
+          <span className="text-sm text-blue-300">
+            {selectedPaths.size} item{selectedPaths.size !== 1 ? "s" : ""} selected
+          </span>
+          <Button
+            size="sm"
+            onClick={() => { setMultiTargetDir(defaultTargetDir); setMultiStripLeadingPath(true); setMultiRestoreError(""); setMultiRestoreProgress(null); setMultiRestoreOpen(true); }}
+          >
+            Restore selected
+          </Button>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
@@ -232,6 +320,16 @@ export default function BrowsePage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-gray-900 border-b border-gray-800 text-left">
+              {selectionMode && (
+                <th className="pl-4 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAll}
+                    className="w-4 h-4 accent-blue-500"
+                  />
+                </th>
+              )}
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
@@ -241,7 +339,7 @@ export default function BrowsePage() {
           <tbody className="divide-y divide-gray-800">
             {loading ? (
               <tr>
-                <td colSpan={4}>
+                <td colSpan={selectionMode ? 5 : 4}>
                   <div className="flex items-center justify-center py-20 text-gray-500">
                     <svg className="animate-spin w-6 h-6 mr-2" viewBox="0 0 24 24" fill="none">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -255,9 +353,19 @@ export default function BrowsePage() {
               visibleEntries.map((entry) => (
                 <tr
                   key={entry.path}
-                  className="hover:bg-gray-900/50 transition-colors"
+                  className={`hover:bg-gray-900/50 transition-colors ${selectionMode && selectedPaths.has(entry.path) ? "bg-blue-900/10" : ""}`}
                   onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }}
                 >
+                  {selectionMode && (
+                    <td className="pl-4 py-2.5 w-10">
+                      <input
+                        type="checkbox"
+                        checked={selectedPaths.has(entry.path)}
+                        onChange={() => toggleSelected(entry.path)}
+                        className="w-4 h-4 accent-blue-500"
+                      />
+                    </td>
+                  )}
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
                       <FileIcon type={entry.type} />
@@ -334,6 +442,68 @@ export default function BrowsePage() {
           <Button variant="secondary" onClick={() => setShowTagModal(false)}>Cancel</Button>
           <Button loading={tagging} onClick={handleAddTag}>Add</Button>
         </div>
+      </Modal>
+
+      <Modal
+        title="Restore Selected"
+        open={multiRestoreOpen}
+        onClose={() => { if (!multiRestoring) { setMultiRestoreOpen(false); setMultiRestoreProgress(null); setMultiRestoreError(""); } }}
+      >
+        {multiRestoreProgress ? (
+          <div className="py-2">
+            <p className="text-sm text-gray-300 mb-3">
+              Restoring {multiRestoreProgress.current} of {multiRestoreProgress.total}…
+            </p>
+            <p className="text-xs font-mono text-gray-500 break-all mb-4">{multiRestoreProgress.currentPath}</p>
+            <div className="w-full bg-gray-800 rounded-full h-1.5">
+              <div
+                className="bg-blue-500 h-1.5 rounded-full transition-all"
+                style={{ width: `${(multiRestoreProgress.current / multiRestoreProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Restore <span className="text-blue-400">{selectedPaths.size} item{selectedPaths.size !== 1 ? "s" : ""}</span> to a target directory.
+            </p>
+            {multiRestoreError && (
+              <div className="mb-3 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300 break-all">
+                {multiRestoreError}
+              </div>
+            )}
+            <div className="flex gap-2 mb-3">
+              <div className="flex-1">
+                <Input
+                  placeholder="Select a target directory…"
+                  value={multiTargetDir}
+                  onChange={(e) => setMultiTargetDir(e.target.value)}
+                />
+              </div>
+              <Button variant="secondary" onClick={async () => {
+                const dir = await openDialog({ directory: true, multiple: false });
+                if (typeof dir === "string") setMultiTargetDir(dir);
+              }}>Browse</Button>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+              <input
+                type="checkbox"
+                checked={multiStripLeadingPath}
+                onChange={(e) => setMultiStripLeadingPath(e.target.checked)}
+                className="w-4 h-4 accent-blue-500"
+              />
+              Restore files/folders only (skip original path structure)
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => { setMultiRestoreOpen(false); setMultiRestoreError(""); }} disabled={multiRestoring}>
+                Cancel
+              </Button>
+              <Button loading={multiRestoring} onClick={handleMultiRestore} disabled={!multiTargetDir}>
+                Restore
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal
