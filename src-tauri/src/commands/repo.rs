@@ -482,12 +482,20 @@ pub async fn prune_repo(
 
 #[tauri::command]
 pub fn get_tray_enabled(db: State<'_, AppDb>) -> Result<bool, String> {
-    Ok(db.get_setting("tray_enabled", "true")? == "true")
+    Ok(db.get_setting("tray_enabled", "false")? == "true")
 }
 
 #[tauri::command]
 pub fn set_tray_enabled(db: State<'_, AppDb>, value: bool) -> Result<(), String> {
     db.set_setting("tray_enabled", if value { "true" } else { "false" })
+}
+
+#[tauri::command]
+pub fn get_tray_warning() -> &'static str {
+    #[cfg(target_os = "linux")]
+    return "System tray support on Linux depends on your desktop environment. It works on KDE and XFCE, but GNOME requires the AppIndicator extension. If the tray icon does not appear after enabling, the window may become unreachable until the app is relaunched.";
+    #[cfg(not(target_os = "linux"))]
+    return "";
 }
 
 #[tauri::command]

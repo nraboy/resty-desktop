@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -43,7 +43,8 @@ export default function SettingsPage() {
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [trayEnabled, setTrayEnabledLocal] = useState(true);
+  const [trayEnabled, setTrayEnabledLocal] = useState(false);
+  const [trayWarning, setTrayWarning] = useState("");
   const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
 
   const [oldPassword, setOldPassword] = useState("");
@@ -58,6 +59,7 @@ export default function SettingsPage() {
     getCompression().then(setCompression).catch(() => {});
     getRestorePath().then(setRestorePathLocal).catch(() => {});
     getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
+    getTrayWarning().then(setTrayWarning).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
@@ -266,6 +268,9 @@ export default function SettingsPage() {
               <p className="mt-3 text-xs text-amber-500">
                 Warning: scheduled backups will not run while the app is closed.
               </p>
+            )}
+            {trayWarning && (
+              <p className="mt-3 text-xs text-amber-500">{trayWarning}</p>
             )}
           </div>
           <div className="pt-4 border-t border-gray-800">

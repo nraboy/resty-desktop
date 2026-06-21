@@ -258,6 +258,7 @@ pub fn run() {
             repo::set_restore_path,
             repo::get_tray_enabled,
             repo::set_tray_enabled,
+            repo::get_tray_warning,
             repo::get_remote_auto_refresh,
             repo::set_remote_auto_refresh,
             repo::check_repo,
