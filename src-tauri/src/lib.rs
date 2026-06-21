@@ -155,7 +155,13 @@ pub fn run() {
                 .item(&PredefinedMenuItem::select_all(app, None)?)
                 .build()?;
             let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu, &edit_submenu]).build()?;
+            // Native menu bar on Linux inherits the GTK theme and can be unreadable when
+            // the GTK dark-theme hint conflicts with text color. All navigation is in the
+            // sidebar, so skip the menu bar on Linux entirely.
+            #[cfg(not(target_os = "linux"))]
             app.set_menu(menu)?;
+            #[cfg(target_os = "linux")]
+            drop(menu);
             app.manage(MenuState {
                 app_submenu,
                 file_submenu,

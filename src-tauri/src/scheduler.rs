@@ -7,7 +7,7 @@ use tauri::Manager;
 
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::schedule::next_fire_time;
-use crate::commands::snapshot::execute_backup;
+use crate::commands::snapshot::{apply_retention, execute_backup};
 
 pub fn spawn(app: tauri::AppHandle) {
     let running = Arc::new(AtomicBool::new(false));
@@ -57,20 +57,34 @@ async fn tick(app: &tauri::AppHandle) {
         };
 
         for plan in plans {
-            let _ = execute_backup(
+            let ok = execute_backup(
                 app,
                 &db,
                 &master_key,
                 &*backup_handle,
                 &plan.repo_id,
                 Some(plan.id.as_str()),
-                plan.paths,
-                plan.tags,
+                plan.paths.clone(),
+                plan.tags.clone(),
                 plan.excludes,
                 plan.limit_upload,
                 plan.limit_download,
             )
-            .await;
+            .await
+            .is_ok();
+
+            if ok {
+                if let Some(r) = &plan.retention {
+                    if r.keep_last.is_some()
+                        || r.keep_daily.is_some()
+                        || r.keep_weekly.is_some()
+                        || r.keep_monthly.is_some()
+                        || r.keep_yearly.is_some()
+                    {
+                        let _ = apply_retention(&db, &master_key, &plan.repo_id, &plan.tags, &plan.paths, r);
+                    }
+                }
+            }
         }
 
         let next = next_fire_time(&sched.cron_expr).ok();

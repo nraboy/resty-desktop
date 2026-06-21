@@ -4,7 +4,7 @@ use std::str::FromStr;
 use tauri::State;
 
 use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
-use super::snapshot::execute_backup;
+use super::snapshot::{apply_retention, execute_backup};
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
 
@@ -98,14 +98,26 @@ pub async fn run_schedule_now(
     let plans = db.get_plans_for_ids(&sched.plan_ids)?;
     let mut errors: Vec<String> = Vec::new();
     for plan in plans {
-        if let Err(e) = execute_backup(
+        let backup_ok = execute_backup(
             &app, &db, &master_key, &backup_handle,
             &plan.repo_id, Some(plan.id.as_str()),
-            plan.paths, plan.tags, plan.excludes,
+            plan.paths.clone(), plan.tags.clone(), plan.excludes,
             plan.limit_upload, plan.limit_download,
         )
-        .await
-        {
+        .await;
+
+        if backup_ok.is_ok() {
+            if let Some(r) = &plan.retention {
+                if r.keep_last.is_some()
+                    || r.keep_daily.is_some()
+                    || r.keep_weekly.is_some()
+                    || r.keep_monthly.is_some()
+                    || r.keep_yearly.is_some()
+                {
+                    let _ = apply_retention(&db, &master_key, &plan.repo_id, &plan.tags, &plan.paths, r);
+                }
+            }
+        } else if let Err(e) = backup_ok {
             errors.push(format!("{}: {}", plan.name, e));
         }
     }

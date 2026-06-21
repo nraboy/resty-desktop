@@ -158,6 +158,8 @@ src-tauri/
                               #   calls recalculate_overdue_schedules at startup to skip missed schedule runs;
                               #   builds native menu bar (MenuState) with "Resty Desktop" and "File" submenus; items are auth-aware
                               #   (Settings/New Repository/New Backup Plan shown when unlocked; Reset Application shown when locked);
+                              #   menu bar is skipped on Linux (#[cfg(not(target_os = "linux"))]) — GTK theme conflicts make
+                              #   it unreadable; MenuState is still managed so set_menu_auth_state no-ops safely on Linux;
                               #   menu events emitted as menu:new-repository, menu:new-backup-plan, menu:settings, menu:reset-app Tauri events;
                               #   set_menu_auth_state command called from frontend after auth transitions;
                               #   system tray (TrayState) is created lazily after unlock via activate_tray command — no tray before unlock,
@@ -201,8 +203,12 @@ src-tauri/
                               #   get_snapshot_stats (runs restic stats --json <id>, returns SnapshotStats { totalSize, totalFileCount }),
                               #   execute_backup (pub async helper shared by run_backup, run_schedule_now, scheduler.rs),
                               #   run_backup (delegates to execute_backup), cancel_backup (kills BackupHandle child),
-                              #   forget_by_plan (when filtering by tags, passes --group-by tags so retention is applied
-                              #   per tag-group across all hosts/paths — avoids per-host grouping surprises), unlock_repo,
+                              #   apply_retention (pub fn helper shared by forget_by_plan, run_schedule_now, scheduler.rs;
+                              #   runs restic forget --prune with the plan's keep rules; callers must guard with at least
+                              #   one keep rule set before calling — no keep rules = restic deletes everything),
+                              #   forget_by_plan (Tauri command; delegates to apply_retention; when filtering by tags,
+                              #   passes --group-by tags so retention is applied per tag-group across all hosts/paths —
+                              #   avoids per-host grouping surprises), unlock_repo,
                               #   copy_snapshot (streams to dest repo with cancellation), cancel_copy;
                               #   mirror_repo (copies all snapshots src→dest via restic copy, cancellable), cancel_mirror;
                               #   both cancel_copy, cancel_mirror, and cancel_backup run restic unlock after SIGKILL to clear stale locks;
@@ -224,7 +230,8 @@ src-tauri/
       backup_plan.rs          # list_backup_plans, save_backup_plan, remove_backup_plan; plans stored in SQLite;
                               #   list_backup_plans returns plans sorted alphabetically by name (ORDER BY name COLLATE NOCASE)
       schedule.rs             # list_schedules, save_schedule, remove_schedule, toggle_schedule,
-                              #   run_schedule_now (accepts BackupHandle, calls execute_backup for each plan in the schedule),
+                              #   run_schedule_now (accepts BackupHandle, calls execute_backup for each plan in the schedule;
+                              #   after each successful backup, calls apply_retention if the plan has at least one keep rule),
                               #   describe_cron_expr; cron helpers next_fire_time + describe_cron
       cache.rs                # AppDb (unified SQLite state); MasterKey (in-memory, zeroizes key bytes on set/clear);
                               #   FullRepository derives ZeroizeOnDrop so password is wiped from memory when dropped;
@@ -238,6 +245,7 @@ src-tauri/
                               #   Repository, FullRepository, BackupPlan, RetentionPolicy, BackupHistoryEntry,
                               #   Schedule types; clear_browse_cache, list_backup_history commands
   scheduler.rs                # Background tokio task (60s tick) that calls execute_backup for due schedules;
+                              #   after each successful backup, calls apply_retention if the plan has at least one keep rule;
                               #   acquires BackupHandle state; skips silently when app is locked;
                               #   updates last_run_at and next_run_at after each run;
                               #   guards against overlapping ticks with an AtomicBool running flag

@@ -67,7 +67,7 @@ sudo apt install libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev librsvg2-
 **Fedora:**
 
 ```bash
-sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+sudo dnf install gcc gcc-c++ make webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel pango-devel
 ```
 
 **Arch Linux:**
@@ -116,6 +116,10 @@ This GUI wrapper for Restic was created by [Nic Raboy](https://www.nraboy.com). 
 
 - [PayPal](https://paypal.me/nraboy)
 - [Square Cash](https://cash.app/$nraboy)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
 
 ## Special Note
 

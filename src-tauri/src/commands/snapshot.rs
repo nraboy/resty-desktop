@@ -698,18 +698,17 @@ pub async fn unlock_repo(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn forget_by_plan(
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    repo_id: String,
-    tags: Vec<String>,
-    paths: Vec<String>,
-    retention: RetentionPolicy,
+pub fn apply_retention(
+    db: &AppDb,
+    master_key: &MasterKey,
+    repo_id: &str,
+    tags: &[String],
+    paths: &[String],
+    retention: &RetentionPolicy,
 ) -> Result<String, String> {
     let key = master_key.get()?;
-    let repo = db.get_full_repo(&repo_id, &key)?;
-    let restic_path = super::get_restic_path(&db);
+    let repo = db.get_full_repo(repo_id, &key)?;
+    let restic_path = super::get_restic_path(db);
 
     let mut args: Vec<String> =
         vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
@@ -720,7 +719,7 @@ pub async fn forget_by_plan(
         args.push("--tag".to_string());
         args.push(tags.join(","));
     } else {
-        for path in &paths {
+        for path in paths {
             args.push("--path".to_string());
             args.push(path.clone());
         }
@@ -750,14 +749,26 @@ pub async fn forget_by_plan(
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
     if result.is_ok() {
-        let _ = db.evict_stats(&repo_id);
+        let _ = db.evict_stats(repo_id);
         if let Ok(json) =
             run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
         {
-            let _ = db.set_snapshots(&repo_id, &json);
+            let _ = db.set_snapshots(repo_id, &json);
         } else {
-            let _ = db.evict_snapshots(&repo_id);
+            let _ = db.evict_snapshots(repo_id);
         }
     }
     result
+}
+
+#[tauri::command]
+pub async fn forget_by_plan(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    tags: Vec<String>,
+    paths: Vec<String>,
+    retention: RetentionPolicy,
+) -> Result<String, String> {
+    apply_retention(&db, &master_key, &repo_id, &tags, &paths, &retention)
 }
