@@ -61,7 +61,7 @@ Tauri v2 requires WebKitGTK and a few other system libraries on Linux. Install t
 
 ```bash
 sudo apt update
-sudo apt install libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev librsvg2-dev libxdo-dev
+sudo apt install libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev librsvg2-dev
 ```
 
 **Fedora:**

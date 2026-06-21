@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Resty Desktop",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "identifier": "com.nraboy.restydesktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "dmg", "nsis", "msi"],
     "macOS": {
       "infoPlist": "./Info.plist"
     },
