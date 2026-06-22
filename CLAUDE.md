@@ -24,6 +24,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
 | Memory safety | `zeroize` crate — `MasterKey` and `FullRepository` zeroize sensitive bytes on drop/replace |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
+| Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag |
 
@@ -162,9 +163,11 @@ src-tauri/
                               #   it unreadable; MenuState is still managed so set_menu_auth_state no-ops safely on Linux;
                               #   menu events emitted as menu:new-repository, menu:new-backup-plan, menu:settings, menu:reset-app Tauri events;
                               #   set_menu_auth_state command called from frontend after auth transitions;
+                              #   tauri-plugin-single-instance registered first — on relaunch while already running, the second process
+                              #   exits immediately and the first instance's show_window callback fires to restore the window;
                               #   system tray (TrayState) is created lazily after unlock via activate_tray command — no tray before unlock,
                               #   so closing the window pre-unlock exits the app normally; after unlock, window close hides to tray if
-                              #   tray_enabled=true (checked via AppDb), otherwise exits; activate_tray always recreates fresh using a
+                              #   tray_enabled=true (checked via AppDb, defaults to "false"), otherwise exits; activate_tray always recreates fresh using a
                               #   TRAY_GEN atomic counter for unique menu item IDs (avoids Tauri global-registry collisions on re-creation);
                               #   deactivate_tray: calls set_visible(false) on all platforms for immediate visual removal,
                               #   then on Windows uses std::mem::forget to skip Drop (set_visible = NIM_DELETE on Windows,

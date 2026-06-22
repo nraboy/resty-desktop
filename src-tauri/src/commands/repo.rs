@@ -493,7 +493,7 @@ pub fn set_tray_enabled(db: State<'_, AppDb>, value: bool) -> Result<(), String>
 #[tauri::command]
 pub fn get_tray_warning() -> &'static str {
     #[cfg(target_os = "linux")]
-    return "System tray support on Linux depends on your desktop environment. It works on KDE and XFCE, but GNOME requires the AppIndicator extension. If the tray icon does not appear after enabling, the window may become unreachable until the app is relaunched.";
+    return "System tray support on Linux depends on your desktop environment. It works on KDE and XFCE, but GNOME requires the AppIndicator extension. If the tray icon does not appear after enabling, the app will continue running as a background process — relaunch it to restore the window.";
     #[cfg(not(target_os = "linux"))]
     return "";
 }

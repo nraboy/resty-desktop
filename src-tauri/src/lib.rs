@@ -128,6 +128,9 @@ fn activate_tray(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
@@ -202,8 +205,8 @@ pub fn run() {
                         if tray_active {
                             let db = app_handle.state::<cache::AppDb>();
                             let tray_on = db
-                                .get_setting("tray_enabled", "true")
-                                .unwrap_or_else(|_| "true".to_string())
+                                .get_setting("tray_enabled", "false")
+                                .unwrap_or_else(|_| "false".to_string())
                                 == "true";
                             if tray_on {
                                 api.prevent_close();
