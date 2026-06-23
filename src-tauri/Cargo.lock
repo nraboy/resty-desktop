@@ -3152,8 +3152,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "restic-gui"
-version = "0.1.0"
+name = "resty-desktop"
+version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "argon2",

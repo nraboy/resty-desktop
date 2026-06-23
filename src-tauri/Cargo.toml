@@ -1,8 +1,11 @@
 [package]
-name = "restic-gui"
-version = "0.1.0"
+name = "resty-desktop"
+version = "0.0.0"
 description = "A cross-platform GUI client for the Restic backup tool"
-authors = ["you"]
+homepage = "https://www.github.com/nraboy/resty-desktop"
+repository = "https://www.github.com/nraboy/resty-desktop"
+authors = ["Nic Raboy <https://www.nraboy.com>"]
+license = "MIT"
 edition = "2021"
 
 [lib]
