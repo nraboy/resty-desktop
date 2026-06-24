@@ -46,7 +46,8 @@ src/
                               #   accepts x/y position + ContextMenuItemDef[] (label/onClick/variant/disabled or separator);
                               #   auto-nudges onto screen if it would overflow an edge; closes on click-outside or Escape
     EmptyState.tsx            # Empty list placeholder
-    Input.tsx                 # Labeled input with error state
+    Input.tsx                 # Labeled input with error state; optional onClear prop renders an inline × button
+                              #   on the right edge when value is non-empty — only appears when onClear is explicitly passed
     Modal.tsx                 # Overlay modal dialog
     Sidebar.tsx               # Left nav with app icon + "Resty Desktop" title; active repo indicator
   lib/
@@ -88,11 +89,19 @@ src/
                               #   snapshots and loading state are cleared immediately on repoId change to prevent stale data flash when navigating between repos;
                               #   paginated at PAGE_SIZE=10 rows per page; pagination applies to the filtered set; page resets to 0 on filter change or repo
                               #   navigation; page is clamped to last valid page when filtered set shrinks (e.g. after delete) to avoid empty-page trap;
+                              #   filter input has inline × clear button (onClear prop) to quickly reset the filter;
                               #   right-click context menu on each snapshot row: Browse Files, Restore…, Copy to Repository…, Add Tag…,
                               #   Compare with…, Snapshot Stats, Delete — Snapshot Stats calls get_snapshot_stats (restic stats --json <id>) and shows
                               #   total size + file count in a modal (spinner while running, note that size includes shared data);
                               #   Compare with… opens a modal to select a second snapshot and navigates to DiffPage; always diffs older→newer
-                              #   regardless of which snapshot was right-clicked (timestamps compared to determine order)
+                              #   regardless of which snapshot was right-clicked (timestamps compared to determine order);
+                              #   multi-select mode: "Select Multiple" header button shows per-row checkboxes + select-all header checkbox (current page only);
+                              #   context menu suppressed in select mode; row click toggles selection; selections persist across page navigation and filter
+                              #   changes, cleared on repo navigation or "Cancel select"; amber banner shows selected count with "Delete selected" and
+                              #   "Copy selected" (hidden when no other repos exist) actions; multi-delete modal has uniform prune checkbox applying to all
+                              #   deletions, determinate progress bar, refreshes list on success; multi-copy modal copies selected snapshots sequentially to
+                              #   a chosen destination repo with determinate progress bar and cancellation support (cancel kills in-flight copy and skips
+                              #   remaining; cancelled state shows how many completed before stop)
     BrowsePage.tsx            # File tree navigation inside a snapshot; per-entry restore via icon button (download glyph)
                               #   and right-click context menu ("Restore…" item); native directory picker (Browse button),
                               #   target pre-filled from get_restore_path setting; restore modal includes
@@ -351,7 +360,7 @@ green.400     → --tw-green-400
 
 - Do **not** use `text-white` for text on gray backgrounds — it becomes invisible in light mode. Use `text-gray-50` instead (remaps to near-black in light, near-white in dark).
 - Do **not** use `hover:text-white` on interactive elements inside content areas — same reason. Use `hover:text-gray-50`.
-- Colors outside the extended set (e.g. `blue-500`, `blue-600`, `red-*`, `yellow-*`) are **not** theme-mapped and render identically in both modes. This is intentional for colored-background elements like primary buttons (`bg-blue-600 text-white`) where white text is always on a dark-colored surface.
+- Colors outside the extended set (e.g. `blue-500`, `blue-600`, `red-500`, `red-600`, `red-800`, `yellow-*`) are **not** theme-mapped and render identically in both modes. This is intentional for colored-background elements like primary buttons (`bg-blue-600 text-white`) and danger buttons (`bg-red-600 hover:bg-red-800 text-white`) where white text is always on a dark-colored surface. Do **not** use `bg-red-700` for button backgrounds — it is theme-mapped and becomes a pastel pink in light mode.
 
 ## Releases
 

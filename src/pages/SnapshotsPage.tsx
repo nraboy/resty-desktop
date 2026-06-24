@@ -56,6 +56,30 @@ export default function SnapshotsPage() {
   const [compareTargetId, setCompareTargetId] = useState("");
   const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
 
+  // Multi-select state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Multi-delete state
+  const [multiDeleteOpen, setMultiDeleteOpen] = useState(false);
+  const [multiDeletePrune, setMultiDeletePrune] = useState(true);
+  const [multiDeleting, setMultiDeleting] = useState(false);
+  const [multiDeleteProgress, setMultiDeleteProgress] = useState({ current: 0, total: 0 });
+  const [multiDeleteDone, setMultiDeleteDone] = useState(false);
+  const [multiDeleteError, setMultiDeleteError] = useState("");
+
+  // Multi-copy state
+  const [multiCopyOpen, setMultiCopyOpen] = useState(false);
+  const [multiCopyDestRepoId, setMultiCopyDestRepoId] = useState("");
+  const [multiCopying, setMultiCopying] = useState(false);
+  const [multiCopyProgress, setMultiCopyProgress] = useState({ current: 0, total: 0 });
+  const [multiCopyDone, setMultiCopyDone] = useState(false);
+  const [multiCopyCancelled, setMultiCopyCancelled] = useState(false);
+  const [multiCopyError, setMultiCopyError] = useState("");
+  const multiCopyCancelRef = useRef(false);
+
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     getRestorePath().then(setDefaultRestoreDir).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
@@ -65,6 +89,8 @@ export default function SnapshotsPage() {
     if (!repoId) return;
     setSnapshots([]);
     setLoading(true);
+    setSelectMode(false);
+    setSelectedIds(new Set());
     listRepos().then((repos) => {
       setAllRepos(repos);
       const found = repos.find((r) => r.id === repoId) ?? null;
@@ -222,6 +248,72 @@ export default function SnapshotsPage() {
     }
   };
 
+  const handleMultiDelete = async () => {
+    if (!repoId) return;
+    const ids = Array.from(selectedIds);
+    setMultiDeleting(true);
+    setMultiDeleteError("");
+    setMultiDeleteProgress({ current: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i++) {
+      setMultiDeleteProgress({ current: i, total: ids.length });
+      try {
+        await deleteSnapshot(repoId, ids[i], multiDeletePrune);
+      } catch (err: any) {
+        setMultiDeleteError(String(err));
+        setMultiDeleting(false);
+        return;
+      }
+    }
+    setMultiDeleteProgress({ current: ids.length, total: ids.length });
+    setMultiDeleting(false);
+    setMultiDeleteDone(true);
+    setSelectedIds(new Set());
+    await refresh();
+  };
+
+  const handleMultiCopy = async () => {
+    if (!repoId || !multiCopyDestRepoId) return;
+    const ids = Array.from(selectedIds);
+    multiCopyCancelRef.current = false;
+    setMultiCopying(true);
+    setMultiCopyCancelled(false);
+    setMultiCopyError("");
+    setMultiCopyProgress({ current: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i++) {
+      setMultiCopyProgress({ current: i, total: ids.length });
+      if (multiCopyCancelRef.current) {
+        setMultiCopyCancelled(true);
+        setMultiCopying(false);
+        return;
+      }
+      try {
+        await copySnapshot(repoId, multiCopyDestRepoId, ids[i]);
+      } catch (err: any) {
+        if (String(err).includes("cancelled")) {
+          setMultiCopyCancelled(true);
+        } else {
+          setMultiCopyError(String(err));
+        }
+        setMultiCopying(false);
+        return;
+      }
+    }
+    setMultiCopyProgress({ current: ids.length, total: ids.length });
+    setMultiCopying(false);
+    setMultiCopyDone(true);
+    setSelectedIds(new Set());
+  };
+
+  const handleMultiCopyCancel = async () => {
+    multiCopyCancelRef.current = true;
+    await cancelCopy();
+  };
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+
   const filtered = useMemo(() =>
     filter
       ? snapshots.filter(
@@ -234,12 +326,51 @@ export default function SnapshotsPage() {
       : snapshots,
     [snapshots, filter]);
 
-  useEffect(() => setPage(0), [filter, repoId]);
+  useEffect(() => {
+    setPage(0);
+  }, [filter, repoId]);
+
   useEffect(() => {
     if (filtered.length === 0) return;
     const lastPage = Math.ceil(filtered.length / PAGE_SIZE) - 1;
     if (page > lastPage) setPage(lastPage);
   }, [filtered.length, page]);
+
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const pageEntries = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const allPageSelected = pageEntries.length > 0 && pageEntries.every((s) => selectedIds.has(s.id));
+  const somePageSelected = pageEntries.some((s) => selectedIds.has(s.id));
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = somePageSelected && !allPageSelected;
+    }
+  });
+
+  const toggleSelectAll = () => {
+    if (allPageSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        pageEntries.forEach((s) => next.delete(s.id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        pageEntries.forEach((s) => next.add(s.id));
+        return next;
+      });
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   if (!repoId || (!repo && !loading)) {
     return (
@@ -255,6 +386,8 @@ export default function SnapshotsPage() {
     );
   }
 
+  const otherRepos = allRepos.filter((r) => r.id !== repoId);
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
@@ -267,18 +400,30 @@ export default function SnapshotsPage() {
             placeholder="Filter snapshots…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
+            onClear={() => setFilter("")}
             className="w-56"
           />
           {refreshing && <span className="text-xs text-gray-500">Updating…</span>}
-          <Button variant="secondary" onClick={refresh} loading={refreshing}>
-            Refresh
-          </Button>
-          <Button variant="secondary" onClick={handleCheck} loading={checking}>
-            Check
-          </Button>
-          <Button variant="secondary" onClick={() => setUnlockConfirm(true)}>
-            Unlock
-          </Button>
+          {selectMode ? (
+            <Button variant="secondary" onClick={exitSelectMode}>
+              Cancel select
+            </Button>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={() => setSelectMode(true)}>
+                Select Multiple
+              </Button>
+              <Button variant="secondary" onClick={refresh} loading={refreshing}>
+                Refresh
+              </Button>
+              <Button variant="secondary" onClick={handleCheck} loading={checking}>
+                Check
+              </Button>
+              <Button variant="secondary" onClick={() => setUnlockConfirm(true)}>
+                Unlock
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -293,6 +438,28 @@ export default function SnapshotsPage() {
         </div>
       )}
 
+      {selectMode && selectedIds.size > 0 && (
+        <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-center justify-between gap-2">
+          <span>{selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""} selected</span>
+          <div className="flex items-center gap-2">
+            {otherRepos.length > 0 && (
+              <Button
+                variant="secondary"
+                onClick={() => { setMultiCopyOpen(true); setMultiCopyDestRepoId(""); setMultiCopyDone(false); setMultiCopyCancelled(false); setMultiCopyError(""); }}
+              >
+                Copy selected
+              </Button>
+            )}
+            <Button
+              variant="danger"
+              onClick={() => { setMultiDeleteOpen(true); setMultiDeleteDone(false); setMultiDeleteError(""); }}
+            >
+              Delete selected
+            </Button>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
           {error}
@@ -304,131 +471,159 @@ export default function SnapshotsPage() {
           title="No snapshots"
           description="Run a backup to create the first snapshot."
         />
-      ) : (() => {
-        const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
-        const pageEntries = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-        return (
-          <>
-        <div className="rounded-xl border border-gray-800 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-900 border-b border-gray-800 text-left">
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">ID</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Host</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
-                <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {pageEntries.map((snap) => (
-                <tr
-                  key={snap.id}
-                  className="hover:bg-gray-900/50 transition-colors"
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setContextMenu({ snap, x: e.clientX, y: e.clientY });
-                  }}
-                >
-                  <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
-                  <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
-                  <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
-                  <td className="px-4 py-3 text-gray-400 max-w-xs">
-                    <div className="text-xs text-gray-400 cursor-default" title={snap.paths.join("\n")}>{snap.paths.length} {snap.paths.length === 1 ? "path" : "paths"}</div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      {(snap.tags ?? []).map((tag) => (
-                        <span
-                          key={tag}
-                          className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full"
-                        >
-                          {tag}
-                          <button
-                            onClick={() => handleRemoveTag(snap, tag)}
-                            className="text-gray-500 hover:text-red-300 transition-colors"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
-                      <button
-                        onClick={() => { setTagTarget(snap); setNewTag(""); }}
-                        className="text-xs text-gray-600 hover:text-blue-400 transition-colors px-1"
-                      >
-                        + tag
-                      </button>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1">
-                      <button
-                        title="Browse files"
-                        onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/browse`, { state: { snapshot: snap } })}
-                        className="p-1.5 rounded text-gray-400 hover:text-blue-400 hover:bg-gray-800 transition-colors"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                          <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-                        </svg>
-                      </button>
-                      <button
-                        title="Restore snapshot"
-                        onClick={() => { setRestoreTarget(snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); }}
-                        className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                          <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
-                          <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
-                        </svg>
-                      </button>
-                      <button
-                        title="Copy to repository"
-                        onClick={() => { setCopyTarget(snap); setCopyDestRepoId(""); setCopyDone(false); }}
-                        className="p-1.5 rounded text-gray-400 hover:text-purple-400 hover:bg-gray-800 transition-colors"
-                        disabled={allRepos.filter((r) => r.id !== repoId).length === 0}
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                          <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z" />
-                          <path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z" />
-                        </svg>
-                      </button>
-                      <button
-                        title="Delete snapshot"
-                        onClick={() => setDeleteTarget(snap)}
-                        className="p-1.5 rounded text-gray-600 hover:text-red-300 hover:bg-gray-800 transition-colors"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                          <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193v-.443A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                    </div>
-                  </td>
+      ) : (
+        <>
+          <div className="rounded-xl border border-gray-800 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-900 border-b border-gray-800 text-left">
+                  {selectMode && (
+                    <th className="px-4 py-3 w-10">
+                      <input
+                        ref={selectAllCheckboxRef}
+                        type="checkbox"
+                        checked={allPageSelected}
+                        onChange={toggleSelectAll}
+                        className="rounded bg-gray-700 border-gray-600"
+                      />
+                    </th>
+                  )}
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">ID</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Host</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
+                  {!selectMode && (
+                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20">Actions</th>
+                  )}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between mt-4">
-            <p className="text-sm text-gray-500">
-              Page {page + 1} of {totalPages} · {filtered.length} snapshot{filtered.length !== 1 ? "s" : ""}
-            </p>
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => setPage(p => p - 1)} disabled={page === 0}>
-                Previous
-              </Button>
-              <Button variant="secondary" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1}>
-                Next
-              </Button>
-            </div>
+              </thead>
+              <tbody className="divide-y divide-gray-800">
+                {pageEntries.map((snap) => (
+                  <tr
+                    key={snap.id}
+                    className={`hover:bg-gray-900/50 transition-colors ${selectMode ? "cursor-pointer" : ""} ${selectedIds.has(snap.id) ? "bg-gray-900/40" : ""}`}
+                    onClick={selectMode ? () => toggleSelectOne(snap.id) : undefined}
+                    onContextMenu={(e) => {
+                      if (selectMode) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({ snap, x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    {selectMode && (
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(snap.id)}
+                          onChange={() => toggleSelectOne(snap.id)}
+                          className="rounded bg-gray-700 border-gray-600"
+                        />
+                      </td>
+                    )}
+                    <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
+                    <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
+                    <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
+                    <td className="px-4 py-3 text-gray-400 max-w-xs">
+                      <div className="text-xs text-gray-400 cursor-default" title={snap.paths.join("\n")}>{snap.paths.length} {snap.paths.length === 1 ? "path" : "paths"}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(snap.tags ?? []).map((tag) => (
+                          <span
+                            key={tag}
+                            className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full"
+                          >
+                            {tag}
+                            {!selectMode && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleRemoveTag(snap, tag); }}
+                                className="text-gray-500 hover:text-red-300 transition-colors"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                        {!selectMode && (
+                          <button
+                            onClick={() => { setTagTarget(snap); setNewTag(""); }}
+                            className="text-xs text-gray-600 hover:text-blue-400 transition-colors px-1"
+                          >
+                            + tag
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    {!selectMode && (
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1">
+                          <button
+                            title="Browse files"
+                            onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/browse`, { state: { snapshot: snap } })}
+                            className="p-1.5 rounded text-gray-400 hover:text-blue-400 hover:bg-gray-800 transition-colors"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                              <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                            </svg>
+                          </button>
+                          <button
+                            title="Restore snapshot"
+                            onClick={() => { setRestoreTarget(snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); }}
+                            className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                              <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
+                              <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
+                            </svg>
+                          </button>
+                          <button
+                            title="Copy to repository"
+                            onClick={() => { setCopyTarget(snap); setCopyDestRepoId(""); setCopyDone(false); }}
+                            className="p-1.5 rounded text-gray-400 hover:text-purple-400 hover:bg-gray-800 transition-colors"
+                            disabled={otherRepos.length === 0}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                              <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z" />
+                              <path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z" />
+                            </svg>
+                          </button>
+                          <button
+                            title="Delete snapshot"
+                            onClick={() => setDeleteTarget(snap)}
+                            className="p-1.5 rounded text-gray-600 hover:text-red-300 hover:bg-gray-800 transition-colors"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                              <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193v-.443A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
-          </>
-        );
-      })()}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-4">
+              <p className="text-sm text-gray-500">
+                Page {page + 1} of {totalPages} · {filtered.length} snapshot{filtered.length !== 1 ? "s" : ""}
+              </p>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={() => setPage(p => p - 1)} disabled={page === 0}>
+                  Previous
+                </Button>
+                <Button variant="secondary" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1}>
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
+      {/* Single-snapshot delete modal */}
       <Modal
         title="Delete Snapshot"
         open={deleteTarget !== null}
@@ -451,6 +646,169 @@ export default function SnapshotsPage() {
           <Button variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
           <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
         </div>
+      </Modal>
+
+      {/* Multi-delete modal */}
+      <Modal
+        title="Delete Snapshots"
+        open={multiDeleteOpen}
+        onClose={() => { if (!multiDeleting) { setMultiDeleteOpen(false); setMultiDeleteDone(false); setMultiDeleteError(""); } }}
+      >
+        {multiDeleteDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              All snapshots deleted
+            </div>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiDeleteOpen(false); setMultiDeleteDone(false); exitSelectMode(); }}>Close</Button>
+            </div>
+          </>
+        ) : multiDeleteError ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{multiDeleteError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiDeleteOpen(false); setMultiDeleteError(""); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Delete {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}? This cannot be undone.
+            </p>
+            <label className="flex items-center gap-2 text-sm text-gray-300 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={multiDeletePrune}
+                onChange={(e) => setMultiDeletePrune(e.target.checked)}
+                className="rounded bg-gray-700 border-gray-600"
+                disabled={multiDeleting}
+              />
+              Also run <span className="font-mono text-xs">restic prune</span> after each forget
+            </label>
+            {multiDeleting && (
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Deleting snapshot {multiDeleteProgress.current + 1} of {multiDeleteProgress.total}…</span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2">
+                  <div
+                    className="bg-red-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((multiDeleteProgress.current / multiDeleteProgress.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setMultiDeleteOpen(false)} disabled={multiDeleting}>Cancel</Button>
+              <Button variant="danger" loading={multiDeleting} onClick={handleMultiDelete}>
+                Delete {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* Multi-copy modal */}
+      <Modal
+        title="Copy Snapshots"
+        open={multiCopyOpen}
+        onClose={() => { if (!multiCopying) { setMultiCopyOpen(false); setMultiCopyDone(false); setMultiCopyCancelled(false); setMultiCopyError(""); } }}
+      >
+        {multiCopyDone ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              All snapshots copied
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              {multiCopyProgress.total} snapshot{multiCopyProgress.total !== 1 ? "s were" : " was"} copied to{" "}
+              <span className="text-gray-300">{otherRepos.find((r) => r.id === multiCopyDestRepoId)?.name ?? multiCopyDestRepoId}</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiCopyOpen(false); setMultiCopyDone(false); exitSelectMode(); }}>Close</Button>
+            </div>
+          </>
+        ) : multiCopyCancelled ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+              Copy cancelled
+            </div>
+            <p className="text-sm text-gray-400 mb-3">
+              Stopped after {multiCopyProgress.current} of {multiCopyProgress.total} snapshot{multiCopyProgress.total !== 1 ? "s" : ""}. No further snapshots were copied.
+            </p>
+            <p className="text-xs text-gray-500 mb-4">
+              Any partially transferred data will remain as unreferenced blobs until you run{" "}
+              <span className="font-mono text-gray-400">restic prune</span> on{" "}
+              <span className="text-gray-300">{otherRepos.find((r) => r.id === multiCopyDestRepoId)?.name ?? "the destination"}</span>.
+              You may also need to unlock that repository.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiCopyOpen(false); setMultiCopyCancelled(false); }}>Close</Button>
+            </div>
+          </>
+        ) : multiCopyError ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{multiCopyError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiCopyOpen(false); setMultiCopyError(""); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Copy {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""} to another repository.
+              Only data not already present in the destination will be transferred.
+            </p>
+            <div className="mb-4">
+              <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider font-medium">Destination repository</label>
+              <div className="relative">
+                <select
+                  value={multiCopyDestRepoId}
+                  onChange={(e) => setMultiCopyDestRepoId(e.target.value)}
+                  className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={multiCopying}
+                >
+                  <option value="">Select a repository…</option>
+                  {otherRepos.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+              </div>
+            </div>
+            {multiCopying && (
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Copying snapshot {multiCopyProgress.current + 1} of {multiCopyProgress.total}…</span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2">
+                  <div
+                    className="bg-purple-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((multiCopyProgress.current / multiCopyProgress.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              {multiCopying ? (
+                <Button variant="danger" onClick={handleMultiCopyCancel}>Stop</Button>
+              ) : (
+                <Button variant="secondary" onClick={() => setMultiCopyOpen(false)}>Cancel</Button>
+              )}
+              <Button onClick={handleMultiCopy} loading={multiCopying} disabled={!multiCopyDestRepoId}>
+                Copy {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal
@@ -606,6 +964,7 @@ export default function SnapshotsPage() {
           </>
         )}
       </Modal>
+
       <Modal
         title="Copy Snapshot"
         open={copyTarget !== null}
@@ -827,7 +1186,6 @@ export default function SnapshotsPage() {
               if (!repoId || !compareSource || !compareTargetId) return;
               const targetSnap = snapshots.find((s) => s.id === compareTargetId);
               if (!targetSnap) return;
-              // Always diff older→newer so + means "added in newer" and - means "removed in newer"
               const sourceIsOlder = new Date(compareSource.time) <= new Date(targetSnap.time);
               const [idA, idB, snapA, snapB] = sourceIsOlder
                 ? [compareSource.id, compareTargetId, compareSource, targetSnap]
