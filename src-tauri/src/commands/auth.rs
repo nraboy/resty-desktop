@@ -104,8 +104,7 @@ pub async fn change_master_password(
     let new_key = crypto::derive_key(&new_password, &new_salt)?;
     let (new_nonce, new_ct) = crypto::encrypt(&new_key, VERIFICATION_PLAINTEXT)?;
 
-    db.reencrypt_repo_passwords(&old_key, &new_key)?;
-    db.store_master_key(&new_salt, &new_nonce, &new_ct)?;
+    db.rotate_master_key(&old_key, &new_key, &new_salt, &new_nonce, &new_ct)?;
     master_key.set(new_key)?;
     Ok(())
 }

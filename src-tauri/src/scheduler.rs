@@ -45,6 +45,15 @@ async fn tick(app: &tauri::AppHandle) {
         return;
     }
 
+    // A backup (manual or scheduled) is already running. Skip this tick entirely
+    // without recording the schedules as run, so they stay due and retry on the
+    // next tick rather than being silently advanced past. The compare_exchange in
+    // execute_backup remains the actual guard against the race; this is the clean
+    // early-out so a collision doesn't drop a scheduled occurrence.
+    if backup_handle.busy.load(Ordering::SeqCst) {
+        return;
+    }
+
     let due = match db.list_due_schedules(now) {
         Ok(v) => v,
         Err(_) => return,

@@ -11,6 +11,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::browse::FileEntry;
 use super::crypto;
 
+/// Max rows retained in `backup_history`. Read and trim both use this so they
+/// never drift — the Logs page never shows rows the trim would have deleted.
+const BACKUP_HISTORY_LIMIT: i64 = 1000;
+
 // ── public types (serialised to frontend) ─────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +120,10 @@ impl MirrorHandle {
 pub struct BackupHandle {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a backup is executing. Serializes backups so two concurrent
+    /// `execute_backup` calls (e.g. a scheduler tick colliding with a manual
+    /// backup) can't corrupt the shared `child`/`cancelled` state.
+    pub busy: std::sync::atomic::AtomicBool,
 }
 
 impl BackupHandle {
@@ -123,6 +131,7 @@ impl BackupHandle {
         Self {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -413,14 +422,26 @@ impl AppDb {
         Ok(())
     }
 
-    pub fn reencrypt_repo_passwords(
+    /// Atomically rotate the master key: re-encrypt every repo password with the
+    /// new key and rewrite the verification row in a single transaction. Either all
+    /// of it commits or none of it does — so a crash can't leave repo passwords on
+    /// the new key while the verification row still expects the old password (which
+    /// would lock the user out and brick every repo).
+    pub fn rotate_master_key(
         &self,
         old_key: &[u8; 32],
         new_key: &[u8; 32],
+        new_salt: &[u8],
+        new_verification_nonce: &[u8],
+        new_verification_ciphertext: &[u8],
     ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        // Re-encrypt every repo password with the new key. If any row fails to
+        // decrypt, the `?` returns and the transaction is rolled back on drop.
         let rows: Vec<(String, Vec<u8>, Vec<u8>)> = {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare("SELECT id, password_nonce, password_ciphertext FROM repositories")
                 .map_err(|e| e.to_string())?;
             let collected = stmt
@@ -430,25 +451,26 @@ impl AppDb {
                 .map_err(|e| e.to_string())?;
             collected
         };
-
-        let re_encrypted: Vec<(String, Vec<u8>, Vec<u8>)> = rows
-            .into_iter()
-            .map(|(id, nonce, ct)| {
-                let pw = crypto::decrypt(old_key, &nonce, &ct)?;
-                let (new_nonce, new_ct) = crypto::encrypt(new_key, &pw)?;
-                Ok((id, new_nonce, new_ct))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        for (id, nonce, ct) in re_encrypted {
+        for (id, nonce, ct) in rows {
+            let mut pw = crypto::decrypt(old_key, &nonce, &ct)?;
+            let (new_nonce, new_ct) = crypto::encrypt(new_key, &pw)?;
+            pw.zeroize();
             tx.execute(
                 "UPDATE repositories SET password_nonce = ?1, password_ciphertext = ?2 WHERE id = ?3",
-                params![nonce, ct, id],
+                params![new_nonce, new_ct, id],
             )
             .map_err(|e| e.to_string())?;
         }
+
+        // Rewrite the verification row in the same transaction.
+        tx.execute(
+            "INSERT OR REPLACE INTO master_key
+             (id, salt, verification_nonce, verification_ciphertext)
+             VALUES (1, ?1, ?2, ?3)",
+            params![new_salt, new_verification_nonce, new_verification_ciphertext],
+        )
+        .map_err(|e| e.to_string())?;
+
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -720,11 +742,11 @@ impl AppDb {
                  LEFT JOIN repositories r ON r.id = h.repo_id
                  LEFT JOIN backup_plans p ON p.id = h.plan_id
                  ORDER BY h.started_at DESC
-                 LIMIT 1000",
+                 LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(params![BACKUP_HISTORY_LIMIT], |row| {
                 Ok(BackupHistoryEntry {
                     id: row.get(0)?,
                     repo_id: row.get(1)?,
@@ -772,6 +794,15 @@ impl AppDb {
                 id, repo_id, plan_id, snapshot_id, started_at, duration_seconds,
                 files_new as i64, files_changed as i64, bytes_added as i64, error
             ],
+        )
+        .map_err(|e| e.to_string())?;
+        // Trim to the newest BACKUP_HISTORY_LIMIT rows so the table can't grow
+        // without bound. Runs after the insert is already persisted.
+        conn.execute(
+            "DELETE FROM backup_history WHERE id NOT IN (
+                 SELECT id FROM backup_history ORDER BY started_at DESC LIMIT ?1
+             )",
+            params![BACKUP_HISTORY_LIMIT],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

@@ -88,15 +88,17 @@ src-tauri/
       snapshot.rs    # list/refresh/delete/tag snapshots; get_snapshot_stats; execute_backup (shared pub async fn);
                      #   run_backup; cancel_backup; apply_retention (shared pub fn); forget_by_plan;
                      #   copy_snapshot; cancel_copy; mirror_repo; cancel_mirror; unlock_repo; diff_snapshots;
-                     #   validate_snapshot_id() guards all snapshot ID inputs (8–64 lowercase hex)
+                     #   validate_snapshot_id() (pub(crate), 8–64 hex) guards all snapshot ID inputs here and in browse.rs
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
-                     #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows
+                     #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
+                     #   all three validate snapshot_id via snapshot::validate_snapshot_id
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
       schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr
-      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle; PruneHandle;
-                     #   recalculate_overdue_schedules; list_backup_history (1000 rows newest-first)
+      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
+                     #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
+                     #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first)
   scheduler.rs       # 60s background tick; runs due schedules via execute_backup; applies retention after backup;
-                     #   skips when locked; AtomicBool guards against overlapping ticks
+                     #   skips when locked or when a backup is already running (busy flag); AtomicBool guards against overlapping ticks
 ```
 
 ## Routes
@@ -119,7 +121,7 @@ src-tauri/
 - Restic binary path is user-configurable; defaults to `restic` on `$PATH`.
 - All commands set `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
 - `restic ls --json` outputs NDJSON; first line is snapshot summary (skipped); subsequent lines are `FileEntry`.
-- `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`.
+- `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`. Serialized via a `busy` flag on `BackupHandle` — only one backup runs at a time; a concurrent attempt (e.g. a scheduler tick firing during a manual backup) returns `"A backup is already in progress"`. Sequential callers (`run_schedule_now`, scheduler loop) are unaffected since each `await` releases the flag before the next starts.
 - `cancel_backup`, `cancel_copy`, `cancel_mirror`, `cancel_prune` all run `restic unlock` after SIGKILL to clear stale locks.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo.
 - `mirror_repo` uses `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots src→dest.
@@ -134,7 +136,7 @@ src-tauri/
 - Master password → Argon2id → 32-byte key; AES-GCM encrypts verification plaintext; salt+nonce+ciphertext stored in `master_key` table. Password never stored.
 - All repo passwords AES-GCM encrypted with master key in `repositories` table; decrypted on-demand via `db.get_full_repo`.
 - `MasterKey` is `Mutex<Option<[u8; 32]>>` as Tauri state; `None` when locked — all restic commands fail with "App is locked".
-- `change_master_password` re-encrypts all repo passwords atomically in a SQLite transaction.
+- `change_master_password` calls `db.rotate_master_key`, which re-encrypts all repo passwords **and** rewrites the `master_key` verification row in a single SQLite transaction (all-or-nothing — a crash can't leave passwords on the new key while the verification blob still expects the old one). The intermediate decrypted password is zeroized per row.
 - `reset_app` wipes all SQLite tables and clears in-memory key.
 
 ## Persistence & Caching
@@ -145,6 +147,7 @@ src-tauri/
 - After `run_backup`: new snapshot metadata prepended to cache (no full re-fetch).
 - After `forget_by_plan`: full `restic snapshots --json` repopulates cache.
 - `clear_browse_cache` wipes all three cache tables.
+- `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert, matching the read limit so the Logs page never loses visible rows.
 
 ## Adding a New Feature
 

@@ -3,6 +3,7 @@ use tauri::{Emitter, State};
 
 use super::cache::{AppDb, MasterKey};
 use super::repo::run_restic_with_path;
+use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +45,7 @@ pub async fn list_files(
     snapshot_id: String,
     path: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
+    validate_snapshot_id(&snapshot_id)?;
     if let Some(cached) = db.get(&snapshot_id, path.as_deref())? {
         return Ok(cached);
     }
@@ -87,6 +89,7 @@ pub async fn restore_path(
     target_dir: String,
     strip_leading_path: bool,
 ) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
@@ -171,6 +174,7 @@ pub async fn restore_snapshot(
     snapshot_id: String,
     target_dir: String,
 ) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);

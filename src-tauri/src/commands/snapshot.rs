@@ -113,7 +113,7 @@ pub async fn tag_snapshot(
     Ok(())
 }
 
-fn validate_snapshot_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_snapshot_id(id: &str) -> Result<(), String> {
     if id.len() < 8 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("Invalid snapshot ID: '{id}'"));
     }
@@ -225,6 +225,28 @@ pub async fn execute_backup(
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
 ) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Serialize backups: only one may run at a time. A second concurrent attempt
+    // (e.g. a scheduler tick firing while a manual backup runs) would otherwise
+    // overwrite the shared `child`/`cancelled` state on the BackupHandle.
+    if backup_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A backup is already in progress".to_string());
+    }
+    // Released on every exit path — including `?` early returns, panics, and
+    // future cancellation — so `busy` never gets stuck set.
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&backup_handle.busy);
+
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);

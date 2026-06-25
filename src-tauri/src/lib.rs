@@ -54,7 +54,7 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
 /// and log "Error removing system tray icon". On macOS, Drop handles removal cleanly.
 #[tauri::command]
 fn deactivate_tray(tray_state: tauri::State<TrayState>) -> Result<(), String> {
-    let mut guard = tray_state.0.lock().unwrap();
+    let mut guard = tray_state.0.lock().map_err(|e| e.to_string())?;
     if let Some(tray) = guard.take() {
         let _ = tray.set_visible(false);
         // On Windows, set_visible(false) maps to NIM_DELETE (full OS removal), so Drop
@@ -75,7 +75,7 @@ fn activate_tray(
     app: tauri::AppHandle,
     tray_state: tauri::State<TrayState>,
 ) -> Result<(), String> {
-    let mut guard = tray_state.0.lock().unwrap();
+    let mut guard = tray_state.0.lock().map_err(|e| e.to_string())?;
     // Drop any existing icon before recreating.
     *guard = None;
     // Use a unique generation suffix so menu item IDs don't collide with the previous instance.
@@ -201,7 +201,7 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let tray = app_handle.state::<TrayState>();
-                        let tray_active = tray.0.lock().unwrap().is_some();
+                        let tray_active = tray.0.lock().map(|g| g.is_some()).unwrap_or(false);
                         if tray_active {
                             let db = app_handle.state::<cache::AppDb>();
                             let tray_on = db
