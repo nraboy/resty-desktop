@@ -10,7 +10,7 @@ export default function Input({ label, error, onClear, className = "", ...props 
   const showClear = onClear && props.value !== "" && props.value !== undefined;
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className={`flex flex-col gap-1 ${className}`}>
       {label && (
         <label className="text-sm text-gray-400 font-medium">{label}</label>
       )}
@@ -21,11 +21,11 @@ export default function Input({ label, error, onClear, className = "", ...props 
           autoCorrect="off"
           autoComplete="off"
           {...props}
-          className={`bg-gray-800 border ${
+          className={`w-full bg-gray-800 border ${
             error ? "border-red-700" : "border-gray-700"
           } text-gray-100 rounded-md px-3 py-2 text-sm
             placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500
-            disabled:opacity-50 ${showClear ? "pr-8" : ""} ${className}`}
+            disabled:opacity-50 ${showClear ? "pr-8" : ""}`}
         />
         {showClear && (
           <button
