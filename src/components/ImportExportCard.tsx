@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   exportData,
@@ -22,6 +23,8 @@ function summaryText(s: ExportSummary | ImportPreview): string {
 }
 
 export default function ImportExportCard() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   // Whether the install has any repositories — drives the passphrase requirement.
   const [hasRepos, setHasRepos] = useState(false);
 
@@ -49,6 +52,16 @@ export default function ImportExportCard() {
   };
 
   useEffect(refreshHasRepos, []);
+
+  useEffect(() => {
+    const action = searchParams.get("action");
+    if (action === "import" || action === "export") {
+      setSearchParams({}, { replace: true });
+      if (action === "import") openImport();
+      else openExport();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const openExport = () => {
     setExportPw("");

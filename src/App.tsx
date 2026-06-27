@@ -1,5 +1,6 @@
 import { useEffect, useState, Component, type ReactNode, type ErrorInfo } from "react";
 import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { ThemeProvider } from "./lib/theme";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
@@ -62,10 +63,18 @@ function MenuEventHandler() {
     const unlistenSettings = listen("menu:settings", () => {
       navigate("/settings");
     });
+    const unlistenImport = listen("menu:import", () => {
+      navigate("/settings?action=import");
+    });
+    const unlistenExport = listen("menu:export", () => {
+      navigate("/settings?action=export");
+    });
     return () => {
       unlistenNewRepo.then((fn) => fn());
       unlistenNewPlan.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
+      unlistenImport.then((fn) => fn());
+      unlistenExport.then((fn) => fn());
     };
   }, [navigate]);
   return null;
@@ -104,6 +113,13 @@ export default function App() {
     const unlisten = listen("menu:reset-app", () => setMenuResetTriggered(true));
     return () => { unlisten.then((fn) => fn()); };
   }, [authState]);
+
+  useEffect(() => {
+    const unlisten = listen("menu:source-github", () => {
+      openUrl("https://github.com/nraboy/resty-desktop");
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   return (
     <ThemeProvider>

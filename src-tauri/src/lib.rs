@@ -15,6 +15,9 @@ struct MenuState {
     new_repository: tauri::menu::MenuItem<tauri::Wry>,
     new_backup_plan: tauri::menu::MenuItem<tauri::Wry>,
     reset_app: tauri::menu::MenuItem<tauri::Wry>,
+    file_separator: tauri::menu::PredefinedMenuItem<tauri::Wry>,
+    import_item: tauri::menu::MenuItem<tauri::Wry>,
+    export_item: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 // Keeps the TrayIcon alive; None until the app has been unlocked.
@@ -37,11 +40,17 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     let _ = menu_state.file_submenu.remove(&menu_state.new_repository);
     let _ = menu_state.file_submenu.remove(&menu_state.new_backup_plan);
     let _ = menu_state.file_submenu.remove(&menu_state.reset_app);
+    let _ = menu_state.file_submenu.remove(&menu_state.file_separator);
+    let _ = menu_state.file_submenu.remove(&menu_state.import_item);
+    let _ = menu_state.file_submenu.remove(&menu_state.export_item);
 
     if unlocked {
         menu_state.app_submenu.prepend(&menu_state.settings).map_err(|e| e.to_string())?;
         menu_state.file_submenu.append(&menu_state.new_repository).map_err(|e| e.to_string())?;
         menu_state.file_submenu.append(&menu_state.new_backup_plan).map_err(|e| e.to_string())?;
+        menu_state.file_submenu.append(&menu_state.file_separator).map_err(|e| e.to_string())?;
+        menu_state.file_submenu.append(&menu_state.import_item).map_err(|e| e.to_string())?;
+        menu_state.file_submenu.append(&menu_state.export_item).map_err(|e| e.to_string())?;
     } else {
         menu_state.file_submenu.append(&menu_state.reset_app).map_err(|e| e.to_string())?;
     }
@@ -145,8 +154,15 @@ pub fn run() {
             let new_repo = MenuItemBuilder::with_id("new_repository", "New Repository").build(app)?;
             let new_backup_plan = MenuItemBuilder::with_id("new_backup_plan", "New Backup Plan").build(app)?;
             let reset_app_item = MenuItemBuilder::with_id("reset_app", "Reset Application").build(app)?;
+            let file_separator = PredefinedMenuItem::separator(app)?;
+            let import_item = MenuItemBuilder::with_id("import", "Import…").build(app)?;
+            let export_item = MenuItemBuilder::with_id("export", "Export…").build(app)?;
             let file_submenu = SubmenuBuilder::new(app, "File")
                 .item(&reset_app_item)
+                .build()?;
+            let source_github = MenuItemBuilder::with_id("source_github", "Source on GitHub").build(app)?;
+            let help_submenu = SubmenuBuilder::new(app, "Help")
+                .item(&source_github)
                 .build()?;
             let edit_submenu = SubmenuBuilder::new(app, "Edit")
                 .item(&PredefinedMenuItem::undo(app, None)?)
@@ -157,7 +173,7 @@ pub fn run() {
                 .item(&PredefinedMenuItem::paste(app, None)?)
                 .item(&PredefinedMenuItem::select_all(app, None)?)
                 .build()?;
-            let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu, &edit_submenu]).build()?;
+            let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu, &edit_submenu, &help_submenu]).build()?;
             // Native menu bar on Linux inherits the GTK theme and can be unreadable when
             // the GTK dark-theme hint conflicts with text color. All navigation is in the
             // sidebar, so skip the menu bar on Linux entirely.
@@ -172,6 +188,9 @@ pub fn run() {
                 new_repository: new_repo,
                 new_backup_plan,
                 reset_app: reset_app_item,
+                file_separator,
+                import_item,
+                export_item,
             });
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -228,6 +247,9 @@ pub fn run() {
                 "new_backup_plan" => { app.emit("menu:new-backup-plan", ()).ok(); }
                 "settings" => { app.emit("menu:settings", ()).ok(); }
                 "reset_app" => { app.emit("menu:reset-app", ()).ok(); }
+                "import" => { app.emit("menu:import", ()).ok(); }
+                "export" => { app.emit("menu:export", ()).ok(); }
+                "source_github" => { app.emit("menu:source-github", ()).ok(); }
                 "quit" => { app.exit(0); }
                 _ => {}
             }
