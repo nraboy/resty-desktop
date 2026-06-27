@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getTrayEnabled, listSchedules, removeSchedule, toggleSchedule } from "../lib/invoke";
 import type { Schedule } from "../lib/types";
@@ -16,6 +16,18 @@ export default function SchedulesPage() {
   const [deleteTarget, setDeleteTarget] = useState<Schedule | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
+
+  // Multi-select state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Multi-delete state
+  const [multiDeleteOpen, setMultiDeleteOpen] = useState(false);
+  const [multiDeleting, setMultiDeleting] = useState(false);
+  const [multiDeleteProgress, setMultiDeleteProgress] = useState({ current: 0, total: 0 });
+  const [multiDeleteError, setMultiDeleteError] = useState("");
+
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -59,6 +71,59 @@ export default function SchedulesPage() {
     }
   };
 
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allSelected = schedules.length > 0 && schedules.every((s) => selectedIds.has(s.id));
+  const someSelected = schedules.some((s) => selectedIds.has(s.id));
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = someSelected && !allSelected;
+    }
+  });
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(schedules.map((s) => s.id)));
+    }
+  };
+
+  const handleMultiDelete = async () => {
+    const ids = Array.from(selectedIds);
+    setMultiDeleting(true);
+    setMultiDeleteError("");
+    setMultiDeleteProgress({ current: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i++) {
+      setMultiDeleteProgress({ current: i, total: ids.length });
+      try {
+        await removeSchedule(ids[i]);
+      } catch (err: any) {
+        setMultiDeleteError(String(err));
+        setMultiDeleting(false);
+        await load();
+        return;
+      }
+    }
+    setMultiDeleting(false);
+    setMultiDeleteOpen(false);
+    exitSelectMode();
+    await load();
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -76,7 +141,22 @@ export default function SchedulesPage() {
             Automate backup plans on a recurring schedule.
           </p>
         </div>
-        <Button onClick={() => navigate("/schedules/new")}>New Schedule</Button>
+        <div className="flex items-center gap-3">
+          {selectMode ? (
+            <Button variant="secondary" onClick={exitSelectMode}>
+              Cancel select
+            </Button>
+          ) : (
+            <>
+              {schedules.length > 0 && (
+                <Button variant="secondary" onClick={() => setSelectMode(true)}>
+                  Select Multiple
+                </Button>
+              )}
+              <Button onClick={() => navigate("/schedules/new")}>New Schedule</Button>
+            </>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -102,6 +182,32 @@ export default function SchedulesPage() {
         </div>
       )}
 
+      {selectMode && (
+        <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-center justify-between gap-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              ref={selectAllCheckboxRef}
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              className="rounded bg-gray-700 border-gray-600"
+            />
+            <span>
+              {selectedIds.size > 0
+                ? `${selectedIds.size} schedule${selectedIds.size !== 1 ? "s" : ""} selected`
+                : "Select all"}
+            </span>
+          </label>
+          <Button
+            variant="danger"
+            disabled={selectedIds.size === 0}
+            onClick={() => { setMultiDeleteOpen(true); setMultiDeleteError(""); }}
+          >
+            Delete selected
+          </Button>
+        </div>
+      )}
+
       {schedules.length === 0 ? (
         <EmptyState
           title="No schedules"
@@ -113,11 +219,19 @@ export default function SchedulesPage() {
           {schedules.map((sched) => (
             <div
               key={sched.id}
-              className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-4 flex items-center gap-4"
+              className={`bg-gray-900 border border-gray-800 rounded-xl px-5 py-4 flex items-center gap-4 ${selectMode && selectedIds.has(sched.id) ? "ring-1 ring-blue-500/50" : ""}`}
             >
+              {selectMode && (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(sched.id)}
+                  onChange={() => toggleSelectOne(sched.id)}
+                  className="rounded bg-gray-700 border-gray-600 flex-shrink-0"
+                />
+              )}
               <div
                 className="flex-1 min-w-0 cursor-pointer"
-                onClick={() => navigate(`/schedules/${sched.id}`)}
+                onClick={() => selectMode ? toggleSelectOne(sched.id) : navigate(`/schedules/${sched.id}`)}
               >
                 <p className="text-sm font-medium text-gray-100 truncate">{sched.name}</p>
                 <p className="text-xs text-gray-500 mt-0.5">
@@ -131,43 +245,45 @@ export default function SchedulesPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-1 flex-shrink-0">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setDeleteTarget(sched)}
-                  className="text-gray-500 hover:text-red-300"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => navigate(`/schedules/${sched.id}`)}
-                  className="text-gray-500 hover:text-blue-400"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                  </svg>
-                </Button>
-                <button
-                  onClick={() => handleToggle(sched)}
-                  disabled={toggling === sched.id}
-                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none disabled:opacity-50 ml-2 ${
-                    sched.enabled ? "bg-blue-600" : "bg-gray-700"
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
-                      sched.enabled ? "translate-x-4" : "translate-x-1"
+              {!selectMode && (
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setDeleteTarget(sched)}
+                    className="text-gray-500 hover:text-red-300"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => navigate(`/schedules/${sched.id}`)}
+                    className="text-gray-500 hover:text-blue-400"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </Button>
+                  <button
+                    onClick={() => handleToggle(sched)}
+                    disabled={toggling === sched.id}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none disabled:opacity-50 ml-2 ${
+                      sched.enabled ? "bg-blue-600" : "bg-gray-700"
                     }`}
-                  />
-                </button>
-              </div>
+                  >
+                    <span
+                      className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+                        sched.enabled ? "translate-x-4" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -191,6 +307,48 @@ export default function SchedulesPage() {
             Delete
           </Button>
         </div>
+      </Modal>
+
+      {/* Multi-delete modal */}
+      <Modal
+        title="Delete Schedules"
+        open={multiDeleteOpen}
+        onClose={() => { if (!multiDeleting) { setMultiDeleteOpen(false); setMultiDeleteError(""); } }}
+      >
+        {multiDeleteError ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{multiDeleteError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiDeleteOpen(false); setMultiDeleteError(""); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Delete {selectedIds.size} schedule{selectedIds.size !== 1 ? "s" : ""}?
+              This removes the schedules only — backup plans are not affected.
+            </p>
+            {multiDeleting && (
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Deleting schedule {multiDeleteProgress.current + 1} of {multiDeleteProgress.total}…</span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2">
+                  <div
+                    className="bg-red-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((multiDeleteProgress.current / multiDeleteProgress.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setMultiDeleteOpen(false)} disabled={multiDeleting}>Cancel</Button>
+              <Button variant="danger" loading={multiDeleting} onClick={handleMultiDelete}>
+                Delete {selectedIds.size} schedule{selectedIds.size !== 1 ? "s" : ""}
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
     </div>
   );

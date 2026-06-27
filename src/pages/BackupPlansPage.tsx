@@ -35,6 +35,18 @@ export default function BackupPlansPage() {
   const [retentionError, setRetentionError] = useState("");
   const [retentionDone, setRetentionDone] = useState(false);
 
+  // Multi-select state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Multi-delete state
+  const [multiDeleteOpen, setMultiDeleteOpen] = useState(false);
+  const [multiDeleting, setMultiDeleting] = useState(false);
+  const [multiDeleteProgress, setMultiDeleteProgress] = useState({ current: 0, total: 0 });
+  const [multiDeleteError, setMultiDeleteError] = useState("");
+
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
+
   const load = async () => {
     setLoading(true);
     try {
@@ -65,6 +77,59 @@ export default function BackupPlansPage() {
     } finally {
       setDeleting(false);
     }
+  };
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allSelected = plans.length > 0 && plans.every((p) => selectedIds.has(p.id));
+  const someSelected = plans.some((p) => selectedIds.has(p.id));
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = someSelected && !allSelected;
+    }
+  });
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(plans.map((p) => p.id)));
+    }
+  };
+
+  const handleMultiDelete = async () => {
+    const ids = Array.from(selectedIds);
+    setMultiDeleting(true);
+    setMultiDeleteError("");
+    setMultiDeleteProgress({ current: 0, total: ids.length });
+    for (let i = 0; i < ids.length; i++) {
+      setMultiDeleteProgress({ current: i, total: ids.length });
+      try {
+        await removeBackupPlan(ids[i]);
+      } catch (err: any) {
+        setMultiDeleteError(String(err));
+        setMultiDeleting(false);
+        await load();
+        return;
+      }
+    }
+    setMultiDeleting(false);
+    setMultiDeleteOpen(false);
+    exitSelectMode();
+    await load();
   };
 
   const hasRetentionRules = (plan: BackupPlan) => {
@@ -168,12 +233,53 @@ export default function BackupPlansPage() {
           <h1 className="text-xl font-semibold text-gray-100">Backup Plans</h1>
           <p className="text-sm text-gray-500 mt-0.5">Define and run backup configurations.</p>
         </div>
-        <Button onClick={() => navigate("/backup-plans/new")}>New Plan</Button>
+        <div className="flex items-center gap-3">
+          {selectMode ? (
+            <Button variant="secondary" onClick={exitSelectMode}>
+              Cancel select
+            </Button>
+          ) : (
+            <>
+              {plans.length > 0 && (
+                <Button variant="secondary" onClick={() => setSelectMode(true)}>
+                  Select Multiple
+                </Button>
+              )}
+              <Button onClick={() => navigate("/backup-plans/new")}>New Plan</Button>
+            </>
+          )}
+        </div>
       </div>
 
       {error && (
         <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
           {error}
+        </div>
+      )}
+
+      {selectMode && (
+        <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-center justify-between gap-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              ref={selectAllCheckboxRef}
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              className="rounded bg-gray-700 border-gray-600"
+            />
+            <span>
+              {selectedIds.size > 0
+                ? `${selectedIds.size} plan${selectedIds.size !== 1 ? "s" : ""} selected`
+                : "Select all"}
+            </span>
+          </label>
+          <Button
+            variant="danger"
+            disabled={selectedIds.size === 0}
+            onClick={() => { setMultiDeleteOpen(true); setMultiDeleteError(""); }}
+          >
+            Delete selected
+          </Button>
         </div>
       )}
 
@@ -188,16 +294,25 @@ export default function BackupPlansPage() {
           {plans.map((plan) => (
             <div
               key={plan.id}
-              className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-4 flex items-center gap-4"
+              className={`bg-gray-900 border border-gray-800 rounded-xl px-5 py-4 flex items-center gap-4 ${selectMode && selectedIds.has(plan.id) ? "ring-1 ring-blue-500/50" : ""}`}
               onContextMenu={(e) => {
+                if (selectMode) return;
                 e.preventDefault();
                 e.stopPropagation();
                 setContextMenu({ plan, x: e.clientX, y: e.clientY });
               }}
             >
+              {selectMode && (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(plan.id)}
+                  onChange={() => toggleSelectOne(plan.id)}
+                  className="rounded bg-gray-700 border-gray-600 flex-shrink-0"
+                />
+              )}
               <div
                 className="flex-1 min-w-0 cursor-pointer"
-                onClick={() => navigate(`/backup-plans/${plan.id}`)}
+                onClick={() => selectMode ? toggleSelectOne(plan.id) : navigate(`/backup-plans/${plan.id}`)}
               >
                 <p className="text-sm font-medium text-gray-100 truncate">{plan.name}</p>
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
@@ -224,6 +339,7 @@ export default function BackupPlansPage() {
                   ) : null;
                 })()}
               </div>
+              {!selectMode && (
               <div className="flex items-center gap-2 flex-shrink-0">
                 <Button
                   variant="ghost"
@@ -276,6 +392,7 @@ export default function BackupPlansPage() {
                   </svg>
                 </Button>
               </div>
+              )}
             </div>
           ))}
         </div>
@@ -392,6 +509,48 @@ export default function BackupPlansPage() {
           <Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>Cancel</Button>
           <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
         </div>
+      </Modal>
+
+      {/* Multi-delete modal */}
+      <Modal
+        title="Delete Backup Plans"
+        open={multiDeleteOpen}
+        onClose={() => { if (!multiDeleting) { setMultiDeleteOpen(false); setMultiDeleteError(""); } }}
+      >
+        {multiDeleteError ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{multiDeleteError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setMultiDeleteOpen(false); setMultiDeleteError(""); }}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Delete {selectedIds.size} backup plan{selectedIds.size !== 1 ? "s" : ""}?
+              This only removes the plan definitions — existing snapshots are not affected.
+            </p>
+            {multiDeleting && (
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-gray-400 mb-1">
+                  <span>Deleting plan {multiDeleteProgress.current + 1} of {multiDeleteProgress.total}…</span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2">
+                  <div
+                    className="bg-red-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round((multiDeleteProgress.current / multiDeleteProgress.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setMultiDeleteOpen(false)} disabled={multiDeleting}>Cancel</Button>
+              <Button variant="danger" loading={multiDeleting} onClick={handleMultiDelete}>
+                Delete {selectedIds.size} plan{selectedIds.size !== 1 ? "s" : ""}
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal
