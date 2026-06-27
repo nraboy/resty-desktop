@@ -193,6 +193,7 @@ export default function ImportExportCard() {
                   placeholder="At least 8 characters"
                   value={exportPw}
                   onChange={(e) => setExportPw(e.target.value)}
+                  onClear={() => setExportPw("")}
                 />
                 <Input
                   type="password"
@@ -200,6 +201,7 @@ export default function ImportExportCard() {
                   placeholder="Re-enter passphrase"
                   value={exportPwConfirm}
                   onChange={(e) => setExportPwConfirm(e.target.value)}
+                  onClear={() => setExportPwConfirm("")}
                 />
               </div>
             ) : (
@@ -294,6 +296,7 @@ export default function ImportExportCard() {
                     placeholder="Passphrase used during export"
                     value={importPw}
                     onChange={(e) => setImportPw(e.target.value)}
+                    onClear={() => setImportPw("")}
                   />
                 )}
               </>

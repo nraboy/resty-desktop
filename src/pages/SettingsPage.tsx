@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, cleanCache, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -28,6 +28,8 @@ export default function SettingsPage() {
   const [error, setError] = useState("");
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheCleared, setCacheCleared] = useState(false);
+  const [cleaningCache, setCleaningCache] = useState(false);
+  const [cleanedCount, setCleanedCount] = useState<number | null>(null);
 
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [pruning, setPruning] = useState(false);
@@ -42,6 +44,7 @@ export default function SettingsPage() {
   const pruneUnlistenRef = useRef<(() => void) | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cleanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [trayEnabled, setTrayEnabledLocal] = useState(false);
@@ -82,6 +85,7 @@ export default function SettingsPage() {
       pruneUnlistenRef.current?.();
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
+      if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
       if (passwordTimerRef.current !== null) clearTimeout(passwordTimerRef.current);
     };
   }, []);
@@ -126,6 +130,18 @@ export default function SettingsPage() {
       cacheTimerRef.current = setTimeout(() => setCacheCleared(false), 2000);
     } finally {
       setClearingCache(false);
+    }
+  };
+
+  const handleCleanCache = async () => {
+    setCleaningCache(true);
+    try {
+      const removed = await cleanCache();
+      setCleanedCount(removed);
+      if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
+      cleanTimerRef.current = setTimeout(() => setCleanedCount(null), 4000);
+    } finally {
+      setCleaningCache(false);
     }
   };
 
@@ -545,15 +561,31 @@ export default function SettingsPage() {
       </Modal>
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Browse Cache</h2>
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Application Cache</h2>
         <p className="text-xs text-gray-500 mb-3">
-          Snapshot file listings are cached locally to speed up navigation. Clear the cache if you
-          see stale data or want to free up disk space.
+          Snapshot listings and repository stats are cached locally to speed up navigation.
+          <strong className="text-gray-400"> Clean Cache</strong> removes only orphaned entries left
+          behind by deleted repositories and forgotten snapshots, while
+          <strong className="text-gray-400"> Clear All Cache</strong> wipes everything (rebuilt on
+          next use).
         </p>
         <div className="flex items-center gap-3">
-          <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
-            Clear Browse Cache
+          <Button variant="secondary" onClick={handleCleanCache} loading={cleaningCache}>
+            Clean Cache
           </Button>
+          <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
+            Clear All Cache
+          </Button>
+          {cleanedCount !== null && (
+            <span className="text-sm text-green-400 flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              {cleanedCount === 0
+                ? "No orphaned entries"
+                : `Removed ${cleanedCount} orphaned ${cleanedCount === 1 ? "entry" : "entries"}`}
+            </span>
+          )}
           {cacheCleared && (
             <span className="text-sm text-green-400 flex items-center gap-1">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

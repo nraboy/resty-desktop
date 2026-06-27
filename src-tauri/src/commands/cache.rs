@@ -1041,6 +1041,86 @@ impl AppDb {
         Ok(())
     }
 
+    /// Remove only orphaned cache rows, leaving live caches intact. Returns the
+    /// number of rows deleted. Orphans are:
+    ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
+    ///     exists in `repositories` (e.g. a deleted repo),
+    ///   - `browse_cache` rows whose `snapshot_id` is not referenced by any
+    ///     remaining `snapshots_cache` entry (e.g. a forgotten snapshot).
+    pub fn clean_cache(&self) -> Result<u64, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let mut removed = 0u64;
+
+        removed += tx
+            .execute(
+                "DELETE FROM snapshots_cache
+                 WHERE repo_id NOT IN (SELECT id FROM repositories)",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
+
+        removed += tx
+            .execute(
+                "DELETE FROM repo_stats_cache
+                 WHERE repo_id NOT IN (SELECT id FROM repositories)",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
+
+        // Collect snapshot IDs still referenced by remaining snapshot caches.
+        let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT snapshots_json FROM snapshots_cache")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for json in rows {
+                let json = json.map_err(|e| e.to_string())?;
+                #[derive(Deserialize)]
+                struct SnapId {
+                    id: String,
+                    short_id: String,
+                }
+                if let Ok(snaps) = serde_json::from_str::<Vec<SnapId>>(&json) {
+                    for s in snaps {
+                        live_ids.insert(s.id);
+                        live_ids.insert(s.short_id);
+                    }
+                }
+            }
+        }
+
+        // Delete browse rows whose snapshot_id isn't live.
+        let orphan_browse_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT DISTINCT snapshot_id FROM browse_cache")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut ids = Vec::new();
+            for id in rows {
+                let id = id.map_err(|e| e.to_string())?;
+                if !live_ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        for id in &orphan_browse_ids {
+            removed += tx
+                .execute("DELETE FROM browse_cache WHERE snapshot_id = ?1", params![id])
+                .map_err(|e| e.to_string())? as u64;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(removed)
+    }
+
     /// Wipe all user data. Returns app to first-launch state.
     pub fn reset_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1146,6 +1226,11 @@ fn timestamp() -> i64 {
 #[tauri::command]
 pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<(), String> {
     db.clear_cache()
+}
+
+#[tauri::command]
+pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
+    db.clean_cache()
 }
 
 #[tauri::command]

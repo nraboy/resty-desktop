@@ -300,6 +300,7 @@ pub fn run() {
             schedule::describe_cron_expr,
             // cache
             cache::clear_browse_cache,
+            cache::clean_cache,
             cache::list_backup_history,
             // import / export
             transfer::export_data,

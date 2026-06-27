@@ -236,6 +236,9 @@ export const describeCronExpr = (cronExpr: string): Promise<string> =>
 export const clearBrowseCache = (): Promise<void> =>
   invoke("clear_browse_cache");
 
+export const cleanCache = (): Promise<number> =>
+  invoke("clean_cache");
+
 export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>
   invoke("list_backup_history");
 
