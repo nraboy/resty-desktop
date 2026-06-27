@@ -26,7 +26,9 @@ export default function BackupPlansPage() {
   const [backupDone, setBackupDone] = useState(false);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
   const [applyingRetention, setApplyingRetention] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const unlistenRef = useRef<(() => void) | null>(null);
+  const elapsedTimerRef = useRef<number | null>(null);
 
   const [contextMenu, setContextMenu] = useState<{ plan: BackupPlan; x: number; y: number } | null>(null);
 
@@ -170,6 +172,16 @@ export default function BackupPlansPage() {
     setProgress(null);
   };
 
+  const stopElapsedTimer = () => {
+    if (elapsedTimerRef.current != null) {
+      clearInterval(elapsedTimerRef.current);
+      elapsedTimerRef.current = null;
+    }
+  };
+
+  // Clear the elapsed timer if the page unmounts mid-backup.
+  useEffect(() => stopElapsedTimer, []);
+
   const closeBackupModal = () => {
     if (backupRunning) return;
     unlistenRef.current?.();
@@ -185,6 +197,15 @@ export default function BackupPlansPage() {
     setBackupDone(false);
     setProgress(null);
     setApplyingRetention(false);
+
+    // Wall-clock elapsed timer: runs until backup *and* retention finish, since
+    // restic's reported secondsElapsed freezes once status lines stop streaming.
+    const startedAt = Date.now();
+    setElapsedSeconds(0);
+    stopElapsedTimer();
+    elapsedTimerRef.current = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
 
     const unlisten = await listen<BackupProgress>("backup:progress", (event) => {
       setProgress(event.payload);
@@ -211,6 +232,7 @@ export default function BackupPlansPage() {
         setBackupError(msg);
       }
     } finally {
+      stopElapsedTimer();
       unlisten();
       unlistenRef.current = null;
       setBackupRunning(false);
@@ -599,11 +621,9 @@ export default function BackupPlansPage() {
                         : "Starting…"}
                     </span>
                     <span>
-                      {progress && progress.secondsRemaining != null
+                      {!applyingRetention && progress && progress.secondsRemaining != null
                         ? `~${formatDuration(progress.secondsRemaining)} remaining`
-                        : progress
-                        ? `${formatDuration(progress.secondsElapsed)} elapsed`
-                        : ""}
+                        : `${formatDuration(elapsedSeconds)} elapsed`}
                     </span>
                   </div>
                   <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
