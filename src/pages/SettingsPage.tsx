@@ -8,6 +8,7 @@ import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import ImportExportCard from "../components/ImportExportCard";
 
 const THEMES: { value: Theme; label: string; description: string }[] = [
   { value: "system", label: "System", description: "Follow the OS appearance" },
@@ -458,6 +459,8 @@ export default function SettingsPage() {
           ))}
         </div>
       </div>}
+
+      <ImportExportCard />
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Prune Repositories</h2>

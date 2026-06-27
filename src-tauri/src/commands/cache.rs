@@ -1060,6 +1060,80 @@ impl AppDb {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// Insert imported repositories, backup plans, and schedules in a single
+    /// transaction. Repo passwords are passed already re-encrypted under the
+    /// local master key (nonce + ciphertext). IDs are pre-generated and all
+    /// cross-references already remapped by the caller. All-or-nothing — any
+    /// failure rolls the entire import back, so a partial import can't leave
+    /// dangling references.
+    pub fn import_bundle(
+        &self,
+        repos: &[ImportRepo],
+        plans: &[BackupPlan],
+        schedules: &[Schedule],
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        for r in repos {
+            tx.execute(
+                "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![r.id, r.name, r.path, r.password_nonce, r.password_ciphertext],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        for plan in plans {
+            let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
+            let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
+            let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
+            let retention_json = plan
+                .retention
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e: serde_json::Error| e.to_string())?;
+            tx.execute(
+                "INSERT INTO backup_plans
+                 (id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    plan.id, plan.name, plan.repo_id, paths_json, tags_json, excludes_json,
+                    retention_json, plan.limit_upload, plan.limit_download,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        for s in schedules {
+            let plan_ids_json = serde_json::to_string(&s.plan_ids).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO schedules
+                 (id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    s.id, s.name, plan_ids_json, s.cron_expr, s.enabled as i64,
+                    s.last_run_at, s.next_run_at, s.created_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+/// A repository row prepared for import: password already re-encrypted under the
+/// local master key.
+pub struct ImportRepo {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub password_nonce: Vec<u8>,
+    pub password_ciphertext: Vec<u8>,
 }
 
 fn timestamp() -> i64 {

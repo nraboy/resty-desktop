@@ -1,7 +1,7 @@
 mod commands;
 mod scheduler;
 
-use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot};
+use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot, transfer};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -301,6 +301,10 @@ pub fn run() {
             // cache
             cache::clear_browse_cache,
             cache::list_backup_history,
+            // import / export
+            transfer::export_data,
+            transfer::preview_import,
+            transfer::import_data,
             // menu / tray
             set_menu_auth_state,
             activate_tray,

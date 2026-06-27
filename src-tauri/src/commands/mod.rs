@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod repo;
 pub mod schedule;
 pub mod snapshot;
+pub mod transfer;
 
 use super::commands::cache::AppDb;
 

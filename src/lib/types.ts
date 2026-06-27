@@ -125,3 +125,16 @@ export interface Schedule {
 }
 
 export type ScheduleFrequency = "hourly" | "daily" | "weekly" | "monthly" | "custom";
+
+export interface ExportSummary {
+  repos: number;
+  plans: number;
+  schedules: number;
+}
+
+export interface ImportPreview {
+  repos: number;
+  plans: number;
+  schedules: number;
+  requiresPassword: boolean;
+}

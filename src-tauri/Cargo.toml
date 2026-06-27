@@ -33,3 +33,5 @@ cron = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["time"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }

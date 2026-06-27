@@ -34,6 +34,8 @@ src/
     Button.tsx     # primary/secondary/danger/ghost variants
     ContextMenu.tsx # Portal-rendered right-click menu; auto-nudges onto screen; closes on Escape/click-outside
     EmptyState.tsx # Empty list placeholder
+    ImportExportCard.tsx # Settings card: export all repos/plans/schedules to an encrypted
+                   #   .json file, and import (preview→confirm) as fresh copies
     Input.tsx      # Labeled input with error state; optional onClear prop shows inline × when value non-empty;
                    #   className applies to outer wrapper div (not <input>); <input> is always w-full inside wrapper
     Modal.tsx      # Overlay modal dialog
@@ -67,7 +69,8 @@ src/
     ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation
     LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows
     SettingsPage.tsx        # Theme selector; tray + remote-auto-refresh toggles; restic binary path;
-                            #   compression selector; default restore path; prune all repos with streaming progress
+                            #   compression selector; default restore path; prune all repos with streaming progress;
+                            #   import/export card (ImportExportCard)
 
 src-tauri/
   src/
@@ -93,7 +96,11 @@ src-tauri/
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
-      schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr
+      schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr;
+                     #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
+      transfer.rs    # export_data/preview_import/import_data; portable .json bundle (readable,
+                     #   only repo passwords encrypted under an export passphrase); every object has its
+                     #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup
       cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first)
@@ -148,6 +155,15 @@ src-tauri/
 - After `forget_by_plan`: full `restic snapshots --json` repopulates cache.
 - `clear_browse_cache` wipes all three cache tables.
 - `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert, matching the read limit so the Logs page never loses visible rows.
+
+## Import / Export
+
+- `transfer.rs` exports a portable `.json` bundle (`version: 1` schema; also records `appVersion` from `tauri.conf.json` for debugging — informational only, ignored on import). Only repo passwords are encrypted: decrypted with the master key, re-encrypted with an Argon2id key derived from a user-supplied **export passphrase** (fresh 16-byte salt stored in the bundle; nonce+ciphertext base64). Passphrase required only when the bundle includes repositories.
+- App settings, backup history, and caches are excluded. Every object carries its own `id`; plans reference `repoId` and schedules reference `planIds` by id, so the file is self-describing and safe to hand-edit.
+- Export is always a **full snapshot** — every repo, plan, and schedule, verbatim (no selection UI). The export modal is just a passphrase prompt (shown only when repos exist).
+- Import always creates **fresh copies**: new UUIDs minted Rust-side, refs remapped, names de-duplicated with a `" (imported)"` suffix; schedule timing reset (`next_run_at` recomputed via `schedule::next_fire_time`, `created_at = now`). All inserts run in one transaction via `AppDb::import_bundle` (all-or-nothing). Paths are imported verbatim — the import preview warns they may not exist on the new machine.
+- Dangling references are tolerated, never fatal: a plan whose repo isn't in the file (orphaned by a repo deletion) imports with `repo_id = ""` (reassign in the editor); schedule refs to absent plans are dropped. So a plan with no valid repo still round-trips with its config intact.
+- `preview_import` returns counts without a passphrase (only secrets are encrypted); it verifies the passphrase early only if one is supplied.
 
 ## Adding a New Feature
 

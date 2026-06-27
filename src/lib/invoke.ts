@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, FileEntry, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, Repository, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -238,3 +238,14 @@ export const clearBrowseCache = (): Promise<void> =>
 
 export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>
   invoke("list_backup_history");
+
+// ── import / export ─────────────────────────────────────────────────────────
+
+export const exportData = (outPath: string, exportPassword?: string): Promise<ExportSummary> =>
+  invoke("export_data", { outPath, exportPassword: exportPassword ?? null });
+
+export const previewImport = (filePath: string, exportPassword?: string): Promise<ImportPreview> =>
+  invoke("preview_import", { filePath, exportPassword: exportPassword ?? null });
+
+export const importData = (filePath: string, exportPassword?: string): Promise<ExportSummary> =>
+  invoke("import_data", { filePath, exportPassword: exportPassword ?? null });

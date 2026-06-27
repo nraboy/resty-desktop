@@ -3157,6 +3157,7 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "base64 0.22.1",
  "chrono",
  "cron",
  "dirs 5.0.1",
@@ -3172,6 +3173,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tokio",
+ "uuid",
  "zeroize",
 ]
 
