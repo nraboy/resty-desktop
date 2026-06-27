@@ -1,10 +1,10 @@
 # Tag Features, Improvements, and Fixes
 
-Parse $ARGUMENTS as a comma-delimited string. For example "v0.0.1,v0.0.2" means the previous tag is "v0.0.1" and the new tag is "v0.0.2". If $ARGUMENTS does not contain exactly two comma-separated values, stop and report an error.
+$ARGUMENTS is the new tag name (e.g. "v0.0.2"). If $ARGUMENTS is empty, stop and report an error.
 
-Verify that the previous tag exists in the repo (`git tag -l <prev_tag>`). If it does not exist, stop and report an error.
+Determine the previous tag automatically: run `git describe --tags --abbrev=0 --match "v*"` to find the most recent `v`-prefixed tag reachable from HEAD. Use that as `<prev_tag>`. If the command fails (no matching tag exists yet), stop and report an error.
 
-Run `git log <prev_tag>..HEAD --oneline` to get all commits since the previous tag. Categorize them using your best judgement into relevant sections (e.g. New Features, Improvements, Bug Fixes, etc.) — only include sections that have at least one entry. Skip merge commits and version-bump commits.
+Run `git log <prev_tag>..HEAD` to get all commits since the previous tag. Read both the commit titles **and** the full commit message bodies — the body often contains details that don't appear in the title, and you should factor those into how you describe and categorize each entry. (Use `--oneline` only as a quick overview; the categorization should be based on the full messages.) Categorize them using your best judgement into relevant sections (e.g. New Features, Improvements, Bug Fixes, etc.) — only include sections that have at least one entry. Skip merge commits and version-bump commits.
 
 Write the categorized list as the message of a new annotated tag on the current commit:
 
