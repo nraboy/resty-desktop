@@ -35,7 +35,8 @@ src/
     ContextMenu.tsx # Portal-rendered right-click menu; auto-nudges onto screen; closes on Escape/click-outside
     EmptyState.tsx # Empty list placeholder
     ImportExportCard.tsx # Settings card: export all repos/plans/schedules to an encrypted
-                   #   .json file, and import (preview→confirm) as fresh copies
+                   #   .json file, and import (preview→confirm) as fresh copies; import modal
+                   #   tabs between Resty Export and Backrest config.json
     Input.tsx      # Labeled input with error state; optional onClear prop shows inline × when value non-empty;
                    #   className applies to outer wrapper div (not <input>); <input> is always w-full inside wrapper
     Modal.tsx      # Overlay modal dialog
@@ -100,7 +101,9 @@ src-tauri/
                      #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
       transfer.rs    # export_data/preview_import/import_data; portable .json bundle (readable,
                      #   only repo passwords encrypted under an export passphrase); every object has its
-                     #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup
+                     #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup;
+                     #   preview_backrest_import/import_backrest_config: one-way import of Backrest config.json
+                     #   (plaintext pw re-encrypted under master key; lossy — see Import / Export)
       cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first)
@@ -161,9 +164,15 @@ src-tauri/
 - `transfer.rs` exports a portable `.json` bundle (`version: 1` schema; also records `appVersion` from `tauri.conf.json` for debugging — informational only, ignored on import). Only repo passwords are encrypted: decrypted with the master key, re-encrypted with an Argon2id key derived from a user-supplied **export passphrase** (fresh 16-byte salt stored in the bundle; nonce+ciphertext base64). Passphrase required only when the bundle includes repositories.
 - App settings, backup history, and caches are excluded. Every object carries its own `id`; plans reference `repoId` and schedules reference `planIds` by id, so the file is self-describing and safe to hand-edit.
 - Export is always a **full snapshot** — every repo, plan, and schedule, verbatim (no selection UI). The export modal is just a passphrase prompt (shown only when repos exist).
-- Import always creates **fresh copies**: new UUIDs minted Rust-side, refs remapped, names de-duplicated with a `" (imported)"` suffix; schedule timing reset (`next_run_at` recomputed via `schedule::next_fire_time`, `created_at = now`). All inserts run in one transaction via `AppDb::import_bundle` (all-or-nothing). Paths are imported verbatim — the import preview warns they may not exist on the new machine.
+- Import always creates **fresh copies**: new UUIDs minted Rust-side, refs remapped, names de-duplicated with a `" (imported)"` suffix; schedule timing reset (`next_run_at` recomputed via `schedule::next_fire_time`, `created_at = now`). Imported schedules are **always disabled** (`enabled = false`) regardless of their source state, so backups don't fire before the user reviews paths on the new host. All inserts run in one transaction via `AppDb::import_bundle` (all-or-nothing). Paths are imported verbatim — the import preview warns they may not exist on the new machine.
 - Dangling references are tolerated, never fatal: a plan whose repo isn't in the file (orphaned by a repo deletion) imports with `repo_id = ""` (reassign in the editor); schedule refs to absent plans are dropped. So a plan with no valid repo still round-trips with its config intact.
 - `preview_import` returns counts without a passphrase (only secrets are encrypted); it verifies the passphrase early only if one is supplied.
+
+### Backrest import (one-way)
+
+- `preview_backrest_import`/`import_backrest_config` import a Backrest (`github.com/garethgeorge/backrest`) `config.json` as fresh copies (same fresh-UUID + `" (imported)"` dedup + `import_bundle` transaction path). No export passphrase: Backrest stores repo passwords in plaintext (`password` field, or `RESTIC_PASSWORD=` in `env`), which are re-encrypted under the local master key.
+- Mapping: repo `uri`→`path`, repo `id`→`name`; plan `repo`→`repoId`, `iexcludes` folded into `excludes`; retention oneof (`policyKeepLastN`/`policyTimeBucketed`)→`RetentionPolicy`; Backrest's per-plan embedded `schedule.cron` becomes one Resty `Schedule` per plan (disabled/`maxFrequency*` schedules dropped).
+- **Lossy by design** — silently dropped: hooks, restic `flags`/`env`, `commandPrefix`, repo `prunePolicy`/`checkPolicy`, `skipIfUnchanged`/`autoUnlock`/`autoInitialize`, `clock`, multihost/auth, hourly retention, plan tags (Backrest auto-tags), bandwidth limits. The import preview shows a generic "not everything will carry over" warning. All Backrest structs use `#[serde(default)]` so partial/older configs still parse.
 
 ## Adding a New Feature
 

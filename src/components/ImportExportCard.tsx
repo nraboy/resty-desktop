@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { exportData, importData, listRepos, previewImport } from "../lib/invoke";
+import {
+  exportData,
+  importBackrestConfig,
+  importData,
+  listRepos,
+  previewBackrestImport,
+  previewImport,
+} from "../lib/invoke";
 import type { ExportSummary, ImportPreview } from "../lib/types";
 import Button from "./Button";
 import Input from "./Input";
@@ -28,6 +35,7 @@ export default function ImportExportCard() {
 
   // ── import state ──
   const [importOpen, setImportOpen] = useState(false);
+  const [importSource, setImportSource] = useState<"resty" | "backrest">("resty");
   const [importFile, setImportFile] = useState("");
   const [importPw, setImportPw] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -66,7 +74,7 @@ export default function ImportExportCard() {
     }
     const path = await saveDialog({
       defaultPath: "resty-export.json",
-      filters: [{ name: "Resty Export", extensions: ["json"] }],
+      filters: [{ name: "Resty Desktop Export", extensions: ["json"] }],
     });
     if (!path) return;
     setExporting(true);
@@ -81,6 +89,7 @@ export default function ImportExportCard() {
   };
 
   const openImport = () => {
+    setImportSource("resty");
     setImportFile("");
     setImportPw("");
     setPreview(null);
@@ -91,10 +100,21 @@ export default function ImportExportCard() {
     setImportOpen(true);
   };
 
+  // Switching source clears any file already chosen — the two formats are parsed
+  // by different backends and a preview from one doesn't apply to the other.
+  const switchImportSource = (source: "resty" | "backrest") => {
+    if (source === importSource) return;
+    setImportSource(source);
+    setImportFile("");
+    setImportPw("");
+    setPreview(null);
+    setImportError("");
+  };
+
   const chooseImportFile = async () => {
     const file = await openDialog({
       multiple: false,
-      filters: [{ name: "Resty Export", extensions: ["json"] }],
+      filters: [{ name: importSource === "backrest" ? "Backrest Config" : "Resty Desktop Export", extensions: ["json"] }],
     });
     if (typeof file !== "string") return;
     setImportFile(file);
@@ -102,7 +122,7 @@ export default function ImportExportCard() {
     setImportError("");
     setPreviewing(true);
     try {
-      const p = await previewImport(file);
+      const p = importSource === "backrest" ? await previewBackrestImport(file) : await previewImport(file);
       setPreview(p);
     } catch (err: any) {
       setImportError(String(err));
@@ -120,7 +140,10 @@ export default function ImportExportCard() {
     }
     setImporting(true);
     try {
-      const summary = await importData(importFile, preview?.requiresPassword ? importPw : undefined);
+      const summary =
+        importSource === "backrest"
+          ? await importBackrestConfig(importFile)
+          : await importData(importFile, preview?.requiresPassword ? importPw : undefined);
       setImportDone(summary);
       refreshHasRepos();
     } catch (err: any) {
@@ -204,6 +227,30 @@ export default function ImportExportCard() {
           </div>
         ) : (
           <div className="space-y-4">
+            <div className="flex rounded-lg overflow-hidden border border-gray-700">
+              <button
+                type="button"
+                onClick={() => switchImportSource("resty")}
+                className={`flex-1 py-1.5 text-sm font-medium transition-colors ${importSource === "resty" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
+              >
+                Resty Desktop
+              </button>
+              <button
+                type="button"
+                onClick={() => switchImportSource("backrest")}
+                className={`flex-1 py-1.5 text-sm font-medium transition-colors ${importSource === "backrest" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
+              >
+                Backrest
+              </button>
+            </div>
+
+            {importSource === "backrest" && (
+              <p className="text-xs text-gray-500">
+                Select a Backrest <span className="font-mono">config.json</span> to import its
+                repositories, plans, and schedules into Resty Desktop.
+              </p>
+            )}
+
             <div className="flex gap-2">
               <div className="flex-1">
                 <Input
@@ -226,8 +273,15 @@ export default function ImportExportCard() {
                   <p className="text-xs font-medium text-amber-500 mb-1">Heads up</p>
                   <p className="text-xs text-gray-300">
                     Repository and backup paths are imported exactly as stored and may not exist on
-                    this machine — review them after importing.
+                    this machine — review them after importing. Schedules are imported disabled so
+                    backups don't fire until you re-enable them.
                   </p>
+                  {importSource === "backrest" && (
+                    <p className="text-xs text-gray-300 mt-1">
+                      Backrest has features Resty Desktop doesn't, so not everything will carry over — the
+                      core repositories, plans, and schedules above will be imported.
+                    </p>
+                  )}
                 </div>
                 <p className="text-xs text-gray-500">
                   Everything is imported as new copies with fresh identifiers; existing data is left

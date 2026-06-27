@@ -249,3 +249,9 @@ export const previewImport = (filePath: string, exportPassword?: string): Promis
 
 export const importData = (filePath: string, exportPassword?: string): Promise<ExportSummary> =>
   invoke("import_data", { filePath, exportPassword: exportPassword ?? null });
+
+export const previewBackrestImport = (filePath: string): Promise<ImportPreview> =>
+  invoke("preview_backrest_import", { filePath });
+
+export const importBackrestConfig = (filePath: string): Promise<ExportSummary> =>
+  invoke("import_backrest_config", { filePath });

@@ -1,0 +1,99 @@
+{
+  "modno": 1,
+  "version": 6,
+  "instance": "fixture",
+  "repos": [
+    {
+      "id": "plaintext-repo",
+      "uri": "/repos/plaintext",
+      "guid": "0000000000000000000000000000000000000000000000000000000000000001",
+      "password": "fake-plaintext-password",
+      "prunePolicy": {
+        "schedule": { "cron": "0 0 1 * *", "clock": "CLOCK_LAST_RUN_TIME" },
+        "maxUnusedPercent": 10
+      },
+      "checkPolicy": {
+        "schedule": { "cron": "0 0 1 * *", "clock": "CLOCK_LAST_RUN_TIME" },
+        "readDataSubsetPercent": 0
+      },
+      "commandPrefix": {}
+    },
+    {
+      "id": "env-repo",
+      "uri": "/repos/env",
+      "guid": "0000000000000000000000000000000000000000000000000000000000000002",
+      "password": "",
+      "env": ["AWS_ACCESS_KEY_ID=fake-key", "RESTIC_PASSWORD=fake-env-password"]
+    },
+    {
+      "id": "nopass-repo",
+      "uri": "/repos/nopass",
+      "guid": "0000000000000000000000000000000000000000000000000000000000000003"
+    },
+    {
+      "id": "remote-repo",
+      "uri": "s3:s3.amazonaws.com/fake-bucket",
+      "guid": "0000000000000000000000000000000000000000000000000000000000000004",
+      "password": "fake-remote-password"
+    }
+  ],
+  "plans": [
+    {
+      "id": "keep-last-plan",
+      "repo": "plaintext-repo",
+      "paths": ["/data/keep-last"],
+      "schedule": { "cron": "10 0 * * *", "clock": "CLOCK_LOCAL" },
+      "retention": { "policyKeepLastN": 7 },
+      "hooks": [
+        {
+          "conditions": ["CONDITION_SNAPSHOT_START"],
+          "onError": "ON_ERROR_FATAL",
+          "actionCommand": { "command": "docker stop fake" }
+        }
+      ]
+    },
+    {
+      "id": "bucketed-plan",
+      "repo": "env-repo",
+      "paths": ["/data/bucketed"],
+      "excludes": ["cache"],
+      "iexcludes": ["tmp", "Thumbs.db"],
+      "schedule": { "cron": "0 2 * * *", "clock": "CLOCK_LOCAL" },
+      "retention": {
+        "policyTimeBucketed": {
+          "hourly": 24,
+          "daily": 7,
+          "weekly": 4,
+          "monthly": 6,
+          "yearly": 2,
+          "keepLastN": 14
+        }
+      }
+    },
+    {
+      "id": "frequency-plan",
+      "repo": "nopass-repo",
+      "paths": ["/data/frequency"],
+      "schedule": { "maxFrequencyDays": 1, "clock": "CLOCK_LOCAL" },
+      "retention": { "policyKeepLastN": 7 }
+    },
+    {
+      "id": "disabled-plan",
+      "repo": "remote-repo",
+      "paths": ["/data/disabled"],
+      "schedule": { "disabled": true },
+      "retention": { "policyKeepAll": true }
+    },
+    {
+      "id": "dangling-plan",
+      "repo": "ghost-repo",
+      "paths": ["/data/dangling"],
+      "schedule": { "cron": "0 3 * * *", "clock": "CLOCK_LOCAL" }
+    }
+  ],
+  "auth": {
+    "users": [
+      { "name": "admin", "passwordBcrypt": "ZmFrZS1iY3J5cHQtaGFzaA==" }
+    ]
+  }
+}

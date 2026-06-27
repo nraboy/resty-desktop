@@ -305,6 +305,8 @@ pub fn run() {
             transfer::export_data,
             transfer::preview_import,
             transfer::import_data,
+            transfer::preview_backrest_import,
+            transfer::import_backrest_config,
             // menu / tray
             set_menu_auth_state,
             activate_tray,
