@@ -794,3 +794,48 @@ pub async fn forget_by_plan(
 ) -> Result<String, String> {
     apply_retention(&db, &master_key, &repo_id, &tags, &paths, &retention)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_snapshot_id;
+
+    #[test]
+    fn accepts_8_char_hex_id() {
+        assert!(validate_snapshot_id("abcdef01").is_ok());
+    }
+
+    #[test]
+    fn accepts_64_char_hex_id() {
+        let id = "a".repeat(64);
+        assert!(validate_snapshot_id(&id).is_ok());
+    }
+
+    #[test]
+    fn accepts_mixed_case_hex() {
+        assert!(validate_snapshot_id("AbCdEf01").is_ok());
+    }
+
+    #[test]
+    fn rejects_id_shorter_than_8_chars() {
+        assert!(validate_snapshot_id("abcdef0").is_err());
+        assert!(validate_snapshot_id("").is_err());
+    }
+
+    #[test]
+    fn rejects_id_longer_than_64_chars() {
+        let id = "a".repeat(65);
+        assert!(validate_snapshot_id(&id).is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex_characters() {
+        assert!(validate_snapshot_id("abcdefgh").is_err());
+        assert!(validate_snapshot_id("abcdef0!").is_err());
+        assert!(validate_snapshot_id("abcdef0 ").is_err());
+    }
+
+    #[test]
+    fn rejects_path_traversal_attempt() {
+        assert!(validate_snapshot_id("../../etc/p").is_err());
+    }
+}

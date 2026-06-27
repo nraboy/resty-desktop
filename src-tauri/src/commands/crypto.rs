@@ -41,3 +41,74 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     rand::thread_rng().fill_bytes(&mut buf);
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SALT: &[u8] = b"test_salt_16byte";
+
+    #[test]
+    fn derive_key_is_deterministic() {
+        let k1 = derive_key("password", SALT).unwrap();
+        let k2 = derive_key("password", SALT).unwrap();
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn derive_key_differs_on_different_passwords() {
+        let k1 = derive_key("password", SALT).unwrap();
+        let k2 = derive_key("other", SALT).unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn derive_key_differs_on_different_salts() {
+        let k1 = derive_key("password", b"salt_aaaaaaaaaa1").unwrap();
+        let k2 = derive_key("password", b"salt_aaaaaaaaaa2").unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn encrypt_decrypt_round_trip() {
+        let key = derive_key("password", SALT).unwrap();
+        let plaintext = b"hello, world";
+        let (nonce, ciphertext) = encrypt(&key, plaintext).unwrap();
+        let recovered = decrypt(&key, &nonce, &ciphertext).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_key() {
+        let key = derive_key("password", SALT).unwrap();
+        let wrong_key = derive_key("wrong", SALT).unwrap();
+        let (nonce, ciphertext) = encrypt(&key, b"secret").unwrap();
+        assert!(decrypt(&wrong_key, &nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn decrypt_fails_with_tampered_ciphertext() {
+        let key = derive_key("password", SALT).unwrap();
+        let (nonce, mut ciphertext) = encrypt(&key, b"secret").unwrap();
+        ciphertext[0] ^= 0xFF;
+        assert!(decrypt(&key, &nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn encrypt_produces_different_nonces_each_call() {
+        let key = derive_key("password", SALT).unwrap();
+        let (nonce1, _) = encrypt(&key, b"same").unwrap();
+        let (nonce2, _) = encrypt(&key, b"same").unwrap();
+        // Nonces are random; same in the same call only by extreme luck.
+        // This will virtually never collide but is probabilistic.
+        assert_ne!(nonce1, nonce2);
+    }
+
+    #[test]
+    fn random_bytes_returns_correct_length() {
+        let buf: [u8; 16] = random_bytes();
+        assert_eq!(buf.len(), 16);
+        let buf32: [u8; 32] = random_bytes();
+        assert_eq!(buf32.len(), 32);
+    }
+}
