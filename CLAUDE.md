@@ -77,9 +77,10 @@ src-tauri/
   src/
     main.rs        # Calls restic_gui_lib::run()
     lib.rs         # Tauri builder; registers all commands; manages AppDb, MasterKey, CopyHandle, MirrorHandle,
-                   #   BackupHandle, PruneHandle as state; native menu bar (auth-aware, skipped on Linux);
-                   #   system tray created lazily after unlock (activate_tray); TRAY_GEN counter avoids ID collisions;
-                   #   window close → hide-to-tray if tray_enabled, else exit; RunEvent::Reopen (macOS only)
+                   #   BackupHandle, PruneHandle as state; native menu bar (auth-aware, skipped on Linux) with
+                   #   Import/Export and Help items; system tray created lazily after unlock (activate_tray);
+                   #   TRAY_GEN counter avoids ID collisions; window close → hide-to-tray if tray_enabled, else exit;
+                   #   RunEvent::Reopen (macOS only)
     commands/
       mod.rs         # get_restic_path(); NoConsole trait: no_console() + augment_path() for Finder-launched PATH
       auth.rs        # is_app_setup, setup_master_password, unlock_app (clears stale locks), lock_app,
@@ -212,6 +213,18 @@ To cut a release, use `/tag` then:
 ```bash
 git push origin main
 git push origin v0.0.X
+```
+
+## Testing
+
+- Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
+- Rust unit tests use `#[cfg(test)]` modules in `commands/crypto.rs`, `commands/snapshot.rs`, and `commands/transfer.rs`.
+- CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
+
+```bash
+npm run test:vite   # frontend tests only
+npm run test:rust   # Rust tests only (cargo test)
+npm run test:all    # both
 ```
 
 ## Running the App

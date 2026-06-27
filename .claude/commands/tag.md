@@ -1,6 +1,8 @@
 # Tag Features, Improvements, and Fixes
 
-$ARGUMENTS is the new tag name (e.g. "v0.0.2"). If $ARGUMENTS is empty, stop and report an error.
+Read the `version` field from `src-tauri/tauri.conf.json` and prefix it with `v` to form the new tag name (e.g. if version is `0.1.0`, the tag is `v0.1.0`). Do not use $ARGUMENTS.
+
+Check whether that tag already exists by running `git tag -l "<new_tag>"`. If the output is non-empty, stop and report an error: the tag already exists.
 
 Determine the previous tag automatically: run `git describe --tags --abbrev=0 --match "v*"` to find the most recent `v`-prefixed tag reachable from HEAD. Use that as `<prev_tag>`. If the command fails (no matching tag exists yet), stop and report an error.
 

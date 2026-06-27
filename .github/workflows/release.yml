@@ -63,6 +63,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Install Linux dependencies
         if: startsWith(matrix.os, 'ubuntu-')
