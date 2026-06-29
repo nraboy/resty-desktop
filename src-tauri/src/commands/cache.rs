@@ -436,6 +436,18 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
 
+        conn.execute(
+            "DELETE FROM snapshots_cache WHERE repo_id = ?1",
+            params![repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "DELETE FROM repo_stats_cache WHERE repo_id = ?1",
+            params![repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+
         Ok(())
     }
 

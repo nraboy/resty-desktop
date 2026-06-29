@@ -107,6 +107,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
             placeholder="Enter master password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            onClear={() => setPassword("")}
             autoFocus
           />
           {isSetup && (
