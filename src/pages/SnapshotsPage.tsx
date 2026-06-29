@@ -95,6 +95,7 @@ export default function SnapshotsPage() {
   }, [repoId]);
 
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<{ snapshotId: string; repoId: string; success: boolean }>("index:done", (e) => {
       const { snapshotId, success } = e.payload;
@@ -109,8 +110,11 @@ export default function SnapshotsPage() {
         }
         return prev;
       });
-    }).then((u) => { unlisten = u; });
-    return () => { unlisten?.(); };
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => { cancelled = true; unlisten?.(); };
   }, []);
 
   useEffect(() => {
