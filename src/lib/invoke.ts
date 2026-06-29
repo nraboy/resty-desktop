@@ -101,6 +101,12 @@ export const getRemoteAutoRefresh = (): Promise<boolean> =>
 export const setRemoteAutoRefresh = (value: boolean): Promise<void> =>
   invoke("set_remote_auto_refresh", { value });
 
+export const getAutoIndexing = (): Promise<boolean> =>
+  invoke("get_auto_indexing");
+
+export const setAutoIndexing = (value: boolean): Promise<void> =>
+  invoke("set_auto_indexing", { value });
+
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 

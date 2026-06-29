@@ -288,6 +288,8 @@ pub fn run() {
             repo::get_tray_warning,
             repo::get_remote_auto_refresh,
             repo::set_remote_auto_refresh,
+            repo::get_auto_indexing,
+            repo::set_auto_indexing,
             repo::check_repo,
             repo::prune_all_repos,
             repo::prune_repo,

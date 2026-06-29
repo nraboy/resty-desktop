@@ -1363,6 +1363,11 @@ impl AppDb {
              DELETE FROM repo_stats_cache;",
         )
         .map_err(|e| e.to_string())?;
+        // Checkpoint the WAL into the main file before vacuuming, so that
+        // VACUUM sees the deletes and can compact the main file.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1580,14 +1585,16 @@ pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
 #[tauri::command]
 pub fn get_db_size(app: tauri::AppHandle) -> Result<u64, String> {
     use tauri::Manager;
-    let path = app
+    let base = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("app_data.db");
-    std::fs::metadata(&path)
+    let main = std::fs::metadata(&base).map(|m| m.len()).unwrap_or(0);
+    let wal = std::fs::metadata(base.with_extension("db-wal"))
         .map(|m| m.len())
-        .map_err(|e| e.to_string())
+        .unwrap_or(0);
+    Ok(main + wal)
 }
 
 #[tauri::command]

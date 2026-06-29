@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
@@ -52,6 +52,7 @@ export default function SettingsPage() {
 
   const [trayEnabled, setTrayEnabledLocal] = useState(false);
   const [trayWarning, setTrayWarning] = useState("");
+  const [autoIndexing, setAutoIndexingLocal] = useState(false);
   const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
 
   const [oldPassword, setOldPassword] = useState("");
@@ -70,6 +71,7 @@ export default function SettingsPage() {
     getRestorePath().then(setRestorePathLocal).catch(() => {});
     getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
     getTrayWarning().then(setTrayWarning).catch(() => {});
+    getAutoIndexing().then(setAutoIndexingLocal).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
@@ -136,6 +138,7 @@ export default function SettingsPage() {
       setCacheCleared(true);
       if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
       cacheTimerRef.current = setTimeout(() => setCacheCleared(false), 2000);
+      getDbSize().then(setDbSize).catch(() => {});
     } finally {
       setClearingCache(false);
     }
@@ -148,6 +151,7 @@ export default function SettingsPage() {
       setCleanedCount(removed);
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
       cleanTimerRef.current = setTimeout(() => setCleanedCount(null), 4000);
+      getDbSize().then(setDbSize).catch(() => {});
     } finally {
       setCleaningCache(false);
     }
@@ -311,6 +315,36 @@ export default function SettingsPage() {
             {trayWarning && (
               <p className="mt-3 text-xs text-amber-500">{trayWarning}</p>
             )}
+          </div>
+          <div className="pt-4 border-t border-gray-800">
+            <p className="text-xs text-gray-500 mb-3">
+              When enabled, the background cache warmer pre-indexes file listings for every snapshot so
+              browsing is instant. When disabled, file listings are still cached on-demand the first time
+              you browse a snapshot. Snapshot metadata is always kept up to date regardless of this setting.
+            </p>
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <button
+                role="switch"
+                aria-checked={autoIndexing}
+                onClick={() => {
+                  const next = !autoIndexing;
+                  setAutoIndexingLocal(next);
+                  setAutoIndexing(next).catch(() => {});
+                }}
+                className={[
+                  "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
+                  autoIndexing ? "bg-blue-600" : "bg-gray-700",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                    autoIndexing ? "translate-x-4" : "translate-x-1",
+                  ].join(" ")}
+                />
+              </button>
+              <span className="text-sm text-gray-300">Automatic background file indexing</span>
+            </label>
           </div>
           <div className="pt-4 border-t border-gray-800">
             <p className="text-xs text-gray-500 mb-3">

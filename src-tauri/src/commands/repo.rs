@@ -509,6 +509,16 @@ pub fn set_remote_auto_refresh(db: State<'_, AppDb>, value: bool) -> Result<(), 
 }
 
 #[tauri::command]
+pub fn get_auto_indexing(db: State<'_, AppDb>) -> Result<bool, String> {
+    Ok(db.get_setting("auto_indexing", "false")? == "true")
+}
+
+#[tauri::command]
+pub fn set_auto_indexing(db: State<'_, AppDb>, value: bool) -> Result<(), String> {
+    db.set_setting("auto_indexing", if value { "true" } else { "false" })
+}
+
+#[tauri::command]
 pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
     prune_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = prune_handle.child.lock() {

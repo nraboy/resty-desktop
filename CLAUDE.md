@@ -58,7 +58,9 @@ src/
     SnapshotsPage.tsx       # Snapshot table; stale-while-revalidate cache; inline tag editor; delete with prune option;
                             #   full-snapshot restore with streaming progress; per-snapshot copy with cancellation;
                             #   pagination (PAGE_SIZE=10); filter with × clear; right-click context menu;
-                            #   multi-select mode: bulk delete and copy with progress bars
+                            #   multi-select mode: bulk delete and copy with progress bars;
+                            #   per-row "Index Snapshot" action with progress modal; listens for index:done to update
+                            #   per-row status map live; listens for snapshots:refreshed to reload list when warmer updates cache
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
                             #   restore modal with strip_leading_path option; inline tag management
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
@@ -72,9 +74,11 @@ src/
     SchedulesPage.tsx       # List schedules; toggle/delete/run; amber warning when tray disabled
     ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation
     LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows
-    SettingsPage.tsx        # Theme selector; tray + remote-auto-refresh toggles; restic binary path;
+    SettingsPage.tsx        # Theme selector; tray + auto-indexing + remote-auto-refresh toggles; restic binary path;
                             #   compression selector; default restore path; prune all repos with streaming progress;
                             #   import/export card (ImportExportCard);
+                            #   cache management: "Clean Orphaned" (remove stale rows) + "Clear All Cache" (wipe + VACUUM);
+                            #   DB size display (app_data.db + WAL) refreshes after each cache operation;
                             #   Full Disk Access card (macOS only): green when granted, amber with instructions + Re-check when not
 
 src-tauri/
@@ -93,7 +97,8 @@ src-tauri/
       repo.rs        # list/add/remove/init/rename/update repos; get_repo_password; test_repo_connection;
                      #   get/refresh_repo_stats; get/set_restic_path; get_restic_version; check_repo;
                      #   get/set_compression; get/set_restore_path; get/set_tray_enabled;
-                     #   get/set_remote_auto_refresh; prune_all_repos; prune_repo; cancel_prune;
+                     #   get/set_remote_auto_refresh; get/set_auto_indexing (default false);
+                     #   prune_all_repos; prune_repo; cancel_prune;
                      #   check_full_disk_access (macOS only — probes TCC.db; returns {supported, granted});
                      #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane)
       snapshot.rs    # list/refresh/delete/tag snapshots; get_snapshot_stats; execute_backup (shared pub async fn);
@@ -102,7 +107,10 @@ src-tauri/
                      #   validate_snapshot_id() (pub(crate), 8–64 hex) guards all snapshot ID inputs here and in browse.rs
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
-                     #   all three validate snapshot_id via snapshot::validate_snapshot_id
+                     #   all three validate snapshot_id via snapshot::validate_snapshot_id;
+                     #   index_snapshot (fire-and-forget manual indexing, emits index:done when complete);
+                     #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
+                     #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
       schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr;
                      #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
@@ -113,7 +121,16 @@ src-tauri/
                      #   (plaintext pw re-encrypted under master key; lossy — see Import / Export)
       cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
-                     #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first)
+                     #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first);
+                     #   clear_cache: DELETE all cache tables + PRAGMA wal_checkpoint(TRUNCATE) + VACUUM to reclaim disk space;
+                     #   get_db_size: sums app_data.db + app_data.db-wal for accurate WAL-mode reporting
+  cache_warmer.rs    # Background sweep spawned at unlock; 10s initial delay, then 60s tick forever.
+                     #   Each tick: (1) refresh_all_snapshots — always runs, calls restic snapshots --json for every
+                     #   eligible repo and updates snapshots_cache, emits snapshots:refreshed per repo;
+                     #   (2) trigger_sweep — only runs if auto_indexing=true, continuously indexes one uncached
+                     #   snapshot at a time via run_full_index until nothing remains, emits index:done per snapshot.
+                     #   Both phases respect remote_auto_refresh (skip remote repos when disabled).
+                     #   AtomicBool running prevents overlapping file-index sweeps.
   scheduler.rs       # 60s background tick; runs due schedules via execute_backup; applies retention after backup;
                      #   skips when locked or when a backup is already running (busy flag); AtomicBool guards against overlapping ticks
 ```
@@ -158,13 +175,16 @@ src-tauri/
 
 ## Persistence & Caching
 
-- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `browse_cache`, `repo_stats_cache`, `backup_history`.
+- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`.
+- Browse cache is relational (v0→v1 migration): `browse_cache_files` stores the file tree keyed by `(snapshot_id, parent_path)`; `browse_cache_status` tracks index state per `(repo_id, snapshot_id)` as `pending`/`in_progress`/`complete`. Replaces the old JSON-blob `browse_cache`.
 - `list_snapshots` returns from cache only; `refresh_snapshots` calls restic and updates cache.
 - SnapshotsPage: stale-while-revalidate — serve cache immediately, background refresh for local repos.
 - After `run_backup`: new snapshot metadata prepended to cache (no full re-fetch).
 - After `forget_by_plan`: full `restic snapshots --json` repopulates cache.
-- `clear_browse_cache` wipes all three cache tables.
+- `remove_repo` cascades to `browse_cache_status`, `browse_cache_files`, `snapshots_cache`, and `repo_stats_cache`.
+- `clear_browse_cache` (Clear All Cache): DELETEs all cache tables, then `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` to reclaim disk space from the WAL and compact the main file.
 - `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert, matching the read limit so the Logs page never loses visible rows.
+- Background cache warmer: every 60s, snapshot metadata is refreshed for all eligible repos (always). File indexing (browse_cache) is pre-populated in the background only when `auto_indexing` is enabled. Both phases skip remote repos unless `remote_auto_refresh` is on.
 
 ## Import / Export
 

@@ -7,6 +7,7 @@ use tauri::{Emitter, Manager};
 
 use crate::commands::browse::run_full_index;
 use crate::commands::cache::{AppDb, MasterKey};
+use crate::commands::repo::run_restic_with_path;
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
 
@@ -20,19 +21,79 @@ pub fn spawn(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Short initial delay to let the app finish initialising before the first sweep.
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        refresh_all_snapshots(&app).await;
         trigger_sweep(&app, &running);
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            refresh_all_snapshots(&app).await;
             trigger_sweep(&app, &running);
         }
     });
 }
 
-/// Starts a sweep if one is not already running. The sweep continuously
-/// indexes uncached snapshots one at a time with no delay between them,
-/// stopping only when there is nothing left to index.
+/// Refreshes the snapshots cache for all eligible repos. Always runs on every
+/// 60s tick regardless of the auto_indexing setting; respects remote_auto_refresh.
+async fn refresh_all_snapshots(app: &tauri::AppHandle) {
+    let db = app.state::<AppDb>();
+    let master_key = app.state::<MasterKey>();
+
+    let key = match master_key.get() {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+
+    let remote_auto_refresh = db
+        .get_setting("remote_auto_refresh", "false")
+        .unwrap_or_else(|_| "false".to_string())
+        == "true";
+
+    let repos = match db.list_repos() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    for repo_meta in repos {
+        if !remote_auto_refresh && is_remote(&repo_meta.path) {
+            continue;
+        }
+
+        let repo_id = repo_meta.id.clone();
+        let repo = match db.get_full_repo(&repo_id, &key) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let restic_path = crate::commands::get_restic_path(&db);
+        let app2 = app.clone();
+
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
+        })
+        .await;
+
+        if let Ok(Ok(json)) = result {
+            let db2 = app2.state::<AppDb>();
+            if db2.set_snapshots(&repo_id, &json).is_ok() {
+                let _ = app2.emit("snapshots:refreshed", serde_json::json!({ "repoId": repo_id }));
+            }
+        }
+    }
+}
+
+/// Starts a file-indexing sweep if auto_indexing is enabled and one is not
+/// already running. The sweep continuously indexes uncached snapshots one at a
+/// time with no delay between them, stopping only when there is nothing left.
 fn trigger_sweep(app: &tauri::AppHandle, running: &Arc<AtomicBool>) {
+    let db = app.state::<AppDb>();
+    let auto_indexing = db
+        .get_setting("auto_indexing", "false")
+        .unwrap_or_else(|_| "false".to_string())
+        == "true";
+
+    if !auto_indexing {
+        return;
+    }
+
     if running.swap(true, Ordering::SeqCst) {
         return; // sweep already in progress
     }
