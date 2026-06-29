@@ -1120,14 +1120,22 @@ export default function SnapshotsPage() {
             {
               label: "Index Snapshot",
               disabled: indexStatus[contextMenu.snap.id] === "complete" || indexStatus[contextMenu.snap.id] === "in_progress",
-              onClick: () => {
+              onClick: async () => {
                 const snap = contextMenu.snap;
                 setContextMenu(null);
+                let started = false;
+                try { started = await indexSnapshot(repoId!, snap.id); }
+                catch { started = false; }
+                if (!started) {
+                  // Already complete or in progress (e.g. warmer mid-flight):
+                  // reconcile the row's true state instead of opening a modal.
+                  getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
+                  return;
+                }
                 setIndexingTarget(snap);
                 setIndexingDone(false);
                 setIndexingSuccess(true);
                 setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
-                indexSnapshot(repoId!, snap.id).catch(() => {});
               },
             },
             {
@@ -1197,7 +1205,7 @@ export default function SnapshotsPage() {
       <Modal
         title="Index Snapshot"
         open={indexingTarget !== null}
-        onClose={() => { if (indexingDone) { setIndexingTarget(null); setIndexingDone(false); } }}
+        onClose={() => { setIndexingTarget(null); setIndexingDone(false); }}
       >
         {indexingDone ? (
           indexingSuccess ? (

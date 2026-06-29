@@ -190,7 +190,7 @@ export const forgetByPlan = (
 export const listFiles = (repoId: string, snapshotId: string, path?: string): Promise<FileEntry[]> =>
   invoke("list_files", { repoId, snapshotId, path });
 
-export const indexSnapshot = (repoId: string, snapshotId: string): Promise<void> =>
+export const indexSnapshot = (repoId: string, snapshotId: string): Promise<boolean> =>
   invoke("index_snapshot", { repoId, snapshotId });
 
 export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, string>> =>

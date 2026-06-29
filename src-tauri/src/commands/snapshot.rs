@@ -74,7 +74,7 @@ pub async fn delete_snapshot(
         args.push("--prune");
     }
     run_restic_with_path(&repo, args, &restic_path)?;
-    let _ = db.evict(&snapshot_id);  // clears browse_cache_files + browse_cache_status
+    let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
     let _ = db.evict_stats(&repo_id);
     Ok(())
@@ -787,6 +787,7 @@ pub async fn forget_by_plan(
 #[cfg(test)]
 mod tests {
     use super::validate_snapshot_id;
+    use crate::commands::cache::RetentionPolicy;
 
     #[test]
     fn accepts_8_char_hex_id() {
@@ -826,5 +827,59 @@ mod tests {
     #[test]
     fn rejects_path_traversal_attempt() {
         assert!(validate_snapshot_id("../../etc/p").is_err());
+    }
+
+    #[test]
+    fn test_retention_policy_fields() {
+        // Verify RetentionPolicy can be constructed with various combinations
+        let policy = RetentionPolicy {
+            keep_last: Some(5),
+            keep_daily: Some(7),
+            keep_weekly: None,
+            keep_monthly: Some(6),
+            keep_yearly: None,
+        };
+        
+        assert_eq!(policy.keep_last, Some(5));
+        assert_eq!(policy.keep_daily, Some(7));
+        assert!(policy.keep_weekly.is_none());
+        assert_eq!(policy.keep_monthly, Some(6));
+        assert!(policy.keep_yearly.is_none());
+    }
+
+    #[test]
+    fn test_retention_policy_all_none() {
+        // Empty retention policy - should not add any keep flags
+        let policy = RetentionPolicy {
+            keep_last: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+        };
+        
+        assert!(policy.keep_last.is_none());
+        assert!(policy.keep_daily.is_none());
+        assert!(policy.keep_weekly.is_none());
+        assert!(policy.keep_monthly.is_none());
+        assert!(policy.keep_yearly.is_none());
+    }
+
+    #[test]
+    fn test_retention_policy_all_set() {
+        // All retention fields set - would add all --keep-* flags
+        let policy = RetentionPolicy {
+            keep_last: Some(3),
+            keep_daily: Some(7),
+            keep_weekly: Some(4),
+            keep_monthly: Some(12),
+            keep_yearly: Some(2),
+        };
+        
+        assert_eq!(policy.keep_last, Some(3));
+        assert_eq!(policy.keep_daily, Some(7));
+        assert_eq!(policy.keep_weekly, Some(4));
+        assert_eq!(policy.keep_monthly, Some(12));
+        assert_eq!(policy.keep_yearly, Some(2));
     }
 }

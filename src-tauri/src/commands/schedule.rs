@@ -133,3 +133,84 @@ pub async fn run_schedule_now(
 pub fn describe_cron_expr(cron_expr: String) -> String {
     describe_cron(&cron_expr)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_fire_time_daily() {
+        // Daily at midnight - 5-field cron becomes 7-field
+        let result = next_fire_time("0 0 * * *");
+        assert!(result.is_ok());
+        let ts = result.unwrap();
+        // Should be in the future and within next day
+        let now = chrono::Local::now().timestamp();
+        assert!(ts > now);
+        assert!(ts < now + 86400 + 1);
+    }
+
+    #[test]
+    fn test_next_fire_time_hourly() {
+        // Every hour at minute 0
+        let result = next_fire_time("0 * * * *");
+        assert!(result.is_ok());
+        let ts = result.unwrap();
+        let now = chrono::Local::now().timestamp();
+        assert!(ts > now);
+        assert!(ts < now + 3600 + 1);
+    }
+
+    #[test]
+    fn test_next_fire_time_weekly() {
+        // Weekly on Monday at 2:30 AM
+        let result = next_fire_time("30 2 * * 1");
+        assert!(result.is_ok(), "weekly schedule should parse correctly");
+        let ts = result.unwrap();
+        let now = chrono::Local::now().timestamp();
+        assert!(ts > now);
+        // Should be within next week
+        assert!(ts < now + 7 * 86400 + 1);
+    }
+
+    #[test]
+    fn test_next_fire_time_invalid() {
+        // Invalid cron expressions
+        assert!(next_fire_time("invalid").is_err());
+        assert!(next_fire_time("60 * * * *").is_err());
+        assert!(next_fire_time("* 25 * * *").is_err());
+    }
+
+    #[test]
+    fn test_describe_cron_daily() {
+        assert_eq!(describe_cron("0 0 * * *"), "Daily at 00:00");
+        assert_eq!(describe_cron("30 12 * * *"), "Daily at 12:30");
+        assert_eq!(describe_cron("15 3 * * *"), "Daily at 03:15");
+    }
+
+    #[test]
+    fn test_describe_cron_weekly() {
+        assert_eq!(describe_cron("0 2 * * 0"), "Every Sunday at 02:00");
+        assert_eq!(describe_cron("30 8 * * 1"), "Every Monday at 08:30");
+        assert_eq!(describe_cron("45 16 * * 5"), "Every Friday at 16:45");
+        assert_eq!(describe_cron("0 12 * * 7"), "Every Sunday at 12:00");
+    }
+
+    #[test]
+    fn test_describe_cron_monthly() {
+        assert_eq!(describe_cron("0 0 1 * *"), "Monthly on day 1 at 00:00");
+        assert_eq!(describe_cron("30 12 15 * *"), "Monthly on day 15 at 12:30");
+        assert_eq!(describe_cron("0 3 20 * *"), "Monthly on day 20 at 03:00");
+    }
+
+    #[test]
+    fn test_describe_cron_invalid_format() {
+        // Too few parts
+        assert_eq!(describe_cron("0 0 * *"), "0 0 * *");
+        // Too many parts
+        assert_eq!(describe_cron("0 0 * * * *"), "0 0 * * * *");
+        // Invalid time (non-numeric)
+        assert_eq!(describe_cron("abc * * * *"), "abc * * * *");
+    }
+}

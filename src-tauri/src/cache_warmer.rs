@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::commands::browse::run_full_index;
 use crate::commands::cache::{AppDb, MasterKey};
@@ -113,6 +113,9 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let restic_path = crate::commands::get_restic_path(&db);
     let app2 = app.clone();
 
+    let emit_repo_id = repo_id.clone();
+    let emit_snapshot_id = snapshot_id.clone();
+
     let ok = tauri::async_runtime::spawn_blocking(move || {
         let db_inner = app2.state::<AppDb>();
         let result = run_full_index(&db_inner, &repo_id, &repo, &snapshot_id, &restic_path);
@@ -123,6 +126,12 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     })
     .await
     .unwrap_or(false);
+
+    let _ = app.emit("index:done", serde_json::json!({
+        "snapshotId": emit_snapshot_id,
+        "repoId": emit_repo_id,
+        "success": ok,
+    }));
 
     if ok { SweepResult::Indexed } else { SweepResult::NothingLeft }
 }

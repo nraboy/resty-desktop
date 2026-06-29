@@ -48,7 +48,7 @@ pub async fn list_files(
     path: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
     validate_snapshot_id(&snapshot_id)?;
-    if let Some(cached) = db.get(&snapshot_id, path.as_deref())? {
+    if let Some(cached) = db.get(&repo_id, &snapshot_id, path.as_deref())? {
         return Ok(cached);
     }
 
@@ -283,7 +283,7 @@ pub async fn index_snapshot(
     master_key: State<'_, MasterKey>,
     repo_id: String,
     snapshot_id: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     validate_snapshot_id(&snapshot_id)?;
 
     let status_map = db.get_browse_status(&repo_id)?;
@@ -291,7 +291,7 @@ pub async fn index_snapshot(
         status_map.get(&snapshot_id).map(|s| s.as_str()),
         Some("complete") | Some("in_progress")
     ) {
-        return Ok(());
+        return Ok(false);
     }
 
     db.set_browse_status(&repo_id, &snapshot_id, "in_progress")?;
@@ -331,7 +331,7 @@ pub async fn index_snapshot(
         );
     });
 
-    Ok(())
+    Ok(true)
 }
 
 /// Returns a map of snapshot_id → index status for all snapshots in a repo.
@@ -342,4 +342,66 @@ pub fn get_snapshot_index_status(
     repo_id: String,
 ) -> Result<HashMap<String, String>, String> {
     db.get_browse_status(&repo_id)
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_direct_child_root_level() {
+        // Root level (parent is None or "" or "/")
+        // For 2-segment paths like "foo/bar", the second segment is the direct child
+        assert!(is_direct_child("foo/bar", None));
+        assert!(is_direct_child("foo/bar", Some("")));
+        assert!(is_direct_child("foo/bar", Some("/")));
+        
+        // Single-segment paths have no "child" at root
+        assert!(!is_direct_child("foo", None));
+        
+        // 3+ segments are not direct children
+        assert!(!is_direct_child("foo/bar/baz", None));
+    }
+
+    #[test]
+    fn test_is_direct_child_with_parent() {
+        // With explicit parent, check if entry is a direct child
+        assert!(is_direct_child("parent/child", Some("parent")));
+        assert!(is_direct_child("parent/child", Some("parent/")));
+        
+        // Nested child should not be direct
+        assert!(!is_direct_child("parent/child/grandchild", Some("parent")));
+        
+        // Wrong parent should not match
+        assert!(!is_direct_child("other/child", Some("parent")));
+        
+        // Root as parent with 2-segment path
+        assert!(is_direct_child("foo/bar", Some("/")));
+    }
+
+    #[test]
+    fn test_is_direct_child_edge_cases() {
+        // Trailing slashes are handled by trim_end_matches
+        assert!(is_direct_child("parent/child", Some("parent")));
+        assert!(is_direct_child("parent/child/", Some("parent")));
+        
+        // Two-level nesting with parent
+        assert!(is_direct_child("a/b/c", Some("a/b")));
+        assert!(!is_direct_child("a/b/c", Some("a")));
+        
+        // Empty path
+        assert!(!is_direct_child("", None));
+        
+        // Paths with multiple segments
+        assert!(is_direct_child("parent/child", Some("parent")));
+    }
+
+    #[test]
+    fn test_is_direct_child_windows_style() {
+        // Windows-style backslashes aren't supported (uses forward slashes)
+        assert!(is_direct_child("parent/child", Some("parent")));
+        // Windows paths would need different handling
+    }
 }
