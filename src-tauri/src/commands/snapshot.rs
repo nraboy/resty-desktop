@@ -709,18 +709,7 @@ pub async fn unlock_repo(
     Ok(())
 }
 
-pub fn apply_retention(
-    db: &AppDb,
-    master_key: &MasterKey,
-    repo_id: &str,
-    tags: &[String],
-    paths: &[String],
-    retention: &RetentionPolicy,
-) -> Result<String, String> {
-    let key = master_key.get()?;
-    let repo = db.get_full_repo(repo_id, &key)?;
-    let restic_path = super::get_restic_path(db);
-
+fn build_retention_args(tags: &[String], paths: &[String], retention: &RetentionPolicy) -> Vec<String> {
     let mut args: Vec<String> =
         vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
 
@@ -757,6 +746,22 @@ pub fn apply_retention(
         args.push(n.to_string());
     }
 
+    args
+}
+
+pub fn apply_retention(
+    db: &AppDb,
+    master_key: &MasterKey,
+    repo_id: &str,
+    tags: &[String],
+    paths: &[String],
+    retention: &RetentionPolicy,
+) -> Result<String, String> {
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(repo_id, &key)?;
+    let restic_path = super::get_restic_path(db);
+
+    let args = build_retention_args(tags, paths, retention);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let result = run_restic_with_path(&repo, args_refs, &restic_path);
     if result.is_ok() {
@@ -786,7 +791,7 @@ pub async fn forget_by_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_snapshot_id;
+    use super::{build_retention_args, validate_snapshot_id};
     use crate::commands::cache::RetentionPolicy;
 
     #[test]
@@ -829,27 +834,85 @@ mod tests {
         assert!(validate_snapshot_id("../../etc/p").is_err());
     }
 
-    #[test]
-    fn test_retention_policy_fields() {
-        // Verify RetentionPolicy can be constructed with various combinations
-        let policy = RetentionPolicy {
-            keep_last: Some(5),
+    // ── build_retention_args ────────────────────────────────────────────────
+
+    fn all_retention() -> RetentionPolicy {
+        RetentionPolicy {
+            keep_last: Some(3),
             keep_daily: Some(7),
-            keep_weekly: None,
-            keep_monthly: Some(6),
-            keep_yearly: None,
-        };
-        
-        assert_eq!(policy.keep_last, Some(5));
-        assert_eq!(policy.keep_daily, Some(7));
-        assert!(policy.keep_weekly.is_none());
-        assert_eq!(policy.keep_monthly, Some(6));
-        assert!(policy.keep_yearly.is_none());
+            keep_weekly: Some(4),
+            keep_monthly: Some(12),
+            keep_yearly: Some(2),
+        }
     }
 
     #[test]
-    fn test_retention_policy_all_none() {
-        // Empty retention policy - should not add any keep flags
+    fn retention_args_always_starts_with_forget_prune_json() {
+        let args = build_retention_args(&[], &[], &all_retention());
+        assert_eq!(&args[..3], &["forget", "--prune", "--json"]);
+    }
+
+    #[test]
+    fn retention_args_with_tags_uses_group_by_not_path() {
+        let tags = vec!["home".to_string(), "work".to_string()];
+        let paths = vec!["/some/path".to_string()];
+        let args = build_retention_args(&tags, &paths, &all_retention());
+        assert!(args.contains(&"--group-by".to_string()));
+        assert!(args.contains(&"tags".to_string()));
+        assert!(args.contains(&"--tag".to_string()));
+        assert!(args.contains(&"home,work".to_string()));
+        assert!(!args.contains(&"--path".to_string()));
+    }
+
+    #[test]
+    fn retention_args_without_tags_uses_paths() {
+        let paths = vec!["/home/user".to_string(), "/etc".to_string()];
+        let args = build_retention_args(&[], &paths, &all_retention());
+        assert!(!args.contains(&"--group-by".to_string()));
+        assert!(!args.contains(&"--tag".to_string()));
+        let path_positions: Vec<usize> = args
+            .windows(2)
+            .enumerate()
+            .filter_map(|(i, w)| if w[0] == "--path" { Some(i) } else { None })
+            .collect();
+        assert_eq!(path_positions.len(), 2);
+        assert_eq!(args[path_positions[0] + 1], "/home/user");
+        assert_eq!(args[path_positions[1] + 1], "/etc");
+    }
+
+    #[test]
+    fn retention_args_emits_all_keep_flags_when_set() {
+        let args = build_retention_args(&[], &[], &all_retention());
+        let pairs: Vec<(&str, &str)> = args
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&("--keep-last", "3")));
+        assert!(pairs.contains(&("--keep-daily", "7")));
+        assert!(pairs.contains(&("--keep-weekly", "4")));
+        assert!(pairs.contains(&("--keep-monthly", "12")));
+        assert!(pairs.contains(&("--keep-yearly", "2")));
+    }
+
+    #[test]
+    fn retention_args_omits_none_fields() {
+        let policy = RetentionPolicy {
+            keep_last: Some(5),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+        };
+        let args = build_retention_args(&[], &[], &policy);
+        assert!(args.contains(&"--keep-last".to_string()));
+        assert!(!args.contains(&"--keep-daily".to_string()));
+        assert!(!args.contains(&"--keep-weekly".to_string()));
+        assert!(!args.contains(&"--keep-monthly".to_string()));
+        assert!(!args.contains(&"--keep-yearly".to_string()));
+    }
+
+    #[test]
+    fn retention_args_empty_retention_produces_no_keep_flags() {
         let policy = RetentionPolicy {
             keep_last: None,
             keep_daily: None,
@@ -857,29 +920,7 @@ mod tests {
             keep_monthly: None,
             keep_yearly: None,
         };
-        
-        assert!(policy.keep_last.is_none());
-        assert!(policy.keep_daily.is_none());
-        assert!(policy.keep_weekly.is_none());
-        assert!(policy.keep_monthly.is_none());
-        assert!(policy.keep_yearly.is_none());
-    }
-
-    #[test]
-    fn test_retention_policy_all_set() {
-        // All retention fields set - would add all --keep-* flags
-        let policy = RetentionPolicy {
-            keep_last: Some(3),
-            keep_daily: Some(7),
-            keep_weekly: Some(4),
-            keep_monthly: Some(12),
-            keep_yearly: Some(2),
-        };
-        
-        assert_eq!(policy.keep_last, Some(3));
-        assert_eq!(policy.keep_daily, Some(7));
-        assert_eq!(policy.keep_weekly, Some(4));
-        assert_eq!(policy.keep_monthly, Some(12));
-        assert_eq!(policy.keep_yearly, Some(2));
+        let args = build_retention_args(&[], &[], &policy);
+        assert_eq!(args, vec!["forget", "--prune", "--json"]);
     }
 }

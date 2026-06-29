@@ -104,11 +104,4 @@ mod tests {
         assert_ne!(nonce1, nonce2);
     }
 
-    #[test]
-    fn random_bytes_returns_correct_length() {
-        let buf: [u8; 16] = random_bytes();
-        assert_eq!(buf.len(), 16);
-        let buf32: [u8; 32] = random_bytes();
-        assert_eq!(buf32.len(), 32);
-    }
 }

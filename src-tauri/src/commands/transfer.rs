@@ -651,6 +651,157 @@ pub fn import_backrest_config(
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── uniquify ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn uniquify_returns_original_when_no_collision() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(uniquify("My Repo", &mut used), "My Repo");
+        assert!(used.contains("My Repo"));
+    }
+
+    #[test]
+    fn uniquify_first_collision_appends_imported() {
+        let mut used = std::collections::HashSet::new();
+        used.insert("My Repo".to_string());
+        assert_eq!(uniquify("My Repo", &mut used), "My Repo (imported)");
+        assert!(used.contains("My Repo (imported)"));
+    }
+
+    #[test]
+    fn uniquify_second_collision_appends_numbered() {
+        let mut used = std::collections::HashSet::new();
+        used.insert("X".to_string());
+        used.insert("X (imported)".to_string());
+        assert_eq!(uniquify("X", &mut used), "X (imported 2)");
+    }
+
+    #[test]
+    fn uniquify_third_collision() {
+        let mut used = std::collections::HashSet::new();
+        used.insert("X".to_string());
+        used.insert("X (imported)".to_string());
+        used.insert("X (imported 2)".to_string());
+        assert_eq!(uniquify("X", &mut used), "X (imported 3)");
+    }
+
+    #[test]
+    fn uniquify_records_chosen_name_in_used_set() {
+        let mut used = std::collections::HashSet::new();
+        let name = uniquify("Repo", &mut used);
+        // Calling again with the same base must not return the same name.
+        let name2 = uniquify("Repo", &mut used);
+        assert_ne!(name, name2);
+    }
+
+    // ── decrypt_secret / derive_export_key ─────────────────────────────────
+
+    #[test]
+    fn decrypt_secret_round_trip() {
+        let key = [1u8; 32];
+        let plaintext = b"super-secret-repo-password";
+        let (nonce, ct) = super::super::crypto::encrypt(&key, plaintext).unwrap();
+        let enc = EncSecret {
+            nonce: B64.encode(&nonce),
+            ciphertext: B64.encode(&ct),
+        };
+        let decrypted = decrypt_secret(&key, &enc).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_secret_wrong_key_returns_passphrase_error() {
+        let key = [1u8; 32];
+        let wrong_key = [2u8; 32];
+        let (nonce, ct) = super::super::crypto::encrypt(&key, b"secret").unwrap();
+        let enc = EncSecret {
+            nonce: B64.encode(&nonce),
+            ciphertext: B64.encode(&ct),
+        };
+        let err = decrypt_secret(&wrong_key, &enc).unwrap_err();
+        assert!(err.contains("Incorrect export passphrase"));
+    }
+
+    #[test]
+    fn derive_export_key_requires_non_empty_password() {
+        let enc = ExportEncryption {
+            kdf: "argon2id".to_string(),
+            salt: B64.encode(&[0u8; 16]),
+        };
+        assert!(derive_export_key(&enc, None).is_err());
+        assert!(derive_export_key(&enc, Some("")).is_err());
+    }
+
+    #[test]
+    fn derive_export_key_is_deterministic() {
+        let enc = ExportEncryption {
+            kdf: "argon2id".to_string(),
+            salt: B64.encode(&[0u8; 16]),
+        };
+        let k1 = derive_export_key(&enc, Some("mypass")).unwrap();
+        let k2 = derive_export_key(&enc, Some("mypass")).unwrap();
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn derive_export_key_differs_on_different_passwords() {
+        let enc = ExportEncryption {
+            kdf: "argon2id".to_string(),
+            salt: B64.encode(&[0u8; 16]),
+        };
+        let k1 = derive_export_key(&enc, Some("pass1")).unwrap();
+        let k2 = derive_export_key(&enc, Some("pass2")).unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn derive_export_key_differs_on_different_salts() {
+        let enc1 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode(&[0u8; 16]) };
+        let enc2 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode(&[1u8; 16]) };
+        let k1 = derive_export_key(&enc1, Some("same-pass")).unwrap();
+        let k2 = derive_export_key(&enc2, Some("same-pass")).unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    // ── export bundle passphrase end-to-end ─────────────────────────────────
+
+    #[test]
+    fn export_key_to_encrypt_then_decrypt_round_trip() {
+        let enc = ExportEncryption {
+            kdf: "argon2id".to_string(),
+            salt: B64.encode(&[7u8; 16]),
+        };
+        let export_key = derive_export_key(&enc, Some("my-export-pass")).unwrap();
+        let (nonce, ct) = super::super::crypto::encrypt(&export_key, b"repo-password-123").unwrap();
+        let secret = EncSecret {
+            nonce: B64.encode(&nonce),
+            ciphertext: B64.encode(&ct),
+        };
+        let decrypted = decrypt_secret(&export_key, &secret).unwrap();
+        assert_eq!(decrypted, b"repo-password-123");
+    }
+
+    #[test]
+    fn export_key_wrong_passphrase_fails_decrypt() {
+        let enc = ExportEncryption {
+            kdf: "argon2id".to_string(),
+            salt: B64.encode(&[7u8; 16]),
+        };
+        let export_key = derive_export_key(&enc, Some("correct-pass")).unwrap();
+        let wrong_key = derive_export_key(&enc, Some("wrong-pass")).unwrap();
+        let (nonce, ct) = super::super::crypto::encrypt(&export_key, b"secret").unwrap();
+        let secret = EncSecret {
+            nonce: B64.encode(&nonce),
+            ciphertext: B64.encode(&ct),
+        };
+        assert!(decrypt_secret(&wrong_key, &secret).is_err());
+    }
+}
+
+#[cfg(test)]
 mod backrest_tests {
     use super::*;
 

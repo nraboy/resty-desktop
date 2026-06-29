@@ -314,9 +314,9 @@ export default function SettingsPage() {
           </div>
           <div className="pt-4 border-t border-gray-800">
             <p className="text-xs text-gray-500 mb-3">
-              When enabled, snapshot lists and repository stats for remote repositories are
-              refreshed automatically on page load, the same as local repositories. Disabled by
-              default to avoid unnecessary bandwidth charges from your cloud provider.
+              When enabled, remote repositories are refreshed and cached automatically — on page load and
+              in the background — the same as local repositories. Disabled by default to avoid
+              unnecessary bandwidth charges from your cloud provider.
             </p>
             <label className="flex items-center gap-3 cursor-pointer select-none">
               <button
@@ -625,14 +625,14 @@ export default function SettingsPage() {
         <h2 className="text-sm font-medium text-gray-300 mb-1">Application Cache</h2>
         <p className="text-xs text-gray-500 mb-3">
           Snapshot listings and repository stats are cached locally to speed up navigation.
-          <strong className="text-gray-400"> Clean Cache</strong> removes only orphaned entries left
+          <strong className="text-gray-400"> Clean Orphaned</strong> removes only orphaned entries left
           behind by deleted repositories and forgotten snapshots, while
           <strong className="text-gray-400"> Clear All Cache</strong> wipes everything (rebuilt on
           next use).
         </p>
         <div className="flex items-center gap-3">
           <Button variant="secondary" onClick={handleCleanCache} loading={cleaningCache}>
-            Clean Cache
+            Clean Orphaned
           </Button>
           <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
             Clear All Cache

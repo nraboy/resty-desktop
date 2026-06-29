@@ -398,10 +398,4 @@ mod tests {
         assert!(is_direct_child("parent/child", Some("parent")));
     }
 
-    #[test]
-    fn test_is_direct_child_windows_style() {
-        // Windows-style backslashes aren't supported (uses forward slashes)
-        assert!(is_direct_child("parent/child", Some("parent")));
-        // Windows paths would need different handling
-    }
 }

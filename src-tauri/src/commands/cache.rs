@@ -1613,56 +1613,188 @@ mod tests {
         assert_eq!(status_b.get("snap123"), Some(&"complete".to_string()));
     }
 
-    #[test]
-    fn test_get_next_unindexed_snapshot() {
-        let db = test_db();
-
-        // Seed snapshots_cache for two repos.
-        let mut snapshots = Vec::new();
-        for i in 1..=3 {
-            snapshots.push(format!("repo{}-snap{}", "A", i));
-            snapshots.push(format!("repo{}-snap{}", "B", i));
-        }
-
-        // We need to actually insert into snapshots_cache. Since that's normally
-        // populated by restic, we'll use the internal insert method.
-        // For simplicity, we'll just test the core logic: empty input returns None.
-        let result = db.get_next_unindexed_snapshot(&[]).unwrap();
-        assert!(result.is_none());
-
-        // Test with repos that have no browse_cache_status entries.
-        // This requires snapshots_cache rows, which we can insert via the
-        // internal set_snapshots path or by directly inserting. For this test,
-        // we'll rely on the empty test already covering the guard and the
-        // query structure (which is the key F4 fix).
-        // A fuller test would require seeding snapshots_cache, which is
-        // out of scope for a quick unit test — the manual E2E covers it.
+    fn seed_snapshot(db: &AppDb, repo_id: &str, snapshot_id: &str) {
+        let json = format!(
+            r#"[{{"id":"{snapshot_id}","short_id":"{snapshot_id}","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]}}]"#
+        );
+        db.set_snapshots(repo_id, &json).unwrap();
     }
-}
+
+    #[test]
+    fn get_next_unindexed_returns_none_for_empty_repo_list() {
+        let db = test_db();
+        assert!(db.get_next_unindexed_snapshot(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_next_unindexed_returns_snapshot_with_no_status_entry() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        // No browse_cache_status row — should be returned as unindexed.
+        let result = db.get_next_unindexed_snapshot(&["repoA".to_string()]).unwrap();
+        assert_eq!(result, Some(("repoA".to_string(), "aaaa111100000000".to_string())));
+    }
+
+    #[test]
+    fn get_next_unindexed_returns_none_when_all_complete() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        db.set_browse_status("repoA", "aaaa111100000000", "complete").unwrap();
+        assert!(db.get_next_unindexed_snapshot(&["repoA".to_string()]).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_next_unindexed_returns_pending_snapshot() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        db.set_browse_status("repoA", "aaaa111100000000", "pending").unwrap();
+        let result = db.get_next_unindexed_snapshot(&["repoA".to_string()]).unwrap();
+        assert_eq!(result, Some(("repoA".to_string(), "aaaa111100000000".to_string())));
+    }
+
+    #[test]
+    fn get_next_unindexed_skips_complete_returns_unindexed_from_other_repo() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        seed_snapshot(&db, "repoB", "bbbb222200000000");
+        db.set_browse_status("repoA", "aaaa111100000000", "complete").unwrap();
+        // repoB has no status row — should be picked.
+        let result = db
+            .get_next_unindexed_snapshot(&["repoA".to_string(), "repoB".to_string()])
+            .unwrap();
+        assert_eq!(result, Some(("repoB".to_string(), "bbbb222200000000".to_string())));
+    }
+
+    #[test]
+    fn get_next_unindexed_ignores_repos_not_in_eligible_list() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        // repoA has snapshots but is not in the eligible list.
+        assert!(db.get_next_unindexed_snapshot(&["repoB".to_string()]).unwrap().is_none());
+    }
 
     #[test]
     fn test_parent_path_of() {
-        // Single segment → empty parent
         assert_eq!(parent_path_of("foo"), "");
         assert_eq!(parent_path_of("foo/"), "");
-        
-        // Two segments → first segment
         assert_eq!(parent_path_of("foo/bar"), "foo");
         assert_eq!(parent_path_of("foo/bar/"), "foo");
-        
-        // Three segments → first two segments
         assert_eq!(parent_path_of("foo/bar/baz"), "foo/bar");
         assert_eq!(parent_path_of("foo/bar/baz/"), "foo/bar");
-        
-        // Deep nesting
         assert_eq!(parent_path_of("a/b/c/d/e"), "a/b/c/d");
-        
-        // Leading slash → empty
         assert_eq!(parent_path_of("/foo"), "");
-        
-        // Root path → empty
         assert_eq!(parent_path_of("/"), "");
-        
-        // Empty string → empty
         assert_eq!(parent_path_of(""), "");
     }
+
+    // ── rotate_master_key ───────────────────────────────────────────────────
+
+    fn make_key(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    fn add_repo_encrypted(db: &AppDb, id: &str, name: &str, path: &str, password: &str, key: &[u8; 32]) {
+        let (nonce, ct) = super::crypto::encrypt(key, password.as_bytes()).unwrap();
+        db.add_repo(id, name, path, &nonce, &ct).unwrap();
+    }
+
+    #[test]
+    fn rotate_master_key_reencrypts_all_repos() {
+        let db = test_db();
+        let old_key = make_key(1);
+        let new_key = make_key(2);
+
+        add_repo_encrypted(&db, "r1", "Repo One", "/path/one", "pw-one", &old_key);
+        add_repo_encrypted(&db, "r2", "Repo Two", "/path/two", "pw-two", &old_key);
+
+        let salt = [0u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        db.rotate_master_key(&old_key, &new_key, &salt, &vn, &vct).unwrap();
+
+        let r1 = db.get_full_repo("r1", &new_key).unwrap();
+        assert_eq!(r1.password, "pw-one");
+        let r2 = db.get_full_repo("r2", &new_key).unwrap();
+        assert_eq!(r2.password, "pw-two");
+    }
+
+    #[test]
+    fn rotate_master_key_old_key_no_longer_works_after_rotation() {
+        let db = test_db();
+        let old_key = make_key(1);
+        let new_key = make_key(2);
+
+        add_repo_encrypted(&db, "r1", "Repo", "/path", "secret", &old_key);
+
+        let salt = [0u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        db.rotate_master_key(&old_key, &new_key, &salt, &vn, &vct).unwrap();
+
+        assert!(db.get_full_repo("r1", &old_key).is_err());
+    }
+
+    #[test]
+    fn rotate_master_key_rolls_back_on_wrong_old_key() {
+        let db = test_db();
+        let real_key = make_key(1);
+        let wrong_key = make_key(99);
+        let new_key = make_key(2);
+
+        add_repo_encrypted(&db, "r1", "Repo", "/path", "correct-password", &real_key);
+
+        let salt = [0u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        // Rotation with wrong old key must fail and leave DB untouched.
+        assert!(db.rotate_master_key(&wrong_key, &new_key, &salt, &vn, &vct).is_err());
+
+        // Original encrypted password still readable with real_key.
+        let r1 = db.get_full_repo("r1", &real_key).unwrap();
+        assert_eq!(r1.password, "correct-password");
+    }
+
+    #[test]
+    fn rotate_master_key_with_no_repos_still_updates_verification_row() {
+        let db = test_db();
+        let old_key = make_key(1);
+        let new_key = make_key(2);
+
+        let salt = [42u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        db.rotate_master_key(&old_key, &new_key, &salt, &vn, &vct).unwrap();
+
+        // Verification row should now exist.
+        let (stored_salt, _, _) = db.load_master_key_row().unwrap();
+        assert_eq!(stored_salt, salt);
+    }
+
+    // ── log_backup / history trim ───────────────────────────────────────────
+
+    fn log_entry(db: &AppDb, id: &str, started_at: i64) {
+        db.log_backup(id, "repo1", None, None, started_at, 1.0, 0, 0, 0, None).unwrap();
+    }
+
+    #[test]
+    fn log_backup_trims_to_history_limit() {
+        let db = test_db();
+        // Insert BACKUP_HISTORY_LIMIT + 1 entries (oldest first so trim is predictable).
+        for i in 0..=BACKUP_HISTORY_LIMIT {
+            log_entry(&db, &format!("id-{i}"), i);
+        }
+        let history = db.list_backup_history().unwrap();
+        // Must not exceed the limit.
+        assert_eq!(history.len() as i64, BACKUP_HISTORY_LIMIT);
+        // Oldest entry (started_at=0) should have been trimmed.
+        assert!(!history.iter().any(|e| e.id == "id-0"));
+        // Newest entry must be present.
+        assert!(history.iter().any(|e| e.id == format!("id-{}", BACKUP_HISTORY_LIMIT)));
+    }
+
+    #[test]
+    fn log_backup_history_ordered_newest_first() {
+        let db = test_db();
+        log_entry(&db, "early", 100);
+        log_entry(&db, "late", 200);
+        let history = db.list_backup_history().unwrap();
+        assert_eq!(history[0].id, "late");
+        assert_eq!(history[1].id, "early");
+    }
+}
