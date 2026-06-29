@@ -613,9 +613,7 @@ export default function BackupPlansPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
             </svg>
             <p className="text-sm text-amber-300">
-              This plan includes paths protected by macOS (such as{" "}
-              <code className="text-amber-200">~/Library</code> or system directories), but Full Disk
-              Access does not appear to be granted. The backup may silently skip those paths or fail.
+              This plan includes protected paths (e.g. <code className="text-amber-100">~/Library</code>), but Full Disk Access isn't granted — the backup may skip or fail on those paths.
             </p>
           </div>
           <p className="text-sm text-gray-400">

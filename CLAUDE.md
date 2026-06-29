@@ -48,6 +48,7 @@ src/
     invoke.ts      # Typed wrappers over tauri invoke()
     format.ts      # formatBytes, formatSize, formatDate, formatTimestamp, formatDuration
     config.ts      # MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
+    utils.ts       # needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
     theme.tsx      # ThemeProvider + useTheme(); persists to localStorage; applies dark/light/system class to <html>
   pages/
     AuthPage.tsx            # Master password setup (first launch) and unlock screen
@@ -63,15 +64,18 @@ src/
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;
-                            #   auto-applies retention after successful backup; per-plan Apply Retention button
+                            #   auto-applies retention after successful backup; per-plan Apply Retention button;
+                            #   pre-flight FDA check before running: warns if plan includes protected paths and FDA not granted (macOS only)
     BackupPlanEditPage.tsx  # Create/edit plan (name, repo, paths, tags, excludes, retention, bandwidth limits);
-                            #   exclude patterns: Simple tab (tag list + presets) / Expert tab (freeform textarea)
+                            #   exclude patterns: Simple tab (tag list + presets) / Expert tab (freeform textarea);
+                            #   amber FDA warning suppressed when FDA is confirmed granted (macOS only)
     SchedulesPage.tsx       # List schedules; toggle/delete/run; amber warning when tray disabled
     ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation
     LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows
     SettingsPage.tsx        # Theme selector; tray + remote-auto-refresh toggles; restic binary path;
                             #   compression selector; default restore path; prune all repos with streaming progress;
-                            #   import/export card (ImportExportCard)
+                            #   import/export card (ImportExportCard);
+                            #   Full Disk Access card (macOS only): green when granted, amber with instructions + Re-check when not
 
 src-tauri/
   src/
@@ -89,7 +93,9 @@ src-tauri/
       repo.rs        # list/add/remove/init/rename/update repos; get_repo_password; test_repo_connection;
                      #   get/refresh_repo_stats; get/set_restic_path; get_restic_version; check_repo;
                      #   get/set_compression; get/set_restore_path; get/set_tray_enabled;
-                     #   get/set_remote_auto_refresh; prune_all_repos; prune_repo; cancel_prune
+                     #   get/set_remote_auto_refresh; prune_all_repos; prune_repo; cancel_prune;
+                     #   check_full_disk_access (macOS only — probes TCC.db; returns {supported, granted});
+                     #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane)
       snapshot.rs    # list/refresh/delete/tag snapshots; get_snapshot_stats; execute_backup (shared pub async fn);
                      #   run_backup; cancel_backup; apply_retention (shared pub fn); forget_by_plan;
                      #   copy_snapshot; cancel_copy; mirror_repo; cancel_mirror; unlock_repo; diff_snapshots;
