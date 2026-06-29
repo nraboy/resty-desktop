@@ -74,7 +74,7 @@ pub async fn delete_snapshot(
         args.push("--prune");
     }
     run_restic_with_path(&repo, args, &restic_path)?;
-    let _ = db.evict(&snapshot_id);
+    let _ = db.evict(&snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
     let _ = db.evict_stats(&repo_id);
     Ok(())
@@ -420,23 +420,12 @@ pub async fn execute_backup(
             let files_changed = summary.as_ref().and_then(|v| v["files_changed"].as_u64()).unwrap_or(0);
             let bytes_added = summary.as_ref().and_then(|v| v["data_added"].as_u64()).unwrap_or(0);
 
-            let appended: Option<String> = snapshot_id.clone().and_then(|id| {
-                let new_json = run_restic_with_path(&repo, vec!["snapshots", "--json", &id], &restic_path).ok()?;
-                let mut new_snaps: Vec<serde_json::Value> = serde_json::from_str(&new_json).ok()?;
-                let existing: Vec<serde_json::Value> = db
-                    .get_snapshots(repo_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|j| serde_json::from_str(&j).ok())
-                    .unwrap_or_default();
-                new_snaps.extend(existing);
-                serde_json::to_string(&new_snaps).ok()
-            });
-
-            if let Some(json) = appended {
-                let _ = db.set_snapshots(repo_id, &json);
-            } else {
-                let _ = db.evict_snapshots(repo_id);
+            if let Some(ref id) = snapshot_id {
+                if let Ok(new_json) = run_restic_with_path(&repo, vec!["snapshots", "--json", id], &restic_path) {
+                    let _ = db.append_snapshots(repo_id, &new_json);
+                } else {
+                    let _ = db.evict_snapshots(repo_id);
+                }
             }
 
             let _ = db.log_backup(

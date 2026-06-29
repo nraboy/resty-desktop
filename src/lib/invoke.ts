@@ -190,6 +190,12 @@ export const forgetByPlan = (
 export const listFiles = (repoId: string, snapshotId: string, path?: string): Promise<FileEntry[]> =>
   invoke("list_files", { repoId, snapshotId, path });
 
+export const indexSnapshot = (repoId: string, snapshotId: string): Promise<void> =>
+  invoke("index_snapshot", { repoId, snapshotId });
+
+export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, string>> =>
+  invoke("get_snapshot_index_status", { repoId });
+
 export const restorePath = (
   repoId: string,
   snapshotId: string,
@@ -244,6 +250,9 @@ export const clearBrowseCache = (): Promise<void> =>
 
 export const cleanCache = (): Promise<number> =>
   invoke("clean_cache");
+
+export const getDbSize = (): Promise<number> =>
+  invoke("get_db_size");
 
 export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>
   invoke("list_backup_history");

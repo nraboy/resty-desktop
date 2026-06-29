@@ -197,6 +197,17 @@ impl AppDb {
     }
 
     pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+        // v0 → v1: replace JSON-blob browse_cache and snapshots_cache with relational tables.
+        // Cache loss is safe — the app falls back to live restic fetches.
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS browse_cache;
+                 DROP TABLE IF EXISTS snapshots_cache;
+                 PRAGMA user_version = 1;",
+            )?;
+        }
+
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS master_key (
@@ -227,17 +238,37 @@ impl AppDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS browse_cache (
+            CREATE TABLE IF NOT EXISTS browse_cache_files (
                 snapshot_id  TEXT NOT NULL,
                 path         TEXT NOT NULL,
-                entries_json TEXT NOT NULL,
+                parent_path  TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                entry_type   TEXT NOT NULL,
+                size         INTEGER,
+                mtime        TEXT,
+                mode         INTEGER,
                 cached_at    INTEGER NOT NULL,
                 PRIMARY KEY (snapshot_id, path)
             );
+            CREATE INDEX IF NOT EXISTS idx_browse_files
+                ON browse_cache_files (snapshot_id, parent_path);
+            CREATE TABLE IF NOT EXISTS browse_cache_status (
+                repo_id      TEXT NOT NULL,
+                snapshot_id  TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY (repo_id, snapshot_id)
+            );
             CREATE TABLE IF NOT EXISTS snapshots_cache (
-                repo_id        TEXT PRIMARY KEY,
-                snapshots_json TEXT NOT NULL,
-                cached_at      INTEGER NOT NULL
+                repo_id      TEXT NOT NULL,
+                snapshot_id  TEXT NOT NULL,
+                short_id     TEXT NOT NULL,
+                time         TEXT NOT NULL,
+                hostname     TEXT NOT NULL,
+                username     TEXT,
+                paths        TEXT NOT NULL,
+                tags         TEXT,
+                cached_at    INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, snapshot_id)
             );
             CREATE TABLE IF NOT EXISTS repo_stats_cache (
                 repo_id          TEXT PRIMARY KEY,
@@ -272,6 +303,10 @@ impl AppDb {
         // Migrations for existing installs — silently ignored if columns already exist.
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;");
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;");
+        // Reset any mid-index state left by a crash or unexpected close.
+        let _ = conn.execute_batch(
+            "UPDATE browse_cache_status SET status = 'pending' WHERE status = 'in_progress';",
+        );
         Ok(())
     }
 
@@ -588,21 +623,57 @@ impl AppDb {
 
     // ── browse cache ─────────────────────────────────────────────────────────
 
+    fn is_fully_indexed(&self, snapshot_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT 1 FROM browse_cache_status WHERE snapshot_id = ?1 AND status = 'complete'",
+            params![snapshot_id],
+            |_| Ok(()),
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub fn get(
         &self,
         snapshot_id: &str,
         path: Option<&str>,
     ) -> Result<Option<Vec<FileEntry>>, String> {
-        let path_key = path.unwrap_or("");
+        let fully_indexed = self.is_fully_indexed(snapshot_id)?;
+        let parent_key = path.unwrap_or("");
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        match conn.query_row(
-            "SELECT entries_json FROM browse_cache WHERE snapshot_id = ?1 AND path = ?2",
-            params![snapshot_id, path_key],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(json) => serde_json::from_str(&json).map(Some).map_err(|e| e.to_string()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.to_string()),
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, path, entry_type, size, mtime, mode
+                 FROM browse_cache_files
+                 WHERE snapshot_id = ?1 AND parent_path = ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let entries = stmt
+            .query_map(params![snapshot_id, parent_key], |row| {
+                Ok(FileEntry {
+                    name: row.get(0)?,
+                    path: row.get(1)?,
+                    entry_type: row.get(2)?,
+                    size: row.get(3)?,
+                    mtime: row.get(4)?,
+                    mode: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        if fully_indexed {
+            // Fully indexed: always return Some (empty vec = empty directory, not a cache miss)
+            Ok(Some(entries))
+        } else if !entries.is_empty() {
+            // Partially indexed: return whatever was cached for this directory
+            Ok(Some(entries))
+        } else {
+            Ok(None)
         }
     }
 
@@ -612,53 +683,275 @@ impl AppDb {
         path: Option<&str>,
         entries: &[FileEntry],
     ) -> Result<(), String> {
-        let path_key = path.unwrap_or("");
-        let json = serde_json::to_string(entries).map_err(|e| e.to_string())?;
         let now = timestamp();
+        let parent_key = path.unwrap_or("");
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO browse_cache (snapshot_id, path, entries_json, cached_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![snapshot_id, path_key, json, now],
+            "DELETE FROM browse_cache_files WHERE snapshot_id = ?1 AND parent_path = ?2",
+            params![snapshot_id, parent_key],
         )
         .map_err(|e| e.to_string())?;
+        for entry in entries {
+            conn.execute(
+                "INSERT OR REPLACE INTO browse_cache_files
+                 (snapshot_id, path, parent_path, name, entry_type, size, mtime, mode, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    snapshot_id,
+                    entry.path,
+                    parent_key,
+                    entry.name,
+                    entry.entry_type,
+                    entry.size,
+                    entry.mtime,
+                    entry.mode,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
     pub fn evict(&self, snapshot_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "DELETE FROM browse_cache WHERE snapshot_id = ?1",
+            "DELETE FROM browse_cache_files WHERE snapshot_id = ?1",
+            params![snapshot_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM browse_cache_status WHERE snapshot_id = ?1",
             params![snapshot_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
+    // ── browse cache status ───────────────────────────────────────────────────
+
+    pub fn get_browse_status(
+        &self,
+        repo_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT snapshot_id, status FROM browse_cache_status WHERE repo_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let map = stmt
+            .query_map(params![repo_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(map)
+    }
+
+    pub fn set_browse_status(
+        &self,
+        repo_id: &str,
+        snapshot_id: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO browse_cache_status (repo_id, snapshot_id, status)
+             VALUES (?1, ?2, ?3)",
+            params![repo_id, snapshot_id, status],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Bulk-insert file entries for a snapshot (used by the cache warmer and manual indexing).
+    /// Inserts in chunks of 500 to avoid holding the mutex for excessive time.
+    pub fn insert_browse_files(
+        &self,
+        snapshot_id: &str,
+        entries: &[FileEntry],
+    ) -> Result<(), String> {
+        let now = timestamp();
+        for chunk in entries.chunks(500) {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            for entry in chunk {
+                let parent = parent_path_of(&entry.path);
+                tx.execute(
+                    "INSERT OR REPLACE INTO browse_cache_files
+                     (snapshot_id, path, parent_path, name, entry_type, size, mtime, mode, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        snapshot_id,
+                        entry.path,
+                        parent,
+                        entry.name,
+                        entry.entry_type,
+                        entry.size,
+                        entry.mtime,
+                        entry.mode,
+                        now
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Returns the next (repo_id, snapshot_id) that needs indexing from eligible repos,
+    /// preferring snapshots with no status entry, then those with status = 'pending'.
+    pub fn get_next_unindexed_snapshot(
+        &self,
+        eligible_repo_ids: &[String],
+    ) -> Result<Option<(String, String)>, String> {
+        if eligible_repo_ids.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sc.repo_id, sc.snapshot_id
+                 FROM snapshots_cache sc
+                 LEFT JOIN browse_cache_status bcs
+                     ON bcs.repo_id = sc.repo_id AND bcs.snapshot_id = sc.snapshot_id
+                 WHERE sc.repo_id = ?1
+                   AND (bcs.status IS NULL OR bcs.status = 'pending')
+                 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        for repo_id in eligible_repo_ids {
+            match stmt.query_row(params![repo_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(pair) => return Ok(Some(pair)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(None)
+    }
+
     // ── snapshots cache ──────────────────────────────────────────────────────
 
     pub fn get_snapshots(&self, repo_id: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        match conn.query_row(
-            "SELECT snapshots_json FROM snapshots_cache WHERE repo_id = ?1",
-            params![repo_id],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(json) => Ok(Some(json)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.to_string()),
+        let mut stmt = conn
+            .prepare(
+                "SELECT snapshot_id, short_id, time, hostname, username, paths, tags
+                 FROM snapshots_cache WHERE repo_id = ?1
+                 ORDER BY time ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![repo_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        if rows.is_empty() {
+            return Ok(None);
         }
+
+        let values: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, short_id, time, hostname, username, paths, tags)| {
+                let mut obj = serde_json::json!({
+                    "id": id,
+                    "short_id": short_id,
+                    "time": time,
+                    "hostname": hostname,
+                    "paths": serde_json::from_str::<serde_json::Value>(&paths)
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                });
+                if let Some(u) = username {
+                    obj["username"] = serde_json::Value::String(u);
+                }
+                if let Some(t) = tags {
+                    obj["tags"] = serde_json::from_str::<serde_json::Value>(&t)
+                        .unwrap_or(serde_json::Value::Null);
+                }
+                obj
+            })
+            .collect();
+
+        serde_json::to_string(&values)
+            .map(Some)
+            .map_err(|e| e.to_string())
     }
 
+    /// Full replace: clears existing snapshot rows for this repo, then inserts all from JSON.
     pub fn set_snapshots(&self, repo_id: &str, json: &str) -> Result<(), String> {
+        let rows = parse_snapshot_rows(json)?;
         let now = timestamp();
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO snapshots_cache (repo_id, snapshots_json, cached_at)
-             VALUES (?1, ?2, ?3)",
-            params![repo_id, json, now],
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM snapshots_cache WHERE repo_id = ?1",
+            params![repo_id],
         )
         .map_err(|e| e.to_string())?;
+        for s in &rows {
+            tx.execute(
+                "INSERT INTO snapshots_cache
+                 (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    repo_id,
+                    s.id,
+                    s.short_id,
+                    s.time,
+                    s.hostname,
+                    s.username,
+                    s.paths,
+                    s.tags,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Upsert-only: inserts new snapshot rows without clearing existing ones.
+    /// Used by execute_backup to add a newly created snapshot to the cache.
+    pub fn append_snapshots(&self, repo_id: &str, json: &str) -> Result<(), String> {
+        let rows = parse_snapshot_rows(json)?;
+        let now = timestamp();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        for s in &rows {
+            conn.execute(
+                "INSERT OR REPLACE INTO snapshots_cache
+                 (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    repo_id,
+                    s.id,
+                    s.short_id,
+                    s.time,
+                    s.hostname,
+                    s.username,
+                    s.paths,
+                    s.tags,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -1033,7 +1326,8 @@ impl AppDb {
     pub fn clear_cache(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
-            "DELETE FROM browse_cache;
+            "DELETE FROM browse_cache_files;
+             DELETE FROM browse_cache_status;
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;",
         )
@@ -1045,12 +1339,11 @@ impl AppDb {
     /// number of rows deleted. Orphans are:
     ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
     ///     exists in `repositories` (e.g. a deleted repo),
-    ///   - `browse_cache` rows whose `snapshot_id` is not referenced by any
-    ///     remaining `snapshots_cache` entry (e.g. a forgotten snapshot).
+    ///   - `browse_cache_files` / `browse_cache_status` rows whose `snapshot_id`
+    ///     is not referenced by any remaining `snapshots_cache` entry.
     pub fn clean_cache(&self) -> Result<u64, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-
         let mut removed = 0u64;
 
         removed += tx
@@ -1069,53 +1362,21 @@ impl AppDb {
             )
             .map_err(|e| e.to_string())? as u64;
 
-        // Collect snapshot IDs still referenced by remaining snapshot caches.
-        let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        {
-            let mut stmt = tx
-                .prepare("SELECT snapshots_json FROM snapshots_cache")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?;
-            for json in rows {
-                let json = json.map_err(|e| e.to_string())?;
-                #[derive(Deserialize)]
-                struct SnapId {
-                    id: String,
-                    short_id: String,
-                }
-                if let Ok(snaps) = serde_json::from_str::<Vec<SnapId>>(&json) {
-                    for s in snaps {
-                        live_ids.insert(s.id);
-                        live_ids.insert(s.short_id);
-                    }
-                }
-            }
-        }
+        removed += tx
+            .execute(
+                "DELETE FROM browse_cache_files
+                 WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
 
-        // Delete browse rows whose snapshot_id isn't live.
-        let orphan_browse_ids: Vec<String> = {
-            let mut stmt = tx
-                .prepare("SELECT DISTINCT snapshot_id FROM browse_cache")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?;
-            let mut ids = Vec::new();
-            for id in rows {
-                let id = id.map_err(|e| e.to_string())?;
-                if !live_ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            ids
-        };
-        for id in &orphan_browse_ids {
-            removed += tx
-                .execute("DELETE FROM browse_cache WHERE snapshot_id = ?1", params![id])
-                .map_err(|e| e.to_string())? as u64;
-        }
+        removed += tx
+            .execute(
+                "DELETE FROM browse_cache_status
+                 WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
 
         tx.commit().map_err(|e| e.to_string())?;
         Ok(removed)
@@ -1130,7 +1391,8 @@ impl AppDb {
              DELETE FROM repositories;
              DELETE FROM backup_plans;
              DELETE FROM app_settings;
-             DELETE FROM browse_cache;
+             DELETE FROM browse_cache_files;
+             DELETE FROM browse_cache_status;
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;
              DELETE FROM backup_history;
@@ -1223,6 +1485,57 @@ fn timestamp() -> i64 {
         .unwrap_or(0)
 }
 
+/// Compute the parent directory path for a file path from `restic ls` output.
+/// `/foo/bar/baz.txt` → `/foo/bar`, `/foo` → `""`, `` → `""`.
+pub(crate) fn parent_path_of(path: &str) -> String {
+    let clean = path.trim_end_matches('/');
+    match clean.rfind('/') {
+        None | Some(0) => String::new(),
+        Some(i) => clean[..i].to_string(),
+    }
+}
+
+struct SnapshotRow {
+    id: String,
+    short_id: String,
+    time: String,
+    hostname: String,
+    username: Option<String>,
+    paths: String,
+    tags: Option<String>,
+}
+
+fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
+    #[derive(Deserialize)]
+    struct Raw {
+        id: String,
+        short_id: String,
+        time: String,
+        hostname: String,
+        username: Option<String>,
+        paths: Vec<String>,
+        tags: Option<Vec<String>>,
+    }
+    let raws: Vec<Raw> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    raws.into_iter()
+        .map(|r| {
+            Ok(SnapshotRow {
+                id: r.id,
+                short_id: r.short_id,
+                time: r.time,
+                hostname: r.hostname,
+                username: r.username,
+                paths: serde_json::to_string(&r.paths).map_err(|e| e.to_string())?,
+                tags: r
+                    .tags
+                    .map(|t| serde_json::to_string(&t))
+                    .transpose()
+                    .map_err(|e: serde_json::Error| e.to_string())?,
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<(), String> {
     db.clear_cache()
@@ -1231,6 +1544,19 @@ pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<(), String> {
 #[tauri::command]
 pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
     db.clean_cache()
+}
+
+#[tauri::command]
+pub fn get_db_size(app: tauri::AppHandle) -> Result<u64, String> {
+    use tauri::Manager;
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("app_data.db");
+    std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

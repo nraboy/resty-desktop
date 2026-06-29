@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
@@ -55,6 +55,10 @@ export default function SnapshotsPage() {
   const [compareSource, setCompareSource] = useState<Snapshot | null>(null);
   const [compareTargetId, setCompareTargetId] = useState("");
   const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
+  const [indexStatus, setIndexStatus] = useState<Record<string, string>>({});
+  const [indexingTarget, setIndexingTarget] = useState<Snapshot | null>(null);
+  const [indexingDone, setIndexingDone] = useState(false);
+  const [indexingSuccess, setIndexingSuccess] = useState(true);
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
@@ -83,6 +87,30 @@ export default function SnapshotsPage() {
   useEffect(() => {
     getRestorePath().then(setDefaultRestoreDir).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!repoId) return;
+    getSnapshotIndexStatus(repoId).then(setIndexStatus).catch(() => {});
+  }, [repoId]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ snapshotId: string; repoId: string; success: boolean }>("index:done", (e) => {
+      const { snapshotId, success } = e.payload;
+      setIndexStatus((prev) => ({
+        ...prev,
+        [snapshotId]: success ? "complete" : "pending",
+      }));
+      setIndexingTarget((prev) => {
+        if (prev?.id === snapshotId) {
+          setIndexingDone(true);
+          setIndexingSuccess(success);
+        }
+        return prev;
+      });
+    }).then((u) => { unlisten = u; });
+    return () => { unlisten?.(); };
   }, []);
 
   useEffect(() => {
@@ -1090,6 +1118,19 @@ export default function SnapshotsPage() {
             },
             { separator: true },
             {
+              label: "Index Snapshot",
+              disabled: indexStatus[contextMenu.snap.id] === "complete" || indexStatus[contextMenu.snap.id] === "in_progress",
+              onClick: () => {
+                const snap = contextMenu.snap;
+                setContextMenu(null);
+                setIndexingTarget(snap);
+                setIndexingDone(false);
+                setIndexingSuccess(true);
+                setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
+                indexSnapshot(repoId!, snap.id).catch(() => {});
+              },
+            },
+            {
               label: "Snapshot Stats",
               onClick: () => {
                 const snap = contextMenu.snap;
@@ -1148,6 +1189,53 @@ export default function SnapshotsPage() {
             <p className="text-xs text-gray-600 mb-4">Size reflects all data in this snapshot, including data shared with other snapshots.</p>
             <div className="flex justify-end">
               <Button variant="secondary" onClick={() => { setStatsTarget(null); setSnapshotStats(null); }}>Close</Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      <Modal
+        title="Index Snapshot"
+        open={indexingTarget !== null}
+        onClose={() => { if (indexingDone) { setIndexingTarget(null); setIndexingDone(false); } }}
+      >
+        {indexingDone ? (
+          indexingSuccess ? (
+            <>
+              <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                </svg>
+                Indexing complete
+              </div>
+              <p className="text-sm text-gray-400 mb-4">
+                Snapshot <span className="font-mono text-blue-400">{indexingTarget?.short_id}</span> has been indexed and is ready to browse.
+              </p>
+              <div className="flex justify-end">
+                <Button variant="secondary" onClick={() => { setIndexingTarget(null); setIndexingDone(false); }}>Close</Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-red-300 mb-4">Indexing failed for snapshot <span className="font-mono text-blue-400">{indexingTarget?.short_id}</span>.</p>
+              <div className="flex justify-end">
+                <Button variant="secondary" onClick={() => { setIndexingTarget(null); setIndexingDone(false); }}>Close</Button>
+              </div>
+            </>
+          )
+        ) : (
+          <>
+            <p className="text-sm text-gray-300 mb-4">
+              Indexing snapshot <span className="font-mono text-blue-400">{indexingTarget?.short_id}</span>… This may take a moment depending on the number of files.
+            </p>
+            <div className="mb-4">
+              <div className="text-xs text-gray-400 mb-1">Building file index…</div>
+              <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                <div className="h-2 w-1/3 rounded-full bg-blue-500 animate-[slide_1.4s_ease-in-out_infinite]" />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexingTarget(null)}>Close</Button>
             </div>
           </>
         )}

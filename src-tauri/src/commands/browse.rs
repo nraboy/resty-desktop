@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, MasterKey};
 use super::repo::run_restic_with_path;
@@ -248,4 +250,96 @@ pub async fn restore_snapshot(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Shared indexing logic: runs `restic ls --json` for an entire snapshot and
+/// bulk-inserts all file entries into `browse_cache_files`. Called by both the
+/// manual `index_snapshot` command and the background `cache_warmer`.
+pub(crate) fn run_full_index(
+    db: &AppDb,
+    repo_id: &str,
+    repo: &super::cache::FullRepository,
+    snapshot_id: &str,
+    restic_path: &str,
+) -> Result<(), String> {
+    let stdout =
+        run_restic_with_path(repo, vec!["ls", "--json", snapshot_id], restic_path)?;
+    let entries: Vec<FileEntry> = stdout
+        .lines()
+        .skip(1) // first line is the snapshot summary object
+        .filter_map(|line| serde_json::from_str::<FileEntry>(line).ok())
+        .collect();
+    db.insert_browse_files(snapshot_id, &entries)?;
+    db.set_browse_status(repo_id, snapshot_id, "complete")
+}
+
+/// Manually trigger full indexing for a snapshot. Fire-and-forget: returns
+/// immediately and runs the index in the background. Safe to call on remote
+/// repos since the user explicitly requested it.
+#[tauri::command]
+pub async fn index_snapshot(
+    app: tauri::AppHandle,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    snapshot_id: String,
+) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
+
+    let status_map = db.get_browse_status(&repo_id)?;
+    if matches!(
+        status_map.get(&snapshot_id).map(|s| s.as_str()),
+        Some("complete") | Some("in_progress")
+    ) {
+        return Ok(());
+    }
+
+    db.set_browse_status(&repo_id, &snapshot_id, "in_progress")?;
+
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    tauri::async_runtime::spawn(async move {
+        let repo_path = repo.path.clone();
+        let repo_pass = repo.password.clone();
+        let snap_id = snapshot_id.clone();
+        let repo_id2 = repo_id.clone();
+        let rp = restic_path.clone();
+        let app2 = app.clone();
+
+        let ok = tauri::async_runtime::spawn_blocking(move || {
+            let tmp_repo = super::cache::FullRepository {
+                path: repo_path,
+                password: repo_pass,
+            };
+            let db_inner = app.state::<AppDb>();
+            run_full_index(&db_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+
+        if !ok {
+            let _ = app2
+                .state::<AppDb>()
+                .set_browse_status(&repo_id, &snapshot_id, "pending");
+        }
+
+        let _ = app2.emit(
+            "index:done",
+            serde_json::json!({ "snapshotId": snapshot_id, "repoId": repo_id, "success": ok }),
+        );
+    });
+
+    Ok(())
+}
+
+/// Returns a map of snapshot_id → index status for all snapshots in a repo.
+/// The frontend uses this to grey out "Index Snapshot" for already-indexed rows.
+#[tauri::command]
+pub fn get_snapshot_index_status(
+    db: State<'_, AppDb>,
+    repo_id: String,
+) -> Result<HashMap<String, String>, String> {
+    db.get_browse_status(&repo_id)
 }

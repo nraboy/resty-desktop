@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
+import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -31,6 +32,7 @@ export default function SettingsPage() {
   const [cacheCleared, setCacheCleared] = useState(false);
   const [cleaningCache, setCleaningCache] = useState(false);
   const [cleanedCount, setCleanedCount] = useState<number | null>(null);
+  const [dbSize, setDbSize] = useState<number | null>(null);
 
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [pruning, setPruning] = useState(false);
@@ -73,6 +75,7 @@ export default function SettingsPage() {
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
     checkFullDiskAccess().then(setFdaStatus).catch(() => {});
+    getDbSize().then(setDbSize).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -653,6 +656,9 @@ export default function SettingsPage() {
             </span>
           )}
         </div>
+        {dbSize !== null && (
+          <p className="text-xs text-gray-500 mt-3">Current DB Size: {formatBytes(dbSize)}</p>
+        )}
       </div>
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5 text-center">

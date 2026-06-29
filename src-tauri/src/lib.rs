@@ -1,3 +1,4 @@
+mod cache_warmer;
 mod commands;
 mod scheduler;
 
@@ -239,6 +240,7 @@ pub fn run() {
             }
 
             scheduler::spawn(app.handle().clone());
+            cache_warmer::spawn(app.handle().clone());
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -311,6 +313,8 @@ pub fn run() {
             browse::list_files,
             browse::restore_path,
             browse::restore_snapshot,
+            browse::index_snapshot,
+            browse::get_snapshot_index_status,
             // backup plans
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,
@@ -325,6 +329,7 @@ pub fn run() {
             // cache
             cache::clear_browse_cache,
             cache::clean_cache,
+            cache::get_db_size,
             cache::list_backup_history,
             // import / export
             transfer::export_data,
