@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, cleanCache, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getCompression, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import type { FullDiskAccessStatus } from "../lib/invoke";
 import { useTheme } from "../lib/theme";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
@@ -58,6 +59,9 @@ export default function SettingsPage() {
   const [passwordChanged, setPasswordChanged] = useState(false);
   const [passwordError, setPasswordError] = useState("");
 
+  const [fdaStatus, setFdaStatus] = useState<FullDiskAccessStatus | null>(null);
+  const [fdaChecking, setFdaChecking] = useState(false);
+
   useEffect(() => {
     getResticPath().then(setResticPathLocal).catch(() => {});
     getCompression().then(setCompression).catch(() => {});
@@ -68,6 +72,7 @@ export default function SettingsPage() {
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
+    checkFullDiskAccess().then(setFdaStatus).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -195,6 +200,20 @@ export default function SettingsPage() {
     setPruneCurrent(0);
     setPruneTotal(0);
     setPruneRepoName("");
+  };
+
+  const handleFdaOpen = async () => {
+    await openFullDiskAccessSettings().catch(() => {});
+  };
+
+  const handleFdaRecheck = async () => {
+    setFdaChecking(true);
+    try {
+      const status = await checkFullDiskAccess();
+      setFdaStatus(status);
+    } finally {
+      setFdaChecking(false);
+    }
   };
 
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -409,6 +428,45 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+
+      {fdaStatus?.supported && (
+        <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <h2 className="text-sm font-medium text-gray-300 mb-1">Full Disk Access</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            Backing up protected directories like <code className="text-gray-400">~/Library</code>,{" "}
+            <code className="text-gray-400">/System</code>, and <code className="text-gray-400">/private</code>{" "}
+            requires Full Disk Access. Without it, restic will encounter permission errors on those paths.
+            Note: after an app update, macOS may revoke this grant and you'll need to re-add Resty Desktop.
+          </p>
+          {fdaStatus.granted ? (
+            <div className="flex items-center gap-2 mb-3">
+              <svg className="w-4 h-4 text-green-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              <span className="text-sm text-green-400">Full Disk Access is enabled.</span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 mb-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg">
+              <svg className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+              <p className="text-xs text-amber-300">
+                <span className="font-medium">Full Disk Access is not enabled.</span>{" "}
+                Open <span className="font-medium">System Settings → Privacy &amp; Security → Full Disk Access</span>{" "}
+                and add Resty Desktop to avoid permission errors when backing up protected directories.
+              </p>
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={handleFdaOpen}>
+              Open Full Disk Access Settings
+            </Button>
+            <Button variant="secondary" onClick={handleFdaRecheck} loading={fdaChecking}>
+              Re-check
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Master Password</h2>

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { cancelBackup, forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
+import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
+import type { FullDiskAccessStatus } from "../lib/invoke";
 import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
 import { formatDuration } from "../lib/format";
+import { needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
@@ -37,6 +39,9 @@ export default function BackupPlansPage() {
   const [retentionError, setRetentionError] = useState("");
   const [retentionDone, setRetentionDone] = useState(false);
 
+  const [fdaStatus, setFdaStatus] = useState<FullDiskAccessStatus | null>(null);
+  const [fdaWarningPlan, setFdaWarningPlan] = useState<BackupPlan | null>(null);
+
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -62,7 +67,10 @@ export default function BackupPlansPage() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    checkFullDiskAccess().then(setFdaStatus).catch(() => {});
+  }, []);
 
   const repoName = (repoId: string) =>
     repos.find((r) => r.id === repoId)?.name ?? "Unknown repository";
@@ -166,10 +174,29 @@ export default function BackupPlansPage() {
   };
 
   const openBackupModal = (plan: BackupPlan) => {
+    if (
+      fdaStatus?.supported &&
+      !fdaStatus.granted &&
+      plan.paths.some(needsFullDiskAccess)
+    ) {
+      setFdaWarningPlan(plan);
+      return;
+    }
     setBackupPlan(plan);
     setBackupError("");
     setBackupDone(false);
     setProgress(null);
+  };
+
+  const proceedAfterFdaWarning = () => {
+    const plan = fdaWarningPlan;
+    setFdaWarningPlan(null);
+    if (plan) {
+      setBackupPlan(plan);
+      setBackupError("");
+      setBackupDone(false);
+      setProgress(null);
+    }
   };
 
   const stopElapsedTimer = () => {
@@ -573,6 +600,34 @@ export default function BackupPlansPage() {
             </div>
           </>
         )}
+      </Modal>
+
+      <Modal
+        title="Full Disk Access Not Detected"
+        open={!!fdaWarningPlan}
+        onClose={() => setFdaWarningPlan(null)}
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg">
+            <svg className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            </svg>
+            <p className="text-sm text-amber-300">
+              This plan includes paths protected by macOS (such as{" "}
+              <code className="text-amber-200">~/Library</code> or system directories), but Full Disk
+              Access does not appear to be granted. The backup may silently skip those paths or fail.
+            </p>
+          </div>
+          <p className="text-sm text-gray-400">
+            To fix this, grant Full Disk Access to Resty Desktop in{" "}
+            <span className="text-gray-200 font-medium">System Settings → Privacy &amp; Security → Full Disk Access</span>,
+            then relaunch the app. macOS requires a relaunch for the new permission to take effect.
+          </p>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="secondary" onClick={() => setFdaWarningPlan(null)}>Cancel</Button>
+            <Button variant="secondary" onClick={proceedAfterFdaWarning}>Run Anyway</Button>
+          </div>
+        </div>
       </Modal>
 
       <Modal

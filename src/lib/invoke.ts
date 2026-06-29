@@ -113,6 +113,12 @@ export const pruneRepo = (repoId: string): Promise<void> =>
 export const cancelPrune = (): Promise<void> =>
   invoke("cancel_prune");
 
+export interface FullDiskAccessStatus { supported: boolean; granted: boolean }
+export const checkFullDiskAccess = (): Promise<FullDiskAccessStatus> =>
+  invoke("check_full_disk_access");
+export const openFullDiskAccessSettings = (): Promise<void> =>
+  invoke("open_full_disk_access_settings");
+
 // ── snapshots ─────────────────────────────────────────────────────────────
 
 export const listSnapshots = (repoId: string): Promise<Snapshot[]> =>

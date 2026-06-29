@@ -518,3 +518,42 @@ pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), St
     }
     Ok(())
 }
+
+#[derive(Serialize)]
+pub struct FullDiskAccessStatus {
+    pub supported: bool,
+    pub granted: bool,
+}
+
+#[tauri::command]
+pub fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return Ok(FullDiskAccessStatus { supported: true, granted: false });
+        }
+        let db_path = format!("{home}/Library/Application Support/com.apple.TCC/TCC.db");
+        match std::fs::File::open(&db_path) {
+            Ok(_) => return Ok(FullDiskAccessStatus { supported: true, granted: true }),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Ok(FullDiskAccessStatus { supported: true, granted: false });
+            }
+            Err(_) => return Ok(FullDiskAccessStatus { supported: true, granted: false }),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(FullDiskAccessStatus { supported: false, granted: false })
+}
+
+#[tauri::command]
+pub fn open_full_disk_access_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .spawn()
+            .map_err(|e| format!("Failed to open System Settings: {e}"))?;
+    }
+    Ok(())
+}

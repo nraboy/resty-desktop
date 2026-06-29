@@ -290,6 +290,8 @@ pub fn run() {
             repo::prune_all_repos,
             repo::prune_repo,
             repo::cancel_prune,
+            repo::check_full_disk_access,
+            repo::open_full_disk_access_settings,
             // snapshots
             snapshot::list_snapshots,
             snapshot::refresh_snapshots,
