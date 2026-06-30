@@ -187,12 +187,14 @@ impl MasterKey {
 
 pub struct AppDb {
     conn: Mutex<Connection>,
+    db_path: std::path::PathBuf,
 }
 
 impl AppDb {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection, db_path: std::path::PathBuf) -> Self {
         Self {
             conn: Mutex::new(conn),
+            db_path,
         }
     }
 
@@ -1392,7 +1394,7 @@ impl AppDb {
 
     // ── global clear ─────────────────────────────────────────────────────────
 
-    pub fn clear_cache(&self) -> Result<(), String> {
+    pub fn clear_cache(&self) -> Result<u64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
             "DELETE FROM browse_cache_files;
@@ -1401,12 +1403,19 @@ impl AppDb {
              DELETE FROM repo_stats_cache;",
         )
         .map_err(|e| e.to_string())?;
-        // Checkpoint the WAL into the main file before vacuuming, so that
-        // VACUUM sees the deletes and can compact the main file.
+        // VACUUM rewrites all live pages into the WAL (in WAL mode). Checkpoint
+        // afterwards moves those compacted pages into the main file and truncates
+        // the WAL, so both files end up small.
+        conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(|e| e.to_string())?;
-        conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
-        Ok(())
+        // Read the file sizes while still holding the connection lock so no
+        // background thread can write a new WAL frame before we sample the size.
+        let main = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
+        let wal = std::fs::metadata(self.db_path.with_extension("db-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(main + wal)
     }
 
     /// Remove only orphaned cache rows, leaving live caches intact. Returns the
@@ -1611,7 +1620,7 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
 }
 
 #[tauri::command]
-pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<(), String> {
+pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
     db.clear_cache()
 }
 
@@ -1647,7 +1656,7 @@ mod tests {
     fn test_db() -> AppDb {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         AppDb::init_schema(&conn).unwrap();
-        AppDb::new(conn)
+        AppDb::new(conn, std::path::PathBuf::new())
     }
 
     #[test]

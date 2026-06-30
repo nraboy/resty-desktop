@@ -195,9 +195,10 @@ pub fn run() {
             });
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let conn = Connection::open(data_dir.join("app_data.db"))?;
+            let db_path = data_dir.join("app_data.db");
+            let conn = Connection::open(&db_path)?;
             cache::AppDb::init_schema(&conn)?;
-            let app_db = cache::AppDb::new(conn);
+            let app_db = cache::AppDb::new(conn, db_path);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
