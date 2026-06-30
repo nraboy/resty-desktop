@@ -64,16 +64,20 @@ src/
                             #   per-row and context-menu "Search Files" button → SearchPage
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
                             #   restore modal with strip_leading_path option; inline tag management;
-                            #   "Search" button navigates to SearchPage; accepts initialPath+initialPathStack
+                            #   "Search" button navigates to SearchPage, passing returnPath+returnStack so back
+                            #   navigation can restore the current directory depth; accepts initialPath+initialPathStack
                             #   from SearchPage so "open in browser" lands at the right directory;
-                            #   fromSearch flag in location state changes back-button destination
+                            #   fromSearch flag in location state changes back-button destination (navigate(-1)
+                            #   restores search state from history entry written by window.history.replaceState)
     SearchPage.tsx          # Full-text file search within a single snapshot at /snapshots/:repoId/:snapshotId/search;
                             #   requires snapshot to be indexed (browse_cache_files); shows index state machine
                             #   (loading→not_indexed→indexing→ready); "Index Now" triggers index_snapshot;
                             #   listens for index:done to transition to ready; debounced 300ms search via
                             #   search_snapshot_files (SQLite LIKE, capped at 200 results); clicking a result
-                            #   navigates to BrowsePage at the parent directory via browseTarget() helper;
-                            #   fromBrowse flag in location state lets back button return to BrowsePage
+                            #   writes restoredQuery+restoredResults into current history entry via
+                            #   window.history.replaceState before navigating to BrowsePage (so navigate(-1)
+                            #   restores them); back button (fromBrowse) navigates explicitly to BrowsePage
+                            #   with returnPath+returnStack to restore the correct directory depth
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;

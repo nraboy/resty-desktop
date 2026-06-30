@@ -41,17 +41,19 @@ export default function SearchPage() {
   const { repoId, snapshotId } = useParams<{ repoId: string; snapshotId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const locationState = location.state as { snapshot?: Snapshot; fromBrowse?: boolean } | null;
+  const locationState = location.state as { snapshot?: Snapshot; fromBrowse?: boolean; returnPath?: string; returnStack?: string[]; restoredQuery?: string; restoredResults?: FileEntry[] } | null;
   const snapshot = locationState?.snapshot;
   const fromBrowse = locationState?.fromBrowse ?? false;
+  const returnPath = locationState?.returnPath;
+  const returnStack = locationState?.returnStack;
 
   const [indexState, setIndexState] = useState<IndexState>("loading");
   const [indexError, setIndexError] = useState("");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<FileEntry[]>([]);
+  const [query, setQuery] = useState(locationState?.restoredQuery ?? "");
+  const [results, setResults] = useState<FileEntry[]>(locationState?.restoredResults ?? []);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [searched, setSearched] = useState(false);
+  const [searched, setSearched] = useState(locationState?.restoredQuery != null && locationState.restoredQuery.trim().length > 0);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -157,6 +159,11 @@ export default function SearchPage() {
 
   const handleResultClick = (entry: FileEntry) => {
     const { path, stack } = browseTarget(entry);
+    // Persist query+results into the current history entry so navigate(-1) from BrowsePage restores them.
+    window.history.replaceState(
+      { ...window.history.state, usr: { ...locationState, restoredQuery: query, restoredResults: results } },
+      ''
+    );
     navigate(`/snapshots/${repoId}/${snapshotId}/browse`, {
       state: { snapshot, initialPath: path, initialPathStack: stack, fromSearch: true },
     });
@@ -164,24 +171,20 @@ export default function SearchPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center gap-3 mb-6">
-        <button
-          onClick={() => fromBrowse ? navigate(-1) : navigate(`/snapshots/${repoId}`)}
-          className="p-1.5 rounded text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
-          title={fromBrowse ? "Back to browser" : "Back to snapshots"}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
-            <path fillRule="evenodd" d="M17 10a.75.75 0 01-.75.75H5.612l4.158 3.96a.75.75 0 11-1.04 1.08l-5.5-5.25a.75.75 0 010-1.08l5.5-5.25a.75.75 0 111.04 1.08L5.612 9.25H16.25A.75.75 0 0117 10z" clipRule="evenodd" />
-          </svg>
-        </button>
-        <div>
-          <h1 className="text-xl font-semibold text-gray-100">Search Files</h1>
-          {snapshot && (
-            <p className="text-sm text-gray-500 mt-0.5 font-mono">
-              {snapshot.short_id} · {formatDate(snapshot.time)}
-            </p>
-          )}
+      <div className="mb-6">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => fromBrowse
+            ? navigate(`/snapshots/${repoId}/${snapshotId}/browse`, { state: { snapshot, initialPath: returnPath, initialPathStack: returnStack ?? [] } })
+            : navigate(`/snapshots/${repoId}`)}>
+            {fromBrowse ? "← Browser" : "← Snapshots"}
+          </Button>
         </div>
+        <h1 className="text-xl font-semibold text-gray-100 mt-3">Search Files</h1>
+        {snapshot && (
+          <p className="text-sm text-gray-500 mt-0.5 font-mono">
+            {snapshot.short_id} · {formatDate(snapshot.time)}
+          </p>
+        )}
       </div>
 
       {indexState === "loading" && (

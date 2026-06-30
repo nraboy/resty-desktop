@@ -308,7 +308,7 @@ export default function BrowsePage() {
           <div className="w-px h-4 bg-gray-700 flex-shrink-0" />
           <button
             title="Search files in this snapshot"
-            onClick={() => navigate(`/snapshots/${repoId}/${snapshotId}/search`, { state: { snapshot, fromBrowse: true } })}
+            onClick={() => navigate(`/snapshots/${repoId}/${snapshotId}/search`, { state: { snapshot, fromBrowse: true, returnPath: currentPath, returnStack: pathStack } })}
             className="hover:text-gray-200 transition-colors"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
