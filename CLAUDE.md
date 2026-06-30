@@ -266,7 +266,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `commands/crypto.rs`, `commands/snapshot.rs`, and `commands/transfer.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `commands/cache.rs`, `commands/crypto.rs`, `commands/snapshot.rs`, and `commands/transfer.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash

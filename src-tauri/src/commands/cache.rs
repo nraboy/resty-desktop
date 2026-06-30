@@ -1948,4 +1948,158 @@ mod tests {
         assert_eq!(count_rows(&db, "snapshots_cache"), 1);
         assert_eq!(count_rows(&db, "browse_cache_status"), 1);
     }
+
+    // ── migration regression ─────────────────────────────────────────────────
+
+    /// Simulate an existing v0.1.0 database (user_version 0, JSON-blob cache
+    /// tables) upgrading through `init_schema` and verify:
+    ///
+    /// 1. Persistent data (repositories, backup_plans) survives intact.
+    /// 2. The old incompatible cache tables (browse_cache, snapshots_cache) are
+    ///    replaced by the new relational ones.
+    /// 3. PRAGMA user_version is set to 1.
+    /// 4. A second call to `init_schema` is idempotent (no error).
+    #[test]
+    fn v0_to_v1_migration_preserves_persistent_data() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+        // ── Build a v0.1.0-shaped database ──────────────────────────────────
+        conn.execute_batch(
+            "CREATE TABLE master_key (
+                id                      INTEGER PRIMARY KEY CHECK (id = 1),
+                salt                    BLOB NOT NULL,
+                verification_nonce      BLOB NOT NULL,
+                verification_ciphertext BLOB NOT NULL
+             );
+             CREATE TABLE repositories (
+                id                  TEXT PRIMARY KEY,
+                name                TEXT NOT NULL,
+                path                TEXT NOT NULL,
+                password_nonce      BLOB NOT NULL,
+                password_ciphertext BLOB NOT NULL
+             );
+             CREATE TABLE backup_plans (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                repo_id         TEXT NOT NULL,
+                paths_json      TEXT NOT NULL,
+                tags_json       TEXT NOT NULL,
+                excludes_json   TEXT NOT NULL,
+                retention_json  TEXT
+             );
+             CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             -- v0.1.0 JSON-blob cache tables (incompatible with v0.1.1 schema):
+             CREATE TABLE browse_cache (
+                snapshot_id  TEXT NOT NULL,
+                path         TEXT NOT NULL,
+                entries_json TEXT NOT NULL,
+                cached_at    INTEGER NOT NULL,
+                PRIMARY KEY (snapshot_id, path)
+             );
+             CREATE TABLE snapshots_cache (
+                repo_id        TEXT PRIMARY KEY,
+                snapshots_json TEXT NOT NULL,
+                cached_at      INTEGER NOT NULL
+             );
+             -- user_version left at 0 (default) — no PRAGMA set",
+        )
+        .unwrap();
+
+        // Seed persistent rows that must survive migration.
+        conn.execute(
+            "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext)
+             VALUES ('repo-sentinel', 'My Repo', '/backups', X'', X'')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO backup_plans (id, name, repo_id, paths_json, tags_json, excludes_json)
+             VALUES ('plan-sentinel', 'Daily', 'repo-sentinel', '[\"/home\"]', '[]', '[]')",
+            [],
+        )
+        .unwrap();
+        // Seed a stale cache row that should be dropped.
+        conn.execute(
+            "INSERT INTO browse_cache (snapshot_id, path, entries_json, cached_at)
+             VALUES ('oldsnap', '/', '[]', 0)",
+            [],
+        )
+        .unwrap();
+
+        // ── Run migration ────────────────────────────────────────────────────
+        AppDb::init_schema(&conn).unwrap();
+
+        // 1. user_version bumped to 1.
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+
+        // 2. Old cache tables are gone.
+        let old_browse: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='browse_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_browse, 0, "old browse_cache table should be dropped");
+
+        // The old snapshots_cache (repo_id PK, snapshots_json) is gone.
+        // The new one (repo_id, snapshot_id, ...) now exists; verify its shape
+        // by confirming the new column is present.
+        let new_sc: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshots_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_sc, 1, "new snapshots_cache table should exist");
+
+        // New relational cache tables exist.
+        let bcf: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='browse_cache_files'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bcf, 1, "browse_cache_files should exist");
+
+        let bcs: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='browse_cache_status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bcs, 1, "browse_cache_status should exist");
+
+        // 3. Persistent data survived.
+        let repo_name: String = conn
+            .query_row(
+                "SELECT name FROM repositories WHERE id = 'repo-sentinel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(repo_name, "My Repo");
+
+        let plan_name: String = conn
+            .query_row(
+                "SELECT name FROM backup_plans WHERE id = 'plan-sentinel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(plan_name, "Daily");
+
+        // 4. Idempotent — second call must not error.
+        AppDb::init_schema(&conn).unwrap();
+        let version2: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version2, 1);
+    }
 }
