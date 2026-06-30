@@ -257,7 +257,7 @@ export const describeCronExpr = (cronExpr: string): Promise<string> =>
 export const clearBrowseCache = (): Promise<number> =>
   invoke("clear_browse_cache");
 
-export const cleanCache = (): Promise<number> =>
+export const cleanCache = (): Promise<[number, number]> =>
   invoke("clean_cache");
 
 export const getDbSize = (): Promise<number> =>

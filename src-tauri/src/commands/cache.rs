@@ -1392,6 +1392,30 @@ impl AppDb {
             .collect()
     }
 
+    // ── size helper ──────────────────────────────────────────────────────────
+
+    /// Checkpoint the WAL into the main file, then return the combined on-disk
+    /// size of `app_data.db` + `app_data.db-wal`. Must be called while the
+    /// `Connection` mutex is already held by the caller so no background thread
+    /// can append WAL frames between the checkpoint and the `fs::metadata` reads.
+    fn checkpoint_and_size(&self, conn: &Connection) -> u64 {
+        // TRUNCATE mode moves all checkpointed frames into the main file and
+        // zeros the WAL, so both files reflect the true post-operation footprint.
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let main = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
+        let wal = std::fs::metadata(self.db_path.with_extension("db-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        main + wal
+    }
+
+    /// Public entry-point for the `get_db_size` command: acquires the
+    /// connection lock, checkpoints the WAL, and returns the combined size.
+    pub fn get_size(&self) -> Result<u64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Ok(self.checkpoint_and_size(&conn))
+    }
+
     // ── global clear ─────────────────────────────────────────────────────────
 
     pub fn clear_cache(&self) -> Result<u64, String> {
@@ -1407,24 +1431,16 @@ impl AppDb {
         // afterwards moves those compacted pages into the main file and truncates
         // the WAL, so both files end up small.
         conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(|e| e.to_string())?;
-        // Read the file sizes while still holding the connection lock so no
-        // background thread can write a new WAL frame before we sample the size.
-        let main = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
-        let wal = std::fs::metadata(self.db_path.with_extension("db-wal"))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        Ok(main + wal)
+        Ok(self.checkpoint_and_size(&conn))
     }
 
-    /// Remove only orphaned cache rows, leaving live caches intact. Returns the
-    /// number of rows deleted. Orphans are:
+    /// Remove only orphaned cache rows, leaving live caches intact. Returns
+    /// `(rows_deleted, db_size_bytes)`. Orphans are:
     ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
     ///     exists in `repositories` (e.g. a deleted repo),
     ///   - `browse_cache_files` / `browse_cache_status` rows whose `snapshot_id`
     ///     is not referenced by any remaining `snapshots_cache` entry.
-    pub fn clean_cache(&self) -> Result<u64, String> {
+    pub fn clean_cache(&self) -> Result<(u64, u64), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut removed = 0u64;
@@ -1462,7 +1478,10 @@ impl AppDb {
             .map_err(|e| e.to_string())? as u64;
 
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(removed)
+        // Checkpoint under the still-held lock so the size read sees exactly
+        // what's on disk, with no background WAL writes racing in between.
+        let size = self.checkpoint_and_size(&conn);
+        Ok((removed, size))
     }
 
     /// Wipe all user data. Returns app to first-launch state.
@@ -1625,23 +1644,13 @@ pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
+pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<(u64, u64), String> {
     db.clean_cache()
 }
 
 #[tauri::command]
-pub fn get_db_size(app: tauri::AppHandle) -> Result<u64, String> {
-    use tauri::Manager;
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("app_data.db");
-    let main = std::fs::metadata(&base).map(|m| m.len()).unwrap_or(0);
-    let wal = std::fs::metadata(base.with_extension("db-wal"))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    Ok(main + wal)
+pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
+    db.get_size()
 }
 
 #[tauri::command]
@@ -1862,5 +1871,81 @@ mod tests {
         let history = db.list_backup_history().unwrap();
         assert_eq!(history[0].id, "late");
         assert_eq!(history[1].id, "early");
+    }
+
+    // ── clear_cache / clean_cache ────────────────────────────────────────────
+
+    fn seed_repo(db: &AppDb, repo_id: &str) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO repositories
+                 (id, name, path, password_nonce, password_ciphertext)
+                 VALUES (?1, ?2, ?3, X'', X'')",
+                rusqlite::params![repo_id, repo_id, "/tmp/fake"],
+            )
+            .unwrap();
+    }
+
+    fn count_rows(db: &AppDb, table: &str) -> u64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+            r.get::<_, u64>(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn clear_cache_empties_all_cache_tables() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+
+        db.clear_cache().unwrap();
+
+        assert_eq!(count_rows(&db, "snapshots_cache"), 0);
+        assert_eq!(count_rows(&db, "repo_stats_cache"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+    }
+
+    #[test]
+    fn clean_cache_removes_only_orphaned_rows() {
+        let db = test_db();
+        seed_repo(&db, "live-repo");
+        seed_snapshot(&db, "live-repo", "aaaa111100000000");
+        db.set_browse_status("live-repo", "aaaa111100000000", "complete").unwrap();
+
+        // Seed orphaned rows: snapshot for a repo that no longer exists.
+        seed_snapshot(&db, "dead-repo", "bbbb222200000000");
+        db.set_browse_status("dead-repo", "bbbb222200000000", "complete").unwrap();
+
+        let (removed, _size) = db.clean_cache().unwrap();
+
+        // Two rows from snapshots_cache + two from browse_cache_status for
+        // dead-repo should be removed (browse_cache_files had no rows, but the
+        // snapshots_cache row for dead-repo is removed first, causing the
+        // browse_cache_status row to be orphaned next).
+        assert!(removed >= 2, "expected ≥2 orphaned rows, got {removed}");
+
+        // Live repo's rows must still be present.
+        assert_eq!(count_rows(&db, "snapshots_cache"), 1);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 1);
+    }
+
+    #[test]
+    fn clean_cache_returns_zero_when_nothing_orphaned() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+
+        let (removed, _size) = db.clean_cache().unwrap();
+        assert_eq!(removed, 0);
+        // All rows still present.
+        assert_eq!(count_rows(&db, "snapshots_cache"), 1);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 1);
     }
 }

@@ -147,11 +147,11 @@ export default function SettingsPage() {
   const handleCleanCache = async () => {
     setCleaningCache(true);
     try {
-      const removed = await cleanCache();
+      const [removed, newSize] = await cleanCache();
       setCleanedCount(removed);
+      setDbSize(newSize);
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
       cleanTimerRef.current = setTimeout(() => setCleanedCount(null), 4000);
-      getDbSize().then(setDbSize).catch(() => {});
     } finally {
       setCleaningCache(false);
     }
