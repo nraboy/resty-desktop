@@ -31,11 +31,13 @@ export default function BrowsePage() {
   const { repoId, snapshotId } = useParams<{ repoId: string; snapshotId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const snapshot = (location.state as { snapshot?: Snapshot } | null)?.snapshot;
+  const locationState = location.state as { snapshot?: Snapshot; initialPath?: string; initialPathStack?: string[]; fromSearch?: boolean } | null;
+  const snapshot = locationState?.snapshot;
+  const fromSearch = locationState?.fromSearch ?? false;
   const [repo, setRepo] = useState<Repository | null>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [currentPath, setCurrentPath] = useState<string | undefined>(undefined);
-  const [pathStack, setPathStack] = useState<string[]>([]);
+  const [currentPath, setCurrentPath] = useState<string | undefined>(locationState?.initialPath);
+  const [pathStack, setPathStack] = useState<string[]>(locationState?.initialPathStack ?? []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<FileEntry | null>(null);
@@ -88,7 +90,9 @@ export default function BrowsePage() {
   );
 
   useEffect(() => {
-    load();
+    load(locationState?.initialPath);
+  // locationState is stable (from router, never changes for this mount)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 
   const enterDir = useCallback((entry: FileEntry) => {
@@ -209,9 +213,17 @@ export default function BrowsePage() {
   return (
     <div className="p-6">
       <div className="mb-6">
-        <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>
-          ← Snapshots
-        </Button>
+        <div className="flex items-center gap-3">
+          {fromSearch ? (
+            <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
+              ← Search
+            </Button>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>
+              ← Snapshots
+            </Button>
+          )}
+        </div>
         <h1 className="text-xl font-semibold text-gray-100 mt-3">Browse Snapshot</h1>
         {repo && (
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -293,6 +305,16 @@ export default function BrowsePage() {
             />
             Show hidden files
           </label>
+          <div className="w-px h-4 bg-gray-700 flex-shrink-0" />
+          <button
+            title="Search files in this snapshot"
+            onClick={() => navigate(`/snapshots/${repoId}/${snapshotId}/search`, { state: { snapshot, fromBrowse: true } })}
+            className="hover:text-gray-200 transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+            </svg>
+          </button>
         </div>
       </div>
 

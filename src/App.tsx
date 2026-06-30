@@ -14,6 +14,7 @@ import SchedulesPage from "./pages/SchedulesPage";
 import ScheduleEditPage from "./pages/ScheduleEditPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
+import SearchPage from "./pages/SearchPage";
 import AuthPage from "./pages/AuthPage";
 import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
@@ -173,6 +174,7 @@ export default function App() {
                     <Route path="/" element={<RepositoriesPage />} />
                     <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
                     <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
+                    <Route path="/snapshots/:repoId/:snapshotId/search" element={<SearchPage />} />
                     <Route path="/snapshots/:repoId/diff/:snapshotA/:snapshotB" element={<DiffPage />} />
                     <Route path="/backup-plans" element={<BackupPlansPage />} />
                     <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />

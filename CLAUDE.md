@@ -60,9 +60,20 @@ src/
                             #   pagination (PAGE_SIZE=10); filter with × clear; right-click context menu;
                             #   multi-select mode: bulk delete and copy with progress bars;
                             #   per-row "Index Snapshot" action with progress modal; listens for index:done to update
-                            #   per-row status map live; listens for snapshots:refreshed to reload list when warmer updates cache
+                            #   per-row status map live; listens for snapshots:refreshed to reload list when warmer updates cache;
+                            #   per-row and context-menu "Search Files" button → SearchPage
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
-                            #   restore modal with strip_leading_path option; inline tag management
+                            #   restore modal with strip_leading_path option; inline tag management;
+                            #   "Search" button navigates to SearchPage; accepts initialPath+initialPathStack
+                            #   from SearchPage so "open in browser" lands at the right directory;
+                            #   fromSearch flag in location state changes back-button destination
+    SearchPage.tsx          # Full-text file search within a single snapshot at /snapshots/:repoId/:snapshotId/search;
+                            #   requires snapshot to be indexed (browse_cache_files); shows index state machine
+                            #   (loading→not_indexed→indexing→ready); "Index Now" triggers index_snapshot;
+                            #   listens for index:done to transition to ready; debounced 300ms search via
+                            #   search_snapshot_files (SQLite LIKE, capped at 200 results); clicking a result
+                            #   navigates to BrowsePage at the parent directory via browseTarget() helper;
+                            #   fromBrowse flag in location state lets back button return to BrowsePage
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;
@@ -110,7 +121,8 @@ src-tauri/
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
                      #   index_snapshot (fire-and-forget manual indexing, emits index:done when complete);
                      #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
-                     #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files
+                     #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files;
+                     #   search_snapshot_files (requires "complete" index): LIKE search on name+path in browse_cache_files, capped at 200 results
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
       schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr;
                      #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
@@ -123,7 +135,8 @@ src-tauri/
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first);
                      #   clear_cache: DELETE all cache tables + PRAGMA wal_checkpoint(TRUNCATE) + VACUUM to reclaim disk space;
-                     #   get_db_size: sums app_data.db + app_data.db-wal for accurate WAL-mode reporting
+                     #   get_db_size: sums app_data.db + app_data.db-wal for accurate WAL-mode reporting;
+                     #   search_browse_files: SQLite LIKE search on browse_cache_files (name OR path), escapes metacharacters, limit param
   cache_warmer.rs    # Background sweep spawned at unlock; 10s initial delay, then 60s tick forever.
                      #   Each tick: (1) refresh_all_snapshots — always runs, calls restic snapshots --json for every
                      #   eligible repo and updates snapshots_cache, emits snapshots:refreshed per repo;
@@ -142,6 +155,7 @@ src-tauri/
 | `/` | RepositoriesPage |
 | `/snapshots/:repoId` | SnapshotsPage |
 | `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
+| `/snapshots/:repoId/:snapshotId/search` | SearchPage |
 | `/snapshots/:repoId/diff/:snapshotA/:snapshotB` | DiffPage |
 | `/backup-plans` | BackupPlansPage |
 | `/backup-plans/:planId` | BackupPlanEditPage (`planId="new"` for creation) |

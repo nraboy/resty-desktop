@@ -796,6 +796,44 @@ impl AppDb {
         Ok(())
     }
 
+    /// Full-text substring search across all indexed files in a snapshot.
+    /// Matches against both the file name and the full path.
+    pub fn search_browse_files(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FileEntry>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Escape LIKE metacharacters in the user's query so they're treated literally.
+        let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, path, entry_type, size, mtime, mode
+                 FROM browse_cache_files
+                 WHERE snapshot_id = ?1
+                   AND (name LIKE ?2 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\')
+                 ORDER BY path
+                 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let entries = stmt
+            .query_map(params![snapshot_id, pattern, limit as i64], |row| {
+                Ok(FileEntry {
+                    name: row.get(0)?,
+                    path: row.get(1)?,
+                    entry_type: row.get(2)?,
+                    size: row.get(3)?,
+                    mtime: row.get(4)?,
+                    mode: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(entries)
+    }
+
     /// Bulk-insert file entries for a snapshot (used by the cache warmer and manual indexing).
     /// Inserts in chunks of 500 to avoid holding the mutex for excessive time.
     pub fn insert_browse_files(

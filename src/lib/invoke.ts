@@ -199,6 +199,9 @@ export const listFiles = (repoId: string, snapshotId: string, path?: string): Pr
 export const indexSnapshot = (repoId: string, snapshotId: string): Promise<boolean> =>
   invoke("index_snapshot", { repoId, snapshotId });
 
+export const searchSnapshotFiles = (repoId: string, snapshotId: string, query: string): Promise<FileEntry[]> =>
+  invoke("search_snapshot_files", { repoId, snapshotId, query });
+
 export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, string>> =>
   invoke("get_snapshot_index_status", { repoId });
 

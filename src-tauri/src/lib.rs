@@ -316,6 +316,7 @@ pub fn run() {
             browse::restore_path,
             browse::restore_snapshot,
             browse::index_snapshot,
+            browse::search_snapshot_files,
             browse::get_snapshot_index_status,
             // backup plans
             backup_plan::list_backup_plans,

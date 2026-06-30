@@ -334,6 +334,33 @@ pub async fn index_snapshot(
     Ok(true)
 }
 
+#[tauri::command]
+pub fn search_snapshot_files(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    snapshot_id: String,
+    query: String,
+) -> Result<Vec<FileEntry>, String> {
+    validate_snapshot_id(&snapshot_id)?;
+    let trimmed = query.trim().to_owned();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+    let status_map = db.get_browse_status(&repo_id)?;
+    match status_map.get(&snapshot_id).map(|s| s.as_str()) {
+        Some("complete") => {}
+        Some("in_progress") => {
+            return Err("Snapshot is currently being indexed — try again shortly.".to_string())
+        }
+        _ => {
+            return Err(
+                "Snapshot is not indexed. Index it first to enable search.".to_string(),
+            )
+        }
+    }
+    db.search_browse_files(&snapshot_id, &trimmed, 200)
+}
+
 /// Returns a map of snapshot_id → index status for all snapshots in a repo.
 /// The frontend uses this to grey out "Index Snapshot" for already-indexed rows.
 #[tauri::command]
