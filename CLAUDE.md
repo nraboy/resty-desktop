@@ -59,8 +59,11 @@ src/
                             #   full-snapshot restore with streaming progress; per-snapshot copy with cancellation;
                             #   pagination (PAGE_SIZE=10); filter with × clear; right-click context menu;
                             #   multi-select mode: bulk delete and copy with progress bars;
-                            #   per-row "Index Snapshot" action with progress modal; listens for index:done to update
-                            #   per-row status map live; listens for snapshots:refreshed to reload list when warmer updates cache;
+                            #   per-row "Index Snapshot" / "Remove Index" context-menu item toggles based on index status:
+                            #   shows "Index Snapshot" (disabled while in_progress) or "Remove Index" (active when complete);
+                            #   "Remove Index" calls clear_snapshot_index and removes the snapshot from the local status map;
+                            #   "Index Snapshot" shows a progress modal; listens for index:done to update per-row status map live;
+                            #   listens for snapshots:refreshed to reload list when warmer updates cache;
                             #   per-row and context-menu "Search Files" button → SearchPage
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
                             #   restore modal with strip_leading_path option; inline tag management;
@@ -125,6 +128,7 @@ src-tauri/
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
                      #   index_snapshot (fire-and-forget manual indexing, emits index:done when complete);
                      #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
+                     #   clear_snapshot_index: deletes browse_cache_files + browse_cache_status for one snapshot via db.evict();
                      #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files;
                      #   search_snapshot_files (requires "complete" index): LIKE search on name+path in browse_cache_files, capped at 200 results
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name

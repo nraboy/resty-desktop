@@ -205,6 +205,9 @@ export const searchSnapshotFiles = (repoId: string, snapshotId: string, query: s
 export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, string>> =>
   invoke("get_snapshot_index_status", { repoId });
 
+export const clearSnapshotIndex = (repoId: string, snapshotId: string): Promise<void> =>
+  invoke("clear_snapshot_index", { repoId, snapshotId });
+
 export const restorePath = (
   repoId: string,
   snapshotId: string,

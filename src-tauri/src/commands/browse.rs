@@ -371,6 +371,18 @@ pub fn get_snapshot_index_status(
     db.get_browse_status(&repo_id)
 }
 
+/// Removes the browse cache (files + status) for a single snapshot.
+/// The frontend uses this to let the user clear an index without wiping all caches.
+#[tauri::command]
+pub fn clear_snapshot_index(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    snapshot_id: String,
+) -> Result<(), String> {
+    validate_snapshot_id(&snapshot_id)?;
+    db.evict(&repo_id, &snapshot_id)
+}
+
 
 
 #[cfg(test)]

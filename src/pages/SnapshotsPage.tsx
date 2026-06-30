@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
@@ -1134,27 +1134,46 @@ export default function SnapshotsPage() {
               },
             },
             { separator: true },
-            {
-              label: "Index Snapshot",
-              disabled: indexStatus[contextMenu.snap.id] === "complete" || indexStatus[contextMenu.snap.id] === "in_progress",
-              onClick: async () => {
-                const snap = contextMenu.snap;
-                setContextMenu(null);
-                let started = false;
-                try { started = await indexSnapshot(repoId!, snap.id); }
-                catch { started = false; }
-                if (!started) {
-                  // Already complete or in progress (e.g. warmer mid-flight):
-                  // reconcile the row's true state instead of opening a modal.
-                  getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
-                  return;
-                }
-                setIndexingTarget(snap);
-                setIndexingDone(false);
-                setIndexingSuccess(true);
-                setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
-              },
-            },
+            ...(indexStatus[contextMenu.snap.id] === "complete"
+              ? [{
+                  label: "Remove Index",
+                  onClick: async () => {
+                    const snap = contextMenu.snap;
+                    setContextMenu(null);
+                    try {
+                      await clearSnapshotIndex(repoId!, snap.id);
+                      setIndexStatus((prev) => {
+                        const next = { ...prev };
+                        delete next[snap.id];
+                        return next;
+                      });
+                    } catch {
+                      // Reconcile true state on failure.
+                      getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
+                    }
+                  },
+                }]
+              : [{
+                  label: "Index Snapshot",
+                  disabled: indexStatus[contextMenu.snap.id] === "in_progress",
+                  onClick: async () => {
+                    const snap = contextMenu.snap;
+                    setContextMenu(null);
+                    let started = false;
+                    try { started = await indexSnapshot(repoId!, snap.id); }
+                    catch { started = false; }
+                    if (!started) {
+                      // Already complete or in progress (e.g. warmer mid-flight):
+                      // reconcile the row's true state instead of opening a modal.
+                      getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
+                      return;
+                    }
+                    setIndexingTarget(snap);
+                    setIndexingDone(false);
+                    setIndexingSuccess(true);
+                    setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
+                  },
+                }]),
             {
               label: "Snapshot Stats",
               onClick: () => {
