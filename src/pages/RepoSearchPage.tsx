@@ -107,7 +107,14 @@ export default function RepoSearchPage() {
     return () => { cancelled = true; };
   }, [repoId]);
 
+  // Guards against out-of-order responses: the backend query can take a second
+  // or more, so a burst of keystrokes (or an index:done-triggered re-search) can
+  // have several searches in flight at once. Only the response matching the
+  // latest call is allowed to update state.
+  const searchSeqRef = useRef(0);
+
   const runSearch = useCallback(async (q: string) => {
+    const seq = ++searchSeqRef.current;
     if (!repoId || !q.trim()) {
       setResults([]);
       setSearched(false);
@@ -117,12 +124,14 @@ export default function RepoSearchPage() {
     setSearchError("");
     try {
       const data = await searchRepoFiles(repoId, q);
+      if (seq !== searchSeqRef.current) return;
       setResults(data);
       setSearched(true);
     } catch (err: any) {
+      if (seq !== searchSeqRef.current) return;
       setSearchError(String(err));
     } finally {
-      setSearching(false);
+      if (seq === searchSeqRef.current) setSearching(false);
     }
   }, [repoId]);
 
@@ -179,6 +188,7 @@ export default function RepoSearchPage() {
     setQuery(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!value.trim()) {
+      searchSeqRef.current++;
       setResults([]);
       setSearched(false);
       return;
@@ -208,7 +218,7 @@ export default function RepoSearchPage() {
         </div>
         <h1 className="text-xl font-semibold text-gray-100 mt-3">Search Repository</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Search files across every indexed snapshot in this repository.
+          Search files across every indexed snapshot in this repository. Each match only shows the most recent snapshot that contains it.
         </p>
       </div>
 

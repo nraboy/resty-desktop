@@ -350,8 +350,14 @@ pub async fn index_snapshot(
     Ok(true)
 }
 
+/// Runs on a blocking-pool thread (via `spawn_blocking`) rather than inline: this query
+/// can take a second or more against a large index, and running it synchronously on an
+/// async worker thread would hold the shared `AppDb` mutex there, starving unrelated
+/// commands (snapshot list refreshes, status polling, the cache warmer tick) that also
+/// need that mutex and would otherwise queue behind it.
 #[tauri::command]
-pub fn search_snapshot_files(
+pub async fn search_snapshot_files(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     repo_id: String,
     snapshot_id: String,
@@ -374,15 +380,21 @@ pub fn search_snapshot_files(
             )
         }
     }
-    db.search_browse_files(&snapshot_id, &trimmed, 200)
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.search_browse_files(&snapshot_id, &trimmed, 200)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Searches all fully-indexed snapshots of a repo at once. Each matching path
 /// is returned once, attributed to the newest snapshot containing it (the
 /// dedup + "pick newest" logic lives in the SQL, see `AppDb::search_repo_files`).
+/// See `search_snapshot_files` above for why this runs via `spawn_blocking`.
 #[tauri::command]
-pub fn search_repo_files(
-    db: State<'_, AppDb>,
+pub async fn search_repo_files(
+    app: tauri::AppHandle,
     repo_id: String,
     query: String,
 ) -> Result<Vec<RepoFileHit>, String> {
@@ -390,7 +402,12 @@ pub fn search_repo_files(
     if trimmed.is_empty() {
         return Ok(vec![]);
     }
-    db.search_repo_files(&repo_id, &trimmed, 200)
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.search_repo_files(&repo_id, &trimmed, 200)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Returns a map of snapshot_id → index status for all snapshots in a repo.

@@ -127,7 +127,13 @@ export default function SearchPage() {
     }
   };
 
+  // Guards against out-of-order responses: the backend query can take a second
+  // or more, so a burst of keystrokes can have several searches in flight at
+  // once. Only the response matching the latest call is allowed to update state.
+  const searchSeqRef = useRef(0);
+
   const runSearch = useCallback(async (q: string) => {
+    const seq = ++searchSeqRef.current;
     if (!repoId || !snapshotId || !q.trim()) {
       setResults([]);
       setSearched(false);
@@ -137,12 +143,14 @@ export default function SearchPage() {
     setSearchError("");
     try {
       const data = await searchSnapshotFiles(repoId, snapshotId, q);
+      if (seq !== searchSeqRef.current) return;
       setResults(data);
       setSearched(true);
     } catch (err: any) {
+      if (seq !== searchSeqRef.current) return;
       setSearchError(String(err));
     } finally {
-      setSearching(false);
+      if (seq === searchSeqRef.current) setSearching(false);
     }
   }, [repoId, snapshotId]);
 
@@ -150,6 +158,7 @@ export default function SearchPage() {
     setQuery(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!value.trim()) {
+      searchSeqRef.current++;
       setResults([]);
       setSearched(false);
       return;
