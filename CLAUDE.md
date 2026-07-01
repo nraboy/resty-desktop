@@ -80,7 +80,18 @@ src/
                             #   writes restoredQuery+restoredResults into current history entry via
                             #   window.history.replaceState before navigating to BrowsePage (so navigate(-1)
                             #   restores them); back button (fromBrowse) navigates explicitly to BrowsePage
-                            #   with returnPath+returnStack to restore the correct directory depth
+                            #   with returnPath+returnStack to restore the correct directory depth;
+                            #   searchSeqRef guards against out-of-order responses — a burst of keystrokes can
+                            #   have several (slow, ~1s+) searches in flight, so only the response matching the
+                            #   latest call is applied to state
+    RepoSearchPage.tsx      # File search across every indexed snapshot in a repo at /snapshots/:repoId/search;
+                            #   same index/debounce/stale-response-guard pattern as SearchPage.tsx, but backed by
+                            #   search_repo_files, which dedups each matching path to the newest snapshot
+                            #   containing it (shown as a snapshot short-id badge per result; clicking opens that
+                            #   snapshot's BrowsePage). Banner shows "Searching N of M snapshots" with an "Index
+                            #   All" action when the repo is only partially indexed; a modal with a real
+                            #   progress bar (derived from index:done events matched against the batch's target
+                            #   snapshot ids) tracks the Index All run
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;
@@ -130,7 +141,10 @@ src-tauri/
                      #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
                      #   clear_snapshot_index: deletes browse_cache_files + browse_cache_status for one snapshot via db.evict();
                      #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files;
-                     #   search_snapshot_files (requires "complete" index): LIKE search on name+path in browse_cache_files, capped at 200 results
+                     #   search_snapshot_files (requires "complete" index): LIKE search on name+path in browse_cache_files, capped at 200 results;
+                     #   search_repo_files: LIKE search across every "complete" snapshot in a repo via AppDb::search_repo_files,
+                     #   capped at 200 results; both search commands are async and run the actual query via
+                     #   tauri::async_runtime::spawn_blocking — see Persistence & Caching for why
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
       schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr;
                      #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
@@ -144,7 +158,9 @@ src-tauri/
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first);
                      #   clear_cache: DELETE all cache tables + PRAGMA wal_checkpoint(TRUNCATE) + VACUUM to reclaim disk space;
                      #   get_db_size: sums app_data.db + app_data.db-wal for accurate WAL-mode reporting;
-                     #   search_browse_files: SQLite LIKE search on browse_cache_files (name OR path), escapes metacharacters, limit param
+                     #   search_browse_files: SQLite LIKE search on browse_cache_files (name OR path), escapes metacharacters, limit param;
+                     #   search_repo_files: repo-wide variant — joins browse_cache_files/snapshots_cache/browse_cache_status,
+                     #   GROUP BY path + MAX(time) dedups each matching path down to the newest snapshot containing it
   cache_warmer.rs    # Background sweep spawned at unlock; 10s initial delay, then 60s tick forever.
                      #   Each tick: (1) refresh_all_snapshots — always runs, calls restic snapshots --json for every
                      #   eligible repo and updates snapshots_cache, emits snapshots:refreshed per repo;
@@ -162,6 +178,7 @@ src-tauri/
 |---|---|
 | `/` | RepositoriesPage |
 | `/snapshots/:repoId` | SnapshotsPage |
+| `/snapshots/:repoId/search` | RepoSearchPage |
 | `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
 | `/snapshots/:repoId/:snapshotId/search` | SearchPage |
 | `/snapshots/:repoId/diff/:snapshotA/:snapshotB` | DiffPage |
@@ -207,6 +224,7 @@ src-tauri/
 - `clear_browse_cache` (Clear All Cache): DELETEs all cache tables, then `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` to reclaim disk space from the WAL and compact the main file.
 - `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert, matching the read limit so the Logs page never loses visible rows.
 - Background cache warmer: every 60s, snapshot metadata is refreshed for all eligible repos (always). File indexing (browse_cache) is pre-populated in the background only when `auto_indexing` is enabled. Both phases skip remote repos unless `remote_auto_refresh` is on.
+- `AppDb` holds one `Mutex<Connection>` — every command using `AppDb` shares that single lock, so a slow synchronous query (e.g. a repo-wide `LIKE` search over hundreds of thousands of cached file rows, ~1s+) held on a core async-runtime thread starves *every other* command that also touches `AppDb` (snapshot refreshes, index-status polling, the cache warmer tick) until it finishes. Any new command doing DB work slow enough to notice should be `async fn` and run the actual query via `tauri::async_runtime::spawn_blocking` (see `search_snapshot_files`/`search_repo_files`, or the existing `index_snapshot`/`restore_snapshot`) so it occupies a blocking-pool thread instead of a scarce core worker thread.
 
 ## Import / Export
 
