@@ -831,6 +831,10 @@ export default function RepositoriesPage() {
               label: "Open Snapshots",
               onClick: () => navigate(`/snapshots/${contextMenu.repo.id}`),
             },
+            {
+              label: "Search Files…",
+              onClick: () => navigate(`/snapshots/${contextMenu.repo.id}/search`),
+            },
             { separator: true },
             {
               label: "Refresh Stats",

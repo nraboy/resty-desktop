@@ -28,6 +28,19 @@ export interface FileEntry {
   mode?: number;
 }
 
+// A file match from a repo-wide search, attributed to the (newest) snapshot
+// containing it so the frontend can open the correct BrowsePage.
+export interface RepoFileHit {
+  name: string;
+  path: string;
+  type: "file" | "dir" | "symlink" | "other";
+  size?: number;
+  mtime?: string;
+  mode?: number;
+  snapshotId: string;
+  snapshotShortId: string;
+}
+
 export interface ResticStats {
   total_size: number;
   total_file_count: number;

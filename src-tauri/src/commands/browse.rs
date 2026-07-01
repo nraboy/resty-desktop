@@ -19,6 +19,22 @@ pub struct FileEntry {
     pub mode: Option<u32>,
 }
 
+/// A file match from a repo-wide search, attributed to the (newest) snapshot
+/// containing it so the frontend can open the correct BrowsePage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFileHit {
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    pub size: Option<u64>,
+    pub mtime: Option<String>,
+    pub mode: Option<u32>,
+    pub snapshot_id: String,
+    pub snapshot_short_id: String,
+}
+
 fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
     let clean = entry_path.trim_end_matches('/');
     match parent {
@@ -359,6 +375,22 @@ pub fn search_snapshot_files(
         }
     }
     db.search_browse_files(&snapshot_id, &trimmed, 200)
+}
+
+/// Searches all fully-indexed snapshots of a repo at once. Each matching path
+/// is returned once, attributed to the newest snapshot containing it (the
+/// dedup + "pick newest" logic lives in the SQL, see `AppDb::search_repo_files`).
+#[tauri::command]
+pub fn search_repo_files(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    query: String,
+) -> Result<Vec<RepoFileHit>, String> {
+    let trimmed = query.trim().to_owned();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+    db.search_repo_files(&repo_id, &trimmed, 200)
 }
 
 /// Returns a map of snapshot_id → index status for all snapshots in a repo.

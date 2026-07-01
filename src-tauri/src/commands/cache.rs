@@ -836,6 +836,53 @@ impl AppDb {
         Ok(entries)
     }
 
+    /// Searches all fully-indexed snapshots of a repo. Each matching path is
+    /// returned once, resolved to the newest snapshot containing it — `GROUP BY path`
+    /// collapses duplicates and the `MAX(sc.time)` + join-back picks the winning row's
+    /// snapshot_id/short_id via SQLite's "bare column takes the row of the MAX aggregate"
+    /// behavior within a GROUP BY (each column comes from the same row as the MAX).
+    pub fn search_repo_files(
+        &self,
+        repo_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<super::browse::RepoFileHit>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
+        let mut stmt = conn
+            .prepare(
+                "SELECT bcf.name, bcf.path, bcf.entry_type, bcf.size, bcf.mtime, bcf.mode,
+                        bcf.snapshot_id, sc.short_id, MAX(sc.time)
+                 FROM browse_cache_files bcf
+                 JOIN snapshots_cache sc
+                   ON bcf.snapshot_id = sc.snapshot_id AND sc.repo_id = ?1
+                 JOIN browse_cache_status bcs
+                   ON bcs.snapshot_id = bcf.snapshot_id AND bcs.repo_id = ?1 AND bcs.status = 'complete'
+                 WHERE (bcf.name LIKE ?2 ESCAPE '\\' OR bcf.path LIKE ?2 ESCAPE '\\')
+                 GROUP BY bcf.path
+                 ORDER BY bcf.path
+                 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let hits = stmt
+            .query_map(params![repo_id, pattern, limit as i64], |row| {
+                Ok(super::browse::RepoFileHit {
+                    name: row.get(0)?,
+                    path: row.get(1)?,
+                    entry_type: row.get(2)?,
+                    size: row.get(3)?,
+                    mtime: row.get(4)?,
+                    mode: row.get(5)?,
+                    snapshot_id: row.get(6)?,
+                    snapshot_short_id: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(hits)
+    }
+
     /// Bulk-insert file entries for a snapshot (used by the cache warmer and manual indexing).
     /// Inserts in chunks of 500 to avoid holding the mutex for excessive time.
     pub fn insert_browse_files(
@@ -1686,6 +1733,53 @@ mod tests {
         // Verify repoB's status remains.
         let status_b = db.get_browse_status("repoB").unwrap();
         assert_eq!(status_b.get("snap123"), Some(&"complete".to_string()));
+    }
+
+    #[test]
+    fn search_repo_files_dedups_to_newest_snapshot_and_excludes_unindexed() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        // Two indexed ("complete") snapshots, both containing the same path,
+        // plus one pending snapshot whose files must be excluded entirely.
+        let json = r#"[
+            {"id":"snap-old00000000","short_id":"snapold0","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-new00000000","short_id":"snapnew0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-pending0000","short_id":"snappend","time":"2024-09-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-old00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-new00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-pending0000", "pending").unwrap();
+
+        let shared_entry = FileEntry {
+            name: "notes.txt".to_string(),
+            path: "/home/notes.txt".to_string(),
+            entry_type: "file".to_string(),
+            size: Some(10),
+            mtime: None,
+            mode: None,
+        };
+        let only_in_pending = FileEntry {
+            name: "secret.txt".to_string(),
+            path: "/home/secret.txt".to_string(),
+            entry_type: "file".to_string(),
+            size: Some(5),
+            mtime: None,
+            mode: None,
+        };
+        db.insert_browse_files("snap-old00000000", &[shared_entry.clone()]).unwrap();
+        db.insert_browse_files("snap-new00000000", &[shared_entry]).unwrap();
+        db.insert_browse_files("snap-pending0000", &[only_in_pending]).unwrap();
+
+        let hits = db.search_repo_files(repo_id, "notes", 200).unwrap();
+        assert_eq!(hits.len(), 1, "duplicate path across snapshots should be deduped");
+        assert_eq!(hits[0].path, "/home/notes.txt");
+        assert_eq!(hits[0].snapshot_id, "snap-new00000000", "should resolve to the newest snapshot");
+        assert_eq!(hits[0].snapshot_short_id, "snapnew0");
+
+        let pending_hits = db.search_repo_files(repo_id, "secret", 200).unwrap();
+        assert!(pending_hits.is_empty(), "files from a non-complete snapshot must be excluded");
     }
 
     fn seed_snapshot(db: &AppDb, repo_id: &str, snapshot_id: &str) {

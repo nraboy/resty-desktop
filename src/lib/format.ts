@@ -16,10 +16,17 @@ export function formatSize(bytes?: number): string {
   return formatBytes(bytes);
 }
 
-/** Format an ISO string or a Unix-seconds timestamp as a locale date-time. */
+/** Format an ISO string or a Unix-seconds timestamp as a locale date-time, zero-padded (e.g. "06/01/2026, 03:45:12 PM"). */
 export function formatDate(value: string | number): string {
   const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
-  return date.toLocaleString();
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 /** Like formatDate for Unix-seconds, but renders missing values as "Never". */
