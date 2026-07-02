@@ -199,6 +199,11 @@ impl AppDb {
     }
 
     pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+        // No-op on a database that already has tables — page_size can only be
+        // changed on an empty database (or via VACUUM). Harmless to attempt
+        // unconditionally on every launch.
+        let _ = conn.execute_batch("PRAGMA page_size = 8192;");
+
         // v0 → v1: replace JSON-blob browse_cache and snapshots_cache with relational tables.
         // Cache loss is safe — the app falls back to live restic fetches.
         let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -208,6 +213,24 @@ impl AppDb {
                  DROP TABLE IF EXISTS snapshots_cache;
                  PRAGMA user_version = 1;",
             )?;
+        }
+        if version < 2 {
+            // browse_cache_files/status schema changed (snapshot_id interned to
+            // an integer, name/per-row cached_at dropped) — both tables are a
+            // disposable cache rebuildable via restic ls, so just drop and let
+            // re-indexing repopulate.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS browse_cache_files;
+                 DROP TABLE IF EXISTS browse_cache_status;
+                 PRAGMA user_version = 2;",
+            )?;
+            // DROP TABLE only frees pages into SQLite's internal freelist —
+            // it doesn't shrink the file on disk. Installs that had indexed a
+            // lot of snapshots could be sitting on hundreds of MB of dead
+            // space otherwise, so reclaim it as part of this migration rather
+            // than waiting for the user to notice and hit "Clear All Cache".
+            let _ = conn.execute_batch("VACUUM;");
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         }
 
         conn.execute_batch(
@@ -240,24 +263,27 @@ impl AppDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS indexed_snapshots (
+                id           INTEGER PRIMARY KEY,
+                snapshot_id  TEXT NOT NULL UNIQUE
+            );
             CREATE TABLE IF NOT EXISTS browse_cache_files (
-                snapshot_id  TEXT NOT NULL,
+                snap         INTEGER NOT NULL,
                 path         TEXT NOT NULL,
                 parent_path  TEXT NOT NULL,
-                name         TEXT NOT NULL,
                 entry_type   TEXT NOT NULL,
                 size         INTEGER,
                 mtime        TEXT,
                 mode         INTEGER,
-                cached_at    INTEGER NOT NULL,
-                PRIMARY KEY (snapshot_id, path)
+                PRIMARY KEY (snap, path)
             );
             CREATE INDEX IF NOT EXISTS idx_browse_files
-                ON browse_cache_files (snapshot_id, parent_path);
+                ON browse_cache_files (snap, parent_path);
             CREATE TABLE IF NOT EXISTS browse_cache_status (
                 repo_id      TEXT NOT NULL,
                 snapshot_id  TEXT NOT NULL,
                 status       TEXT NOT NULL DEFAULT 'pending',
+                cached_at    INTEGER,
                 PRIMARY KEY (repo_id, snapshot_id)
             );
             CREATE TABLE IF NOT EXISTS snapshots_cache (
@@ -430,10 +456,21 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
 
-        // browse_cache_files is keyed by (snapshot_id, path) without repo_id,
-        // so we delete all files for snapshots that belong to this repo.
+        // browse_cache_files/indexed_snapshots are keyed by snapshot_id without
+        // repo_id, so we delete all rows for snapshots that belong to this repo
+        // (via snapshots_cache) before that table itself is cleared below.
         conn.execute(
-            "DELETE FROM browse_cache_files WHERE snapshot_id IN (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)",
+            "DELETE FROM browse_cache_files WHERE snap IN (
+                SELECT id FROM indexed_snapshots WHERE snapshot_id IN
+                    (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)
+             )",
+            params![repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "DELETE FROM indexed_snapshots WHERE snapshot_id IN
+                (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)",
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
@@ -654,6 +691,41 @@ impl AppDb {
 
     // ── browse cache ─────────────────────────────────────────────────────────
 
+    /// Looks up (or creates) the interned integer key for a snapshot's hex id
+    /// in `indexed_snapshots`. Used by writers before inserting into
+    /// `browse_cache_files`.
+    fn intern_snapshot(
+        tx: &rusqlite::Transaction,
+        snapshot_id: &str,
+    ) -> Result<i64, String> {
+        tx.execute(
+            "INSERT OR IGNORE INTO indexed_snapshots (snapshot_id) VALUES (?1)",
+            params![snapshot_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.query_row(
+            "SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1",
+            params![snapshot_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Looks up the interned integer key for a snapshot's hex id, if it has
+    /// ever been indexed. Used by readers/deleters — `None` means the
+    /// snapshot has no rows in `browse_cache_files`.
+    fn snap_id_of(conn: &Connection, snapshot_id: &str) -> Result<Option<i64>, String> {
+        match conn.query_row(
+            "SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1",
+            params![snapshot_id],
+            |row| row.get(0),
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn is_fully_indexed(&self, repo_id: &str, snapshot_id: &str) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
@@ -676,27 +748,35 @@ impl AppDb {
         let fully_indexed = self.is_fully_indexed(repo_id, snapshot_id)?;
         let parent_key = path.unwrap_or("");
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT name, path, entry_type, size, mtime, mode
-                 FROM browse_cache_files
-                 WHERE snapshot_id = ?1 AND parent_path = ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let entries = stmt
-            .query_map(params![snapshot_id, parent_key], |row| {
-                Ok(FileEntry {
-                    name: row.get(0)?,
-                    path: row.get(1)?,
-                    entry_type: row.get(2)?,
-                    size: row.get(3)?,
-                    mtime: row.get(4)?,
-                    mode: row.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+        let snap = Self::snap_id_of(&conn, snapshot_id)?;
+        let entries = match snap {
+            None => Vec::new(),
+            Some(snap) => {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT path, entry_type, size, mtime, mode
+                         FROM browse_cache_files
+                         WHERE snap = ?1 AND parent_path = ?2",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![snap, parent_key], |row| {
+                        let path: String = row.get(0)?;
+                        Ok(FileEntry {
+                            name: name_of(&path),
+                            path,
+                            entry_type: row.get(1)?,
+                            size: row.get(2)?,
+                            mtime: row.get(3)?,
+                            mode: row.get(4)?,
+                        })
+                    })
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                rows
+            }
+        };
 
         if fully_indexed {
             // Fully indexed: always return Some (empty vec = empty directory, not a cache miss)
@@ -715,40 +795,46 @@ impl AppDb {
         path: Option<&str>,
         entries: &[FileEntry],
     ) -> Result<(), String> {
-        let now = timestamp();
         let parent_key = path.unwrap_or("");
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM browse_cache_files WHERE snapshot_id = ?1 AND parent_path = ?2",
-            params![snapshot_id, parent_key],
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let snap = Self::intern_snapshot(&tx, snapshot_id)?;
+        tx.execute(
+            "DELETE FROM browse_cache_files WHERE snap = ?1 AND parent_path = ?2",
+            params![snap, parent_key],
         )
         .map_err(|e| e.to_string())?;
         for entry in entries {
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO browse_cache_files
-                 (snapshot_id, path, parent_path, name, entry_type, size, mtime, mode, cached_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (snap, path, parent_path, entry_type, size, mtime, mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    snapshot_id,
+                    snap,
                     entry.path,
                     parent_key,
-                    entry.name,
                     entry.entry_type,
                     entry.size,
                     entry.mtime,
                     entry.mode,
-                    now
                 ],
             )
             .map_err(|e| e.to_string())?;
         }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn evict(&self, repo_id: &str, snapshot_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "DELETE FROM browse_cache_files WHERE snapshot_id = ?1",
+            "DELETE FROM browse_cache_files WHERE snap =
+             (SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1)",
+            params![snapshot_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM indexed_snapshots WHERE snapshot_id = ?1",
             params![snapshot_id],
         )
         .map_err(|e| e.to_string())?;
@@ -790,16 +876,16 @@ impl AppDb {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO browse_cache_status (repo_id, snapshot_id, status)
-             VALUES (?1, ?2, ?3)",
-            params![repo_id, snapshot_id, status],
+            "INSERT OR REPLACE INTO browse_cache_status (repo_id, snapshot_id, status, cached_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![repo_id, snapshot_id, status, timestamp()],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     /// Full-text substring search across all indexed files in a snapshot.
-    /// Matches against both the file name and the full path.
+    /// Matches against the full path (which subsumes matching by name).
     pub fn search_browse_files(
         &self,
         snapshot_id: &str,
@@ -807,27 +893,32 @@ impl AppDb {
         limit: usize,
     ) -> Result<Vec<FileEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let snap = Self::snap_id_of(&conn, snapshot_id)?;
+        let Some(snap) = snap else {
+            return Ok(Vec::new());
+        };
         // Escape LIKE metacharacters in the user's query so they're treated literally.
         let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
         let mut stmt = conn
             .prepare(
-                "SELECT name, path, entry_type, size, mtime, mode
+                "SELECT path, entry_type, size, mtime, mode
                  FROM browse_cache_files
-                 WHERE snapshot_id = ?1
-                   AND (name LIKE ?2 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\')
+                 WHERE snap = ?1
+                   AND path LIKE ?2 ESCAPE '\\'
                  ORDER BY path
                  LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
         let entries = stmt
-            .query_map(params![snapshot_id, pattern, limit as i64], |row| {
+            .query_map(params![snap, pattern, limit as i64], |row| {
+                let path: String = row.get(0)?;
                 Ok(FileEntry {
-                    name: row.get(0)?,
-                    path: row.get(1)?,
-                    entry_type: row.get(2)?,
-                    size: row.get(3)?,
-                    mtime: row.get(4)?,
-                    mode: row.get(5)?,
+                    name: name_of(&path),
+                    path,
+                    entry_type: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    mode: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -851,14 +942,16 @@ impl AppDb {
         let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
         let mut stmt = conn
             .prepare(
-                "SELECT bcf.name, bcf.path, bcf.entry_type, bcf.size, bcf.mtime, bcf.mode,
-                        bcf.snapshot_id, sc.short_id, MAX(sc.time)
+                "SELECT bcf.path, bcf.entry_type, bcf.size, bcf.mtime, bcf.mode,
+                        isn.snapshot_id, sc.short_id, MAX(sc.time)
                  FROM browse_cache_files bcf
+                 JOIN indexed_snapshots isn
+                   ON isn.id = bcf.snap
                  JOIN snapshots_cache sc
-                   ON bcf.snapshot_id = sc.snapshot_id AND sc.repo_id = ?1
+                   ON sc.snapshot_id = isn.snapshot_id AND sc.repo_id = ?1
                  JOIN browse_cache_status bcs
-                   ON bcs.snapshot_id = bcf.snapshot_id AND bcs.repo_id = ?1 AND bcs.status = 'complete'
-                 WHERE (bcf.name LIKE ?2 ESCAPE '\\' OR bcf.path LIKE ?2 ESCAPE '\\')
+                   ON bcs.snapshot_id = isn.snapshot_id AND bcs.repo_id = ?1 AND bcs.status = 'complete'
+                 WHERE bcf.path LIKE ?2 ESCAPE '\\'
                  GROUP BY bcf.path
                  ORDER BY bcf.path
                  LIMIT ?3",
@@ -866,15 +959,16 @@ impl AppDb {
             .map_err(|e| e.to_string())?;
         let hits = stmt
             .query_map(params![repo_id, pattern, limit as i64], |row| {
+                let path: String = row.get(0)?;
                 Ok(super::browse::RepoFileHit {
-                    name: row.get(0)?,
-                    path: row.get(1)?,
-                    entry_type: row.get(2)?,
-                    size: row.get(3)?,
-                    mtime: row.get(4)?,
-                    mode: row.get(5)?,
-                    snapshot_id: row.get(6)?,
-                    snapshot_short_id: row.get(7)?,
+                    name: name_of(&path),
+                    path,
+                    entry_type: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    mode: row.get(4)?,
+                    snapshot_id: row.get(5)?,
+                    snapshot_short_id: row.get(6)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -890,26 +984,24 @@ impl AppDb {
         snapshot_id: &str,
         entries: &[FileEntry],
     ) -> Result<(), String> {
-        let now = timestamp();
         for chunk in entries.chunks(500) {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let snap = Self::intern_snapshot(&tx, snapshot_id)?;
             for entry in chunk {
                 let parent = parent_path_of(&entry.path);
                 tx.execute(
                     "INSERT OR REPLACE INTO browse_cache_files
-                     (snapshot_id, path, parent_path, name, entry_type, size, mtime, mode, cached_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     (snap, path, parent_path, entry_type, size, mtime, mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
-                        snapshot_id,
+                        snap,
                         entry.path,
                         parent,
-                        entry.name,
                         entry.entry_type,
                         entry.size,
                         entry.mtime,
                         entry.mode,
-                        now
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -1469,6 +1561,7 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
             "DELETE FROM browse_cache_files;
+             DELETE FROM indexed_snapshots;
              DELETE FROM browse_cache_status;
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;",
@@ -1485,8 +1578,9 @@ impl AppDb {
     /// `(rows_deleted, db_size_bytes)`. Orphans are:
     ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
     ///     exists in `repositories` (e.g. a deleted repo),
-    ///   - `browse_cache_files` / `browse_cache_status` rows whose `snapshot_id`
-    ///     is not referenced by any remaining `snapshots_cache` entry.
+    ///   - `browse_cache_files` / `browse_cache_status` / `indexed_snapshots`
+    ///     rows whose `snapshot_id` is not referenced by any remaining
+    ///     `snapshots_cache` entry.
     pub fn clean_cache(&self) -> Result<(u64, u64), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -1511,6 +1605,17 @@ impl AppDb {
         removed += tx
             .execute(
                 "DELETE FROM browse_cache_files
+                 WHERE snap IN (
+                     SELECT id FROM indexed_snapshots
+                     WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)
+                 )",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
+
+        removed += tx
+            .execute(
+                "DELETE FROM indexed_snapshots
                  WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)",
                 [],
             )
@@ -1541,6 +1646,7 @@ impl AppDb {
              DELETE FROM backup_plans;
              DELETE FROM app_settings;
              DELETE FROM browse_cache_files;
+             DELETE FROM indexed_snapshots;
              DELETE FROM browse_cache_status;
              DELETE FROM snapshots_cache;
              DELETE FROM repo_stats_cache;
@@ -1641,6 +1747,17 @@ pub(crate) fn parent_path_of(path: &str) -> String {
     match clean.rfind('/') {
         None | Some(0) => String::new(),
         Some(i) => clean[..i].to_string(),
+    }
+}
+
+/// Compute the file/dir name (last path segment) from a `restic ls` path.
+/// `/foo/bar/baz.txt` → `baz.txt`, `/foo` → `foo`. Used to rebuild the `name`
+/// field on read now that it's no longer stored in `browse_cache_files`.
+pub(crate) fn name_of(path: &str) -> String {
+    let clean = path.trim_end_matches('/');
+    match clean.rfind('/') {
+        None => clean.to_string(),
+        Some(i) => clean[i + 1..].to_string(),
     }
 }
 
@@ -2123,11 +2240,12 @@ mod tests {
         // ── Run migration ────────────────────────────────────────────────────
         AppDb::init_schema(&conn).unwrap();
 
-        // 1. user_version bumped to 1.
+        // 1. user_version bumped to the latest (2): starting from a fresh v0 DB,
+        // both the v0→v1 and v1→v2 migration blocks run in the same call.
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         // 2. Old cache tables are gone.
         let old_browse: i32 = conn
@@ -2170,6 +2288,29 @@ mod tests {
             .unwrap();
         assert_eq!(bcs, 1, "browse_cache_status should exist");
 
+        let isn: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='indexed_snapshots'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(isn, 1, "indexed_snapshots should exist");
+
+        // browse_cache_files no longer carries name/cached_at — snapshot_id is
+        // now interned via indexed_snapshots.snap.
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(browse_cache_files)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(cols.contains(&"snap".to_string()));
+        assert!(!cols.contains(&"snapshot_id".to_string()));
+        assert!(!cols.contains(&"name".to_string()));
+        assert!(!cols.contains(&"cached_at".to_string()));
+
         // 3. Persistent data survived.
         let repo_name: String = conn
             .query_row(
@@ -2194,6 +2335,66 @@ mod tests {
         let version2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version2, 1);
+        assert_eq!(version2, 2);
+    }
+
+    /// Covers the Quick-wins browse-cache rewrite: insert two snapshots that
+    /// share one file path, and verify every reader/deleter behaves correctly
+    /// against the interned-snapshot schema (name recomputed from path,
+    /// snapshot_id resolved via indexed_snapshots, per-snapshot isolation).
+    #[test]
+    fn test_browse_cache_dedup_round_trip() {
+        let db = test_db();
+        let repo_id = "repo-a";
+        seed_snapshot(&db, repo_id, "snap1");
+        seed_snapshot(&db, repo_id, "snap2");
+
+        let shared = FileEntry {
+            name: "shared.txt".to_string(),
+            path: "/shared.txt".to_string(),
+            entry_type: "file".to_string(),
+            size: Some(42),
+            mtime: Some("2024-01-01T00:00:00Z".to_string()),
+            mode: Some(0o644),
+        };
+        let only_in_snap1 = FileEntry {
+            name: "only1.txt".to_string(),
+            path: "/only1.txt".to_string(),
+            entry_type: "file".to_string(),
+            size: Some(7),
+            mtime: None,
+            mode: None,
+        };
+
+        db.insert_browse_files("snap1", &[shared.clone(), only_in_snap1.clone()])
+            .unwrap();
+        db.insert_browse_files("snap2", &[shared.clone()]).unwrap();
+        db.set_browse_status(repo_id, "snap1", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap2", "complete").unwrap();
+
+        // get(): directory listing recomputes `name` from `path` correctly.
+        let listing = db.get(repo_id, "snap1", None).unwrap().unwrap();
+        assert_eq!(listing.len(), 2);
+        assert!(listing.iter().any(|e| e.name == "shared.txt"));
+        assert!(listing.iter().any(|e| e.name == "only1.txt"));
+
+        // search_browse_files(): single-snapshot search, name derived correctly,
+        // and the (now dropped) `name` column isn't needed to match.
+        let hits = db.search_browse_files("snap1", "only1", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "only1.txt");
+
+        // A snapshot id that was never indexed is a clean miss, not an error.
+        assert!(db.search_browse_files("never-indexed", "shared", 10).unwrap().is_empty());
+        assert!(db.get(repo_id, "never-indexed", None).unwrap().is_none());
+
+        // evict(): removing snap1 doesn't touch snap2's rows, and its
+        // indexed_snapshots row is cleaned up (re-indexing snap1 later would
+        // intern a fresh row rather than reuse a stale one).
+        db.evict(repo_id, "snap1").unwrap();
+        assert!(db.get(repo_id, "snap1", None).unwrap().is_none());
+        let snap2_listing = db.get(repo_id, "snap2", None).unwrap().unwrap();
+        assert_eq!(snap2_listing.len(), 1);
+        assert_eq!(snap2_listing[0].name, "shared.txt");
     }
 }
