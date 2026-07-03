@@ -151,6 +151,26 @@ impl PruneHandle {
     }
 }
 
+pub struct RestoreHandle {
+    pub child: Arc<Mutex<Option<std::process::Child>>>,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a restore is executing. Serializes restores so two concurrent
+    /// `restore_snapshot` calls (e.g. the user starting a restore on one repo,
+    /// navigating away, then starting another) can't corrupt the shared
+    /// `child`/`cancelled` state or let Stop kill the wrong process.
+    pub busy: std::sync::atomic::AtomicBool,
+}
+
+impl RestoreHandle {
+    pub fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
 // ── in-memory master-key state ─────────────────────────────────────────────
 
 pub struct MasterKey(pub Mutex<Option<[u8; 32]>>);

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
@@ -40,6 +40,7 @@ export default function SnapshotsPage() {
   const [defaultRestoreDir, setDefaultRestoreDir] = useState("");
   const [restoring, setRestoring] = useState(false);
   const [restoreDone, setRestoreDone] = useState(false);
+  const [restoreCancelled, setRestoreCancelled] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
   const restoreUnlistenRef = useRef<(() => void) | null>(null);
   const [copyTarget, setCopyTarget] = useState<Snapshot | null>(null);
@@ -274,6 +275,7 @@ export default function SnapshotsPage() {
     if (!repoId || !restoreTarget || !restoreDir) return;
     setRestoring(true);
     setRestoreDone(false);
+    setRestoreCancelled(false);
     setRestoreProgress(null);
     const unlisten = await listen<RestoreProgress>("restore:progress", (e) => {
       setRestoreProgress(e.payload);
@@ -283,8 +285,12 @@ export default function SnapshotsPage() {
       await restoreSnapshot(repoId, restoreTarget.id, restoreDir);
       setRestoreDone(true);
     } catch (err: any) {
-      setError(String(err));
-      setRestoreTarget(null);
+      if (String(err).includes("cancelled")) {
+        setRestoreCancelled(true);
+      } else {
+        setError(String(err));
+        setRestoreTarget(null);
+      }
     } finally {
       unlisten();
       restoreUnlistenRef.current = null;
@@ -956,7 +962,7 @@ export default function SnapshotsPage() {
       <Modal
         title="Restore Snapshot"
         open={restoreTarget !== null}
-        onClose={() => { if (!restoring) { setRestoreTarget(null); setRestoreDone(false); } }}
+        onClose={() => { if (!restoring) { setRestoreTarget(null); setRestoreDone(false); setRestoreCancelled(false); } }}
       >
         {restoreDone ? (
           <>
@@ -972,6 +978,22 @@ export default function SnapshotsPage() {
             </p>
             <div className="flex justify-end">
               <Button variant="secondary" onClick={() => { setRestoreTarget(null); setRestoreDone(false); }}>Close</Button>
+            </div>
+          </>
+        ) : restoreCancelled ? (
+          <>
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+              Restore cancelled
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              The restore was stopped before completing. Files already written to{" "}
+              <span className="font-mono text-gray-300 break-all">{restoreDir}</span> were left in place; the rest were not restored.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => { setRestoreTarget(null); setRestoreCancelled(false); }}>Close</Button>
             </div>
           </>
         ) : (
@@ -1013,8 +1035,12 @@ export default function SnapshotsPage() {
               </div>
             )}
             <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setRestoreTarget(null)} disabled={restoring}>Cancel</Button>
-              <Button onClick={handleRestore} loading={restoring} disabled={!restoreDir}>
+              {restoring ? (
+                <Button variant="danger" onClick={() => cancelRestore()}>Stop</Button>
+              ) : (
+                <Button variant="secondary" onClick={() => setRestoreTarget(null)}>Cancel</Button>
+              )}
+              <Button onClick={handleRestore} loading={restoring} disabled={!restoreDir || restoring}>
                 Restore
               </Button>
             </div>

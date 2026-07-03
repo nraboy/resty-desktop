@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
-use super::cache::{AppDb, MasterKey};
+use super::cache::{AppDb, MasterKey, RestoreHandle};
 use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
@@ -187,17 +187,45 @@ pub async fn restore_snapshot(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    restore_handle: State<'_, RestoreHandle>,
     repo_id: String,
     snapshot_id: String,
     target_dir: String,
 ) -> Result<(), String> {
     validate_snapshot_id(&snapshot_id)?;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Serialize restores: only one may run at a time, so a second concurrent attempt
+    // (e.g. the user navigating away mid-restore and starting another) can't clobber
+    // the shared `child`/`cancelled` state on the RestoreHandle.
+    if restore_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A restore is already in progress".to_string());
+    }
+    // Released on every exit path — including `?` early returns — so `busy` never
+    // gets stuck set.
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&restore_handle.busy);
+
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
     let repo_path = repo.path.clone();
     let repo_password = repo.password.clone();
+
+    restore_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let child_arc = std::sync::Arc::clone(&restore_handle.child);
+    let cancelled_arc = std::sync::Arc::clone(&restore_handle.cancelled);
 
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -222,8 +250,15 @@ pub async fn restore_snapshot(
         });
 
         let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
+
+        // Store child so cancel_restore can reach it.
+        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
+
         for line in BufReader::new(stdout).lines() {
-            let line = line.map_err(|e| e.to_string())?;
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 if v["message_type"].as_str() == Some("status") {
                     let progress = RestoreProgress {
@@ -239,32 +274,58 @@ pub async fn restore_snapshot(
             }
         }
 
-        let status = child.wait().map_err(|e| e.to_string())?;
+        // stdout exhausted (process ended or was killed); take child back to call wait().
+        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
+            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+            None => return Err("cancelled".to_string()),
+        };
         let stderr_str = stderr_thread.join().unwrap_or_default();
 
+        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
+        // clicked just as restic finished, or clicked before the child was stored above) —
+        // the restore genuinely completed and must not be reported as cancelled.
         if status.success() {
-            Ok(())
-        } else {
-            #[cfg(target_os = "windows")]
-            {
-                let only_ea_errors = stderr_str.lines().all(|line| {
-                    let l = line.trim();
-                    l.is_empty()
-                        || l.contains("set EA failed")
-                        || l.contains("extended attribute")
-                        || l.starts_with("ignoring error")
-                        || l.starts_with("Fatal: There were")
-                });
-                if only_ea_errors {
-                    return Ok(());
-                }
-            }
-            let msg = stderr_str.trim();
-            Err(if msg.is_empty() { "restic restore failed".to_string() } else { msg.to_string() })
+            return Ok(());
         }
+
+        if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+            // The process was killed via SIGKILL and left a stale lock on the repo.
+            // We're already on a blocking thread, so it's safe to unlock inline here —
+            // wait() above has already reaped the killed process.
+            use super::cache::FullRepository;
+            let unlock_repo = FullRepository { path: repo_path.clone(), password: repo_password.clone() };
+            let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path);
+            return Err("cancelled".to_string());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let only_ea_errors = stderr_str.lines().all(|line| {
+                let l = line.trim();
+                l.is_empty()
+                    || l.contains("set EA failed")
+                    || l.contains("extended attribute")
+                    || l.starts_with("ignoring error")
+                    || l.starts_with("Fatal: There were")
+            });
+            if only_ea_errors {
+                return Ok(());
+            }
+        }
+        let msg = stderr_str.trim();
+        Err(if msg.is_empty() { "restic restore failed".to_string() } else { msg.to_string() })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn cancel_restore(restore_handle: State<'_, RestoreHandle>) -> Result<(), String> {
+    restore_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(ref mut child) = *restore_handle.child.lock().map_err(|e| e.to_string())? {
+        child.kill().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Shared indexing logic: runs `restic ls --json` for an entire snapshot and

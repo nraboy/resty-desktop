@@ -341,10 +341,13 @@ pub async fn execute_backup(
         let reader = BufReader::new(stdout);
         let mut summary_line: Option<String> = None;
 
+        // Drain to EOF unconditionally, even after a cancel is requested — the killed
+        // process closes stdout quickly on its own, and breaking early here risks missing
+        // the trailing `summary` line if the process happens to finish successfully in the
+        // same instant Stop is clicked (the reordered check below then needs summary_line
+        // to be complete for the success case, exactly like copy_snapshot/mirror_repo drain
+        // unconditionally).
         for line in reader.lines() {
-            if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
             let line = line.map_err(|e| e.to_string())?;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 match v["message_type"].as_str() {
@@ -376,26 +379,32 @@ pub async fn execute_backup(
         };
         let stderr_str = stderr_thread.join().unwrap_or_default();
 
+        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
+        // clicked just as restic finished) — the backup genuinely completed and must not
+        // be reported as cancelled (which would also discard a valid summary_line).
+        if status.success() {
+            return Ok(summary_line.unwrap_or_default());
+        }
+
         if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("cancelled".to_string());
         }
 
-        if status.success() {
-            Ok(summary_line.unwrap_or_default())
-        } else {
-            let msg = stderr_str.trim();
-            let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
-            #[cfg(target_os = "macos")]
-            if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
-                return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
-            }
-            Err(base)
+        let msg = stderr_str.trim();
+        let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
+        #[cfg(target_os = "macos")]
+        if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
+            return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
         }
+        Err(base)
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    if backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+    // Only unlock on a genuine cancel-kill: since a raced success now wins over the
+    // cancelled flag (see the reordering above), `cancelled` can be true even when
+    // `result` is `Ok` — that repo was never left locked, so skip the needless unlock.
+    if result.is_err() && backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         let _ = tauri::async_runtime::spawn_blocking(move || {
             let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock };
             let _ = run_restic_with_path(&repo, vec!["unlock"], &restic_path_for_unlock);
@@ -561,16 +570,19 @@ pub async fn copy_snapshot(
 
         let stderr_str = stderr_thread.join().unwrap_or_default();
 
+        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
+        // clicked just as restic finished) — the copy genuinely completed and must not be
+        // reported as cancelled.
+        if status.success() {
+            return Ok(());
+        }
+
         if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("cancelled".to_string());
         }
 
-        if status.success() {
-            Ok(())
-        } else {
-            let msg = stderr_str.trim();
-            Err(if msg.is_empty() { "restic copy failed".to_string() } else { msg.to_string() })
-        }
+        let msg = stderr_str.trim();
+        Err(if msg.is_empty() { "restic copy failed".to_string() } else { msg.to_string() })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -663,16 +675,19 @@ pub async fn mirror_repo(
 
         let stderr_str = stderr_thread.join().unwrap_or_default();
 
+        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
+        // clicked just as restic finished) — the mirror genuinely completed and must not be
+        // reported as cancelled.
+        if status.success() {
+            return Ok(());
+        }
+
         if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("cancelled".to_string());
         }
 
-        if status.success() {
-            Ok(())
-        } else {
-            let msg = stderr_str.trim();
-            Err(if msg.is_empty() { "restic copy failed".to_string() } else { msg.to_string() })
-        }
+        let msg = stderr_str.trim();
+        Err(if msg.is_empty() { "restic mirror failed".to_string() } else { msg.to_string() })
     })
     .await
     .map_err(|e| e.to_string())?;

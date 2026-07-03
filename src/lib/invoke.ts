@@ -227,6 +227,8 @@ export const restoreSnapshot = (
 ): Promise<void> =>
   invoke("restore_snapshot", { repoId, snapshotId, targetDir });
 
+export const cancelRestore = (): Promise<void> => invoke("cancel_restore");
+
 // ── backup plans ──────────────────────────────────────────────────────────
 
 export const listBackupPlans = (): Promise<BackupPlan[]> =>
