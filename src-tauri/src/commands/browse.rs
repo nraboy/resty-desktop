@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, MasterKey};
-use super::repo::run_restic_with_path;
+use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
 
@@ -72,14 +72,12 @@ pub async fn list_files(
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
-    let mut args = vec!["ls", "--json", snapshot_id.as_str()];
-    let path_str;
+    let mut args = vec!["ls".to_string(), "--json".to_string(), snapshot_id.clone()];
     if let Some(ref p) = path {
-        path_str = p.clone();
-        args.push(&path_str);
+        args.push(p.clone());
     }
 
-    let stdout = run_restic_with_path(&repo, args, &restic_path)?;
+    let stdout = run_restic_blocking(repo, args, restic_path).await?;
 
     let mut entries: Vec<FileEntry> = Vec::new();
     for (i, line) in stdout.lines().enumerate() {
@@ -111,18 +109,19 @@ pub async fn restore_path(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    let restic_result = run_restic_with_path(
-        &repo,
+    let restic_result = run_restic_blocking(
+        repo,
         vec![
-            "restore",
-            &snapshot_id,
-            "--include",
-            &include_path,
-            "--target",
-            &target_dir,
+            "restore".into(),
+            snapshot_id.clone(),
+            "--include".into(),
+            include_path.clone(),
+            "--target".into(),
+            target_dir.clone(),
         ],
-        &restic_path,
+        restic_path,
     )
+    .await
     .map(|_| ());
 
     // On Windows, restic exits non-zero when it cannot apply platform-specific extended

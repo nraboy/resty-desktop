@@ -16,11 +16,11 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Settings persistence | SQLite (`app_data.db`) via `AppDb` |
 | File picker | `tauri-plugin-dialog` |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
-| Memory safety | `zeroize` crate — `MasterKey` and `FullRepository` zeroize sensitive bytes on drop/replace |
+| Memory safety | `zeroize` crate — `MasterKey` and `FullRepository` zeroize sensitive bytes on drop/replace; `FullRepository` also derives `Clone` (each clone still zeroizes independently) so one-shot restic calls can own their repo across a `spawn_blocking` boundary |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | ID generation | `crypto.randomUUID()` (native browser API) |
-| Restic integration | `std::process::Command` with `--json` flag |
+| Restic integration | `std::process::Command` with `--json` flag; one-shot calls run via `run_restic_blocking` (`repo.rs`), which runs on a `spawn_blocking` thread so they never occupy an async-runtime worker |
 
 ## Project Structure
 
@@ -129,11 +129,16 @@ src-tauri/
                      #   get/set_remote_auto_refresh; get/set_auto_indexing (default false);
                      #   prune_all_repos; prune_repo; cancel_prune;
                      #   check_full_disk_access (macOS only — probes TCC.db; returns {supported, granted});
-                     #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane)
+                     #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane);
+                     #   run_restic_blocking() (pub(crate) async helper): runs a one-shot restic command on a
+                     #   spawn_blocking thread, owning its args so they can cross that boundary — used by every
+                     #   async command that shells out once (see Restic Integration for the full policy)
       snapshot.rs    # list/refresh/delete/tag snapshots; get_snapshot_stats; execute_backup (shared pub async fn);
-                     #   run_backup; cancel_backup; apply_retention (shared pub fn); forget_by_plan;
+                     #   run_backup; cancel_backup; apply_retention (shared pub fn, intentionally sync — see
+                     #   Intentional Designs); forget_by_plan (async, runs apply_retention via spawn_blocking);
                      #   copy_snapshot; cancel_copy; mirror_repo; cancel_mirror; unlock_repo; diff_snapshots;
-                     #   validate_snapshot_id() (pub(crate), 8–64 hex) guards all snapshot ID inputs here and in browse.rs
+                     #   validate_snapshot_id() (pub(crate), 8–64 hex) guards all snapshot ID inputs here and in browse.rs;
+                     #   list_snapshots returns Vec<Snapshot> directly from AppDb::get_snapshots_vec (no JSON round-trip)
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
@@ -155,7 +160,12 @@ src-tauri/
                      #   (plaintext pw re-encrypted under master key; lossy — see Import / Export)
       cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
+                     #   get_snapshots_vec: reads snapshots_cache rows straight into Vec<Snapshot> (paths/tags JSON
+                     #   columns parsed once) — no intermediate JSON-string serialization;
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first);
+                     #   idx_history_started index on backup_history(started_at); log_backup's trim DELETE is
+                     #   guarded by a COUNT(*) check so a normal insert (table under the cap) skips it;
+                     #   remove_repo's cascade deletes run in one transaction (all-or-nothing);
                      #   clear_cache: DELETE all cache tables + PRAGMA wal_checkpoint(TRUNCATE) + VACUUM to reclaim disk space;
                      #   get_db_size: sums app_data.db + app_data.db-wal for accurate WAL-mode reporting;
                      #   search_browse_files: SQLite LIKE search on browse_cache_files (name OR path), escapes metacharacters, limit param;
@@ -193,6 +203,7 @@ src-tauri/
 
 - Restic binary path is user-configurable; defaults to `restic` on `$PATH`.
 - All commands set `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` env vars — never pass either in process args.
+- All restic subprocess calls run off the async runtime: streaming commands spawn a `Child` inside `tauri::async_runtime::spawn_blocking` (e.g. `execute_backup`, `restore_snapshot`, `copy_snapshot`, `mirror_repo`, prune); one-shot commands go through `run_restic_blocking` (`repo.rs`), which does the same for a single `Command::output()` call. An `async fn` `#[tauri::command]` must never call `std::process::Command` (or `run_restic_with_path`) inline — that blocks a shared tokio worker and starves every other async command and the `AppDb` lock (see Persistence & Caching). Plain `run_restic_with_path` is still called directly from code that's already inside a `spawn_blocking` closure (e.g. `run_full_index`, the cancel→`unlock` cleanup calls) — that's correct as-is, not a gap.
 - `restic ls --json` outputs NDJSON; first line is snapshot summary (skipped); subsequent lines are `FileEntry`.
 - `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`. Serialized via a `busy` flag on `BackupHandle` — only one backup runs at a time; a concurrent attempt (e.g. a scheduler tick firing during a manual backup) returns `"A backup is already in progress"`. Sequential callers (`run_schedule_now`, scheduler loop) are unaffected since each `await` releases the flag before the next starts.
 - `cancel_backup`, `cancel_copy`, `cancel_mirror`, `cancel_prune` all run `restic unlock` after SIGKILL to clear stale locks.
@@ -217,15 +228,60 @@ src-tauri/
 - Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `indexed_snapshots`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`.
 - Browse cache is relational (v0→v1 migration): `browse_cache_files` stores the file tree keyed by `(snap, parent_path)`; `browse_cache_status` tracks index state per `(repo_id, snapshot_id)` as `pending`/`in_progress`/`complete`, plus a per-snapshot `cached_at`. Replaces the old JSON-blob `browse_cache`.
 - v1→v2 migration (storage optimization): `browse_cache_files.snapshot_id` (64-char hex, duplicated across the row and both its indexes) is interned to a small integer `snap` via a new `indexed_snapshots(id, snapshot_id UNIQUE)` table — `AppDb::intern_snapshot`/`snap_id_of` map hex↔int internally; all public `AppDb` methods still take the hex `snapshot_id`. The redundant `name` column (recomputed from `path` via `cache::name_of` on read) and the per-row `cached_at` (moved to `browse_cache_status`, one value per snapshot) were also dropped. Cache tables are disposable (rebuilt via `restic ls`), so this migration drops + recreates them rather than transforming data.
-- `list_snapshots` returns from cache only; `refresh_snapshots` calls restic and updates cache.
-- SnapshotsPage: stale-while-revalidate — serve cache immediately, background refresh for local repos.
+- `list_snapshots` returns from cache only, via `AppDb::get_snapshots_vec` (rows parsed straight into `Vec<Snapshot>` — no intermediate JSON-string serialize/parse round-trip); `refresh_snapshots` calls restic and updates cache.
+- SnapshotsPage: stale-while-revalidate — serve cache immediately (a `load()` effect keyed on `[repoId, repo]`), then a single background refresh (a separate effect gated on a `settingsReady` flag, so it fires exactly once per repo visit with the resolved `remoteAutoRefresh` value rather than twice — once before and once after that setting loads).
 - After `run_backup`: new snapshot metadata prepended to cache (no full re-fetch).
 - After `forget_by_plan`: full `restic snapshots --json` repopulates cache.
-- `remove_repo` cascades to `browse_cache_status`, `browse_cache_files`, `snapshots_cache`, and `repo_stats_cache`.
+- `remove_repo` cascades to `browse_cache_status`, `browse_cache_files`, `snapshots_cache`, and `repo_stats_cache`, all inside one transaction (all-or-nothing).
 - `clear_browse_cache` (Clear All Cache): DELETEs all cache tables, then `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` to reclaim disk space from the WAL and compact the main file.
-- `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert, matching the read limit so the Logs page never loses visible rows.
+- `backup_history` is bounded: `log_backup` trims to the newest `BACKUP_HISTORY_LIMIT` (1000) rows after each insert (guarded by a `COUNT(*)` check so a normal insert under the cap skips the DELETE), matching the read limit so the Logs page never loses visible rows. Indexed via `idx_history_started` on `started_at`, which backs both the trim's `ORDER BY` and `list_backup_history`'s.
 - Background cache warmer: every 60s, snapshot metadata is refreshed for all eligible repos (always). File indexing (browse_cache) is pre-populated in the background only when `auto_indexing` is enabled. Both phases skip remote repos unless `remote_auto_refresh` is on.
 - `AppDb` holds one `Mutex<Connection>` — every command using `AppDb` shares that single lock, so a slow synchronous query (e.g. a repo-wide `LIKE` search over hundreds of thousands of cached file rows, ~1s+) held on a core async-runtime thread starves *every other* command that also touches `AppDb` (snapshot refreshes, index-status polling, the cache warmer tick) until it finishes. Any new command doing DB work slow enough to notice should be `async fn` and run the actual query via `tauri::async_runtime::spawn_blocking` (see `search_snapshot_files`/`search_repo_files`, or the existing `index_snapshot`/`restore_snapshot`) so it occupies a blocking-pool thread instead of a scarce core worker thread.
+
+## Intentional Designs (do not "optimize" these)
+
+These have come up as apparent inefficiencies during codebase audits and were deliberately kept
+as-is. Don't re-flag or "fix" them without understanding why first:
+
+- **Sync `#[tauri::command]`s are intentionally not wrapped in `spawn_blocking`.** Tauri runs
+  non-`async fn` commands (e.g. `get_restic_version`, `list_repos`) on its own thread pool, off
+  the async runtime entirely — only `async fn` commands that block need `spawn_blocking`.
+- **`scheduler.rs` and `schedule.rs`'s `run_schedule_now` call the *sync* `apply_retention`
+  directly, not through `spawn_blocking`.** Both run inside their own background
+  `tauri::async_runtime::spawn`ed tasks (not foreground commands), immediately after
+  `execute_backup` (which already does its heavy work via `spawn_blocking`). Only the foreground
+  `forget_by_plan` command wraps `apply_retention` in `spawn_blocking`.
+- **`get_repo_stats` fetches stats for *all* repos including remote ones, and RepositoriesPage
+  requests them for every repo on mount — on purpose.** It returns the cached value immediately
+  when present and only shells out to `restic stats` on a cache miss; the `—` placeholder in the
+  UI is specifically for remotes that have no cache yet. Do not skip remote repos in that fetch —
+  it would hide cached remote stats that are otherwise perfectly valid to show.
+- **`browse_cache_files.parent_path` duplicates a prefix of `path` on every row, on purpose.** It
+  backs the `(snap, parent_path)` directory-listing index — a deliberate storage-for-speed
+  trade-off, and the single largest contributor to that table's size. Acceptable.
+- **File search (`search_browse_files`/`search_repo_files`) uses `path LIKE '%query%'`** — the
+  leading wildcard means SQLite can't use the index and does a full scan. This is a known,
+  accepted cost (not an oversight): it's exactly why those two search commands are `async` +
+  `tauri::async_runtime::spawn_blocking` + guarded by `searchSeqRef` on the frontend. An FTS5 or
+  trigram index would fix the underlying scan but needs a schema migration — a deliberately
+  deferred future improvement.
+- **`cached_at` columns (`snapshots_cache`, `browse_cache_status`, `repo_stats_cache`) are written
+  on every update but not currently read by any query.** They're kept for a possible future
+  staleness/TTL feature; today, staleness is handled entirely by explicit refresh/evict calls.
+  Not dead weight to be dropped without that feature landing.
+- **`panic = "abort"` is deliberately not set** in `src-tauri/Cargo.toml`'s release profile (see
+  Build Profile). The code is written to survive worker-thread panics — `spawn_blocking` results
+  are handled via `.unwrap_or(false)` patterns, and `AppDb`'s `Mutex<Connection>` poison errors are
+  mapped to recoverable `Err`s rather than propagated as panics. `panic = "abort"` would turn a
+  survivable background-thread panic into a full-app crash.
+- **Known, deferred (not novel) frontend duplication:** the search/index/debounce pattern, the
+  `FileIcon` component, and the `browseTarget` helper are each duplicated across
+  `SearchPage.tsx`, `RepoSearchPage.tsx`, and (partially) `BrowsePage.tsx`/`DiffPage.tsx`;
+  `RepoSearchPage` re-subscribes its `index:done` listener on every keystroke; every page
+  independently calls `listRepos()` on mount instead of sharing a cache; `BrowsePage` renders a
+  directory's full entry list with no pagination or virtualization. All are known and intentionally
+  deferred (structural refactor / new dependency required) — revisit deliberately, don't
+  rediscover them as "new" findings.
 
 ## Import / Export
 
@@ -269,6 +325,10 @@ gray.50–950, blue.300/400/700/900, green.400
 - `hover:text-white` on interactive elements → use `hover:text-gray-50`.
 - `bg-red-700` for buttons → theme-mapped, becomes pastel pink in light mode. Use `bg-red-600 hover:bg-red-800`.
 - Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface.
+
+## Build Profile
+
+`src-tauri/Cargo.toml` sets `[profile.release]`: `strip = true`, `lto = true`, `codegen-units = 1` — a smaller/faster release binary at the cost of longer compile time (accepted; CI/local dev builds are unaffected since this only applies to `--release`). `opt-level` is left at the release default (`3`). `panic = "abort"` is deliberately **not** set — see Intentional Designs.
 
 ## Releases
 

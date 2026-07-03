@@ -55,6 +55,7 @@ export default function SnapshotsPage() {
   const [compareSource, setCompareSource] = useState<Snapshot | null>(null);
   const [compareTargetId, setCompareTargetId] = useState("");
   const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [indexStatus, setIndexStatus] = useState<Record<string, string>>({});
   const [indexingTarget, setIndexingTarget] = useState<Snapshot | null>(null);
   const [indexingDone, setIndexingDone] = useState(false);
@@ -86,7 +87,10 @@ export default function SnapshotsPage() {
 
   useEffect(() => {
     getRestorePath().then(setDefaultRestoreDir).catch(() => {});
-    getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
+    getRemoteAutoRefresh()
+      .then(setRemoteAutoRefresh)
+      .catch(() => {})
+      .finally(() => setSettingsReady(true));
   }, []);
 
   useEffect(() => {
@@ -144,27 +148,36 @@ export default function SnapshotsPage() {
     }
   }, [repoId]);
 
+  // Cache paint only — see the settingsReady-gated effect below for the (single)
+  // background refresh, which needs the resolved remoteAutoRefresh setting to decide
+  // whether to run. Splitting these avoids refreshing twice on mount (once with the
+  // default remoteAutoRefresh=false, once after the real setting loads).
   const load = useCallback(async () => {
     if (!repoId || !repo) return;
-    const willRefresh = !isRemoteRepo(repo.path) || remoteAutoRefresh;
     setLoading(true);
-    if (willRefresh) setRefreshing(true);
     try {
       const cached = await listSnapshots(repoId);
       setSnapshots(cached.reverse());
     } finally {
       setLoading(false);
     }
-    if (!willRefresh) return;
-    refreshSnapshots(repoId)
-      .then((data) => setSnapshots(data.reverse()))
-      .catch(() => {})
-      .finally(() => setRefreshing(false));
-  }, [repoId, repo, remoteAutoRefresh]);
+  }, [repoId, repo]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Fires exactly once per repo visit, after settingsReady flips true with the final
+  // remoteAutoRefresh value already resolved.
+  useEffect(() => {
+    if (!repoId || !repo || !settingsReady) return;
+    if (isRemoteRepo(repo.path) && !remoteAutoRefresh) return;
+    setRefreshing(true);
+    refreshSnapshots(repoId)
+      .then((data) => setSnapshots(data.reverse()))
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+  }, [repoId, repo, settingsReady, remoteAutoRefresh]);
 
   const handleDelete = async () => {
     if (!repoId || !deleteTarget) return;
@@ -346,17 +359,22 @@ export default function SnapshotsPage() {
     setSelectedIds(new Set());
   };
 
-  const filtered = useMemo(() =>
-    filter
-      ? snapshots.filter(
-          (s) =>
-            s.short_id.includes(filter) ||
-            s.hostname.toLowerCase().includes(filter.toLowerCase()) ||
-            (s.tags ?? []).some((t) => t.toLowerCase().includes(filter.toLowerCase())) ||
-            s.paths.some((p) => p.toLowerCase().includes(filter.toLowerCase()))
-        )
-      : snapshots,
-    [snapshots, filter]);
+  const filtered = useMemo(() => {
+    if (!filter) return snapshots;
+    const f = filter.toLowerCase();
+    return snapshots.filter(
+      (s) =>
+        s.short_id.includes(filter) ||
+        s.hostname.toLowerCase().includes(f) ||
+        (s.tags ?? []).some((t) => t.toLowerCase().includes(f)) ||
+        s.paths.some((p) => p.toLowerCase().includes(f))
+    );
+  }, [snapshots, filter]);
+
+  const otherRepos = useMemo(
+    () => allRepos.filter((r) => r.id !== repoId),
+    [allRepos, repoId]
+  );
 
   useEffect(() => {
     setPage(0);
@@ -377,7 +395,7 @@ export default function SnapshotsPage() {
     if (selectAllCheckboxRef.current) {
       selectAllCheckboxRef.current.indeterminate = somePageSelected && !allPageSelected;
     }
-  });
+  }, [somePageSelected, allPageSelected]);
 
   const toggleSelectAll = () => {
     if (allPageSelected) {
@@ -417,8 +435,6 @@ export default function SnapshotsPage() {
       />
     );
   }
-
-  const otherRepos = allRepos.filter((r) => r.id !== repoId);
 
   return (
     <div className="p-6">

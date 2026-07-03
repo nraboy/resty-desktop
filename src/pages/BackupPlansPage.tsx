@@ -110,7 +110,7 @@ export default function BackupPlansPage() {
     if (selectAllCheckboxRef.current) {
       selectAllCheckboxRef.current.indeterminate = someSelected && !allSelected;
     }
-  });
+  }, [someSelected, allSelected]);
 
   const toggleSelectAll = () => {
     if (allSelected) {

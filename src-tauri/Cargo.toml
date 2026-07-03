@@ -35,3 +35,8 @@ tokio = { version = "1", features = ["time"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

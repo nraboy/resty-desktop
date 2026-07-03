@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
-use super::repo::run_restic_with_path;
+use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::NoConsole;
 
 #[derive(Clone, Serialize)]
@@ -34,12 +34,7 @@ pub async fn list_snapshots(
     db: State<'_, AppDb>,
     repo_id: String,
 ) -> Result<Vec<Snapshot>, String> {
-    if let Some(json) = db.get_snapshots(&repo_id)? {
-        if let Ok(cached) = serde_json::from_str::<Vec<Snapshot>>(&json) {
-            return Ok(cached);
-        }
-    }
-    Ok(vec![])
+    db.get_snapshots_vec(&repo_id)
 }
 
 #[tauri::command]
@@ -51,7 +46,7 @@ pub async fn refresh_snapshots(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    let stdout = run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)?;
+    let stdout = run_restic_blocking(repo, vec!["snapshots".into(), "--json".into()], restic_path).await?;
     let _ = db.set_snapshots(&repo_id, &stdout);
     let snapshots: Vec<Snapshot> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
     Ok(snapshots)
@@ -69,11 +64,11 @@ pub async fn delete_snapshot(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    let mut args = vec!["forget", snapshot_id.as_str()];
+    let mut args = vec!["forget".to_string(), snapshot_id.clone()];
     if prune {
-        args.push("--prune");
+        args.push("--prune".to_string());
     }
-    run_restic_with_path(&repo, args, &restic_path)?;
+    run_restic_blocking(repo, args, restic_path).await?;
     let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
     let _ = db.evict_stats(&repo_id);
@@ -96,19 +91,21 @@ pub async fn tag_snapshot(
 
     if !add_tags.is_empty() {
         let tag_str = add_tags.join(",");
-        run_restic_with_path(
-            &repo,
-            vec!["tag", "--add", &tag_str, &snapshot_id],
-            &restic_path,
-        )?;
+        run_restic_blocking(
+            repo.clone(),
+            vec!["tag".into(), "--add".into(), tag_str, snapshot_id.clone()],
+            restic_path.clone(),
+        )
+        .await?;
     }
     if !remove_tags.is_empty() {
         let tag_str = remove_tags.join(",");
-        run_restic_with_path(
-            &repo,
-            vec!["tag", "--remove", &tag_str, &snapshot_id],
-            &restic_path,
-        )?;
+        run_restic_blocking(
+            repo,
+            vec!["tag".into(), "--remove".into(), tag_str, snapshot_id.clone()],
+            restic_path,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -159,7 +156,12 @@ pub async fn diff_snapshots(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    let stdout = run_restic_with_path(&repo, vec!["diff", &snapshot_a, &snapshot_b], &restic_path)?;
+    let stdout = run_restic_blocking(
+        repo,
+        vec!["diff".into(), snapshot_a.clone(), snapshot_b.clone()],
+        restic_path,
+    )
+    .await?;
 
     let mut entries: Vec<DiffEntry> = Vec::new();
     let mut total_added = 0u32;
@@ -202,7 +204,12 @@ pub async fn get_snapshot_stats(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    let stdout = run_restic_with_path(&repo, vec!["stats", "--json", &snapshot_id], &restic_path)?;
+    let stdout = run_restic_blocking(
+        repo,
+        vec!["stats".into(), "--json".into(), snapshot_id.clone()],
+        restic_path,
+    )
+    .await?;
     let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
         .ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
@@ -705,7 +712,7 @@ pub async fn unlock_repo(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    run_restic_with_path(&repo, vec!["unlock"], &restic_path)?;
+    run_restic_blocking(repo, vec!["unlock".into()], restic_path).await?;
     Ok(())
 }
 
@@ -779,14 +786,19 @@ pub fn apply_retention(
 
 #[tauri::command]
 pub async fn forget_by_plan(
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
+    app: tauri::AppHandle,
     repo_id: String,
     tags: Vec<String>,
     paths: Vec<String>,
     retention: RetentionPolicy,
 ) -> Result<String, String> {
-    apply_retention(&db, &master_key, &repo_id, &tags, &paths, &retention)
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        let master_key = app.state::<MasterKey>();
+        apply_retention(db.inner(), master_key.inner(), &repo_id, &tags, &paths, &retention)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

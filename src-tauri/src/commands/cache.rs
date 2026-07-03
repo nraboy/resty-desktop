@@ -10,6 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::browse::FileEntry;
 use super::crypto;
+use super::snapshot::Snapshot;
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
 /// never drift — the Logs page never shows rows the trim would have deleted.
@@ -80,7 +81,7 @@ pub struct Schedule {
 
 // ── internal type (never serialised) ───────────────────────────────────────
 
-#[derive(ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct FullRepository {
     #[zeroize(skip)]
     pub path: String,
@@ -317,6 +318,8 @@ impl AppDb {
                 bytes_added      INTEGER NOT NULL DEFAULT 0,
                 error            TEXT
             );
+            CREATE INDEX IF NOT EXISTS idx_history_started
+                ON backup_history (started_at);
             CREATE TABLE IF NOT EXISTS schedules (
                 id            TEXT PRIMARY KEY,
                 name          TEXT NOT NULL,
@@ -444,13 +447,14 @@ impl AppDb {
     }
 
     pub fn remove_repo(&self, repo_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM repositories WHERE id = ?1", params![repo_id])
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM repositories WHERE id = ?1", params![repo_id])
             .map_err(|e| e.to_string())?;
 
         // Cascade cleanup: remove browse cache entries for this repo's snapshots.
         // browse_cache_status is keyed by (repo_id, snapshot_id).
-        conn.execute(
+        tx.execute(
             "DELETE FROM browse_cache_status WHERE repo_id = ?1",
             params![repo_id],
         )
@@ -459,7 +463,7 @@ impl AppDb {
         // browse_cache_files/indexed_snapshots are keyed by snapshot_id without
         // repo_id, so we delete all rows for snapshots that belong to this repo
         // (via snapshots_cache) before that table itself is cleared below.
-        conn.execute(
+        tx.execute(
             "DELETE FROM browse_cache_files WHERE snap IN (
                 SELECT id FROM indexed_snapshots WHERE snapshot_id IN
                     (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)
@@ -468,25 +472,26 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM indexed_snapshots WHERE snapshot_id IN
                 (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)",
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM snapshots_cache WHERE repo_id = ?1",
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM repo_stats_cache WHERE repo_id = ?1",
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
 
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -726,28 +731,25 @@ impl AppDb {
         }
     }
 
-    fn is_fully_indexed(&self, repo_id: &str, snapshot_id: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        match conn.query_row(
-            "SELECT 1 FROM browse_cache_status WHERE repo_id = ?1 AND snapshot_id = ?2 AND status = 'complete'",
-            params![repo_id, snapshot_id],
-            |_| Ok(()),
-        ) {
-            Ok(_) => Ok(true),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(e) => Err(e.to_string()),
-        }
-    }
-
     pub fn get(
         &self,
         repo_id: &str,
         snapshot_id: &str,
         path: Option<&str>,
     ) -> Result<Option<Vec<FileEntry>>, String> {
-        let fully_indexed = self.is_fully_indexed(repo_id, snapshot_id)?;
         let parent_key = path.unwrap_or("");
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Inlined former is_fully_indexed() — folded into this single locked scope so
+        // the directory read below doesn't need a second lock acquisition.
+        let fully_indexed = match conn.query_row(
+            "SELECT 1 FROM browse_cache_status WHERE repo_id = ?1 AND snapshot_id = ?2 AND status = 'complete'",
+            params![repo_id, snapshot_id],
+            |_| Ok(()),
+        ) {
+            Ok(_) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(e.to_string()),
+        };
         let snap = Self::snap_id_of(&conn, snapshot_id)?;
         let entries = match snap {
             None => Vec::new(),
@@ -804,12 +806,16 @@ impl AppDb {
             params![snap, parent_key],
         )
         .map_err(|e| e.to_string())?;
-        for entry in entries {
-            tx.execute(
-                "INSERT OR REPLACE INTO browse_cache_files
-                 (snap, path, parent_path, entry_type, size, mtime, mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO browse_cache_files
+                     (snap, path, parent_path, entry_type, size, mtime, mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|e| e.to_string())?;
+            for entry in entries {
+                stmt.execute(params![
                     snap,
                     entry.path,
                     parent_key,
@@ -817,9 +823,9 @@ impl AppDb {
                     entry.size,
                     entry.mtime,
                     entry.mode,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+                ])
+                .map_err(|e| e.to_string())?;
+            }
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -988,13 +994,17 @@ impl AppDb {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             let snap = Self::intern_snapshot(&tx, snapshot_id)?;
-            for entry in chunk {
-                let parent = parent_path_of(&entry.path);
-                tx.execute(
-                    "INSERT OR REPLACE INTO browse_cache_files
-                     (snap, path, parent_path, entry_type, size, mtime, mode)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
+            {
+                let mut stmt = tx
+                    .prepare_cached(
+                        "INSERT OR REPLACE INTO browse_cache_files
+                         (snap, path, parent_path, entry_type, size, mtime, mode)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for entry in chunk {
+                    let parent = parent_path_of(&entry.path);
+                    stmt.execute(params![
                         snap,
                         entry.path,
                         parent,
@@ -1002,9 +1012,9 @@ impl AppDb {
                         entry.size,
                         entry.mtime,
                         entry.mode,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
+                    ])
+                    .map_err(|e| e.to_string())?;
+                }
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -1047,7 +1057,10 @@ impl AppDb {
 
     // ── snapshots cache ──────────────────────────────────────────────────────
 
-    pub fn get_snapshots(&self, repo_id: &str) -> Result<Option<String>, String> {
+    /// Returns cached snapshots for a repo as structs directly — no JSON string
+    /// round-trip (the caller previously re-parsed a serialized string this method
+    /// produced; see `list_snapshots` in `snapshot.rs`).
+    pub fn get_snapshots_vec(&self, repo_id: &str) -> Result<Vec<Snapshot>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -1058,49 +1071,22 @@ impl AppDb {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![repo_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
+                let paths: String = row.get(5)?;
+                let tags: Option<String> = row.get(6)?;
+                Ok(Snapshot {
+                    id: row.get(0)?,
+                    short_id: row.get(1)?,
+                    time: row.get(2)?,
+                    hostname: row.get(3)?,
+                    username: row.get(4)?,
+                    paths: serde_json::from_str(&paths).unwrap_or_default(),
+                    tags: tags.and_then(|t| serde_json::from_str(&t).ok()),
+                })
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-
-        if rows.is_empty() {
-            return Ok(None);
-        }
-
-        let values: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|(id, short_id, time, hostname, username, paths, tags)| {
-                let mut obj = serde_json::json!({
-                    "id": id,
-                    "short_id": short_id,
-                    "time": time,
-                    "hostname": hostname,
-                    "paths": serde_json::from_str::<serde_json::Value>(&paths)
-                        .unwrap_or(serde_json::Value::Array(vec![])),
-                });
-                if let Some(u) = username {
-                    obj["username"] = serde_json::Value::String(u);
-                }
-                if let Some(t) = tags {
-                    obj["tags"] = serde_json::from_str::<serde_json::Value>(&t)
-                        .unwrap_or(serde_json::Value::Null);
-                }
-                obj
-            })
-            .collect();
-
-        serde_json::to_string(&values)
-            .map(Some)
-            .map_err(|e| e.to_string())
+        Ok(rows)
     }
 
     /// Full replace: clears existing snapshot rows for this repo, then inserts all from JSON.
@@ -1114,12 +1100,16 @@ impl AppDb {
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
-        for s in &rows {
-            tx.execute(
-                "INSERT INTO snapshots_cache
-                 (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO snapshots_cache
+                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(|e| e.to_string())?;
+            for s in &rows {
+                stmt.execute(params![
                     repo_id,
                     s.id,
                     s.short_id,
@@ -1129,9 +1119,9 @@ impl AppDb {
                     s.paths,
                     s.tags,
                     now
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+                ])
+                .map_err(|e| e.to_string())?;
+            }
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -1143,23 +1133,25 @@ impl AppDb {
         let rows = parse_snapshot_rows(json)?;
         let now = timestamp();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        for s in &rows {
-            conn.execute(
+        let mut stmt = conn
+            .prepare_cached(
                 "INSERT OR REPLACE INTO snapshots_cache
                  (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    repo_id,
-                    s.id,
-                    s.short_id,
-                    s.time,
-                    s.hostname,
-                    s.username,
-                    s.paths,
-                    s.tags,
-                    now
-                ],
             )
+            .map_err(|e| e.to_string())?;
+        for s in &rows {
+            stmt.execute(params![
+                repo_id,
+                s.id,
+                s.short_id,
+                s.time,
+                s.hostname,
+                s.username,
+                s.paths,
+                s.tags,
+                now
+            ])
             .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -1300,14 +1292,20 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
         // Trim to the newest BACKUP_HISTORY_LIMIT rows so the table can't grow
-        // without bound. Runs after the insert is already persisted.
-        conn.execute(
-            "DELETE FROM backup_history WHERE id NOT IN (
-                 SELECT id FROM backup_history ORDER BY started_at DESC LIMIT ?1
-             )",
-            params![BACKUP_HISTORY_LIMIT],
-        )
-        .map_err(|e| e.to_string())?;
+        // without bound. Runs after the insert is already persisted. Guarded by a
+        // count check so a normal backup (table under the cap) skips the DELETE.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM backup_history", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if count > BACKUP_HISTORY_LIMIT {
+            conn.execute(
+                "DELETE FROM backup_history WHERE id NOT IN (
+                     SELECT id FROM backup_history ORDER BY started_at DESC LIMIT ?1
+                 )",
+                params![BACKUP_HISTORY_LIMIT],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -2396,5 +2394,40 @@ mod tests {
         let snap2_listing = db.get(repo_id, "snap2", None).unwrap().unwrap();
         assert_eq!(snap2_listing.len(), 1);
         assert_eq!(snap2_listing[0].name, "shared.txt");
+    }
+
+    #[test]
+    fn get_snapshots_vec_matches_the_former_json_round_trip() {
+        // get_snapshots_vec() replaced a get_snapshots()->JSON string ->
+        // serde_json::from_str::<Vec<Snapshot>> round trip in list_snapshots. This
+        // asserts the direct-struct path produces the same data the old round trip did.
+        let db = test_db();
+        let repo_id = "repoA";
+        let json = r#"[
+            {"id":"snap-a00000000000","short_id":"snapa000","time":"2024-01-01T00:00:00Z","hostname":"host1","username":"alice","paths":["/home/alice"],"tags":["daily","weekly"]},
+            {"id":"snap-b00000000000","short_id":"snapb000","time":"2024-02-01T00:00:00Z","hostname":"host2","paths":["/home/bob"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+
+        let snapshots = db.get_snapshots_vec(repo_id).unwrap();
+        assert_eq!(snapshots.len(), 2);
+
+        // set_snapshots doesn't guarantee row order matches insertion order beyond
+        // the ORDER BY time ASC in get_snapshots_vec's query, so assert on IDs.
+        let a = snapshots.iter().find(|s| s.id == "snap-a00000000000").unwrap();
+        assert_eq!(a.short_id, "snapa000");
+        assert_eq!(a.hostname, "host1");
+        assert_eq!(a.username.as_deref(), Some("alice"));
+        assert_eq!(a.paths, vec!["/home/alice".to_string()]);
+        assert_eq!(a.tags, Some(vec!["daily".to_string(), "weekly".to_string()]));
+
+        let b = snapshots.iter().find(|s| s.id == "snap-b00000000000").unwrap();
+        assert_eq!(b.hostname, "host2");
+        assert!(b.username.is_none());
+        assert!(b.tags.is_none());
+
+        // A repo with no cached rows returns an empty Vec, not an error — matches
+        // the old get_snapshots() `None` -> `Ok(vec![])` fallback in list_snapshots.
+        assert!(db.get_snapshots_vec("no-such-repo").unwrap().is_empty());
     }
 }

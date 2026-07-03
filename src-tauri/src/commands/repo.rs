@@ -32,6 +32,21 @@ pub fn run_restic_with_path(
     }
 }
 
+/// One-shot restic on a blocking-pool thread so it never occupies an async-runtime
+/// worker. Owns its inputs so they can cross the spawn_blocking boundary.
+pub(crate) async fn run_restic_blocking(
+    repo: FullRepository,
+    args: Vec<String>,
+    restic_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_restic_with_path(&repo, arg_refs, &restic_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn list_repos(db: State<'_, AppDb>) -> Result<Vec<Repository>, String> {
     db.list_repos()
@@ -109,18 +124,7 @@ pub async fn init_repo(
 ) -> Result<(), String> {
     let restic_path = super::get_restic_path(&db);
     let dummy = FullRepository { path: path.clone(), password: password.clone() };
-    let output = std::process::Command::new(&restic_path)
-        .args(["init"])
-        .env("RESTIC_REPOSITORY", &dummy.path)
-        .env("RESTIC_PASSWORD", &dummy.password)
-        .no_console()
-        .augment_path()
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
+    run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
 
     let key = master_key.get()?;
     let (nonce, ciphertext) = crypto::encrypt(&key, password.as_bytes())?;
@@ -136,7 +140,9 @@ pub async fn test_repo_connection(
 ) -> Result<(), String> {
     let restic_path = super::get_restic_path(&db);
     let dummy = FullRepository { path, password };
-    run_restic_with_path(&dummy, vec!["snapshots", "--json"], &restic_path).map(|_| ())
+    run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
+        .await
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -148,7 +154,7 @@ pub async fn get_repo_stats(
     if let Ok(Some((total_size, total_file_count, snapshots_count))) = db.get_stats(&repo_id) {
         return Ok(ResticStats { total_size, total_file_count, snapshots_count });
     }
-    fetch_and_cache_stats(&db, &master_key, &repo_id)
+    fetch_and_cache_stats(&db, &master_key, &repo_id).await
 }
 
 #[tauri::command]
@@ -158,10 +164,10 @@ pub async fn refresh_repo_stats(
     repo_id: String,
 ) -> Result<ResticStats, String> {
     let _ = db.evict_stats(&repo_id);
-    fetch_and_cache_stats(&db, &master_key, &repo_id)
+    fetch_and_cache_stats(&db, &master_key, &repo_id).await
 }
 
-fn fetch_and_cache_stats(
+async fn fetch_and_cache_stats(
     db: &AppDb,
     master_key: &MasterKey,
     repo_id: &str,
@@ -169,7 +175,7 @@ fn fetch_and_cache_stats(
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
-    let stdout = run_restic_with_path(&repo, vec!["stats", "--json"], &restic_path)?;
+    let stdout = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await?;
     let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
         .ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
@@ -199,16 +205,20 @@ pub async fn check_repo(
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
-    let started = std::time::Instant::now();
-    let output = std::process::Command::new(&restic_path)
-        .args(["check", "--json"])
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
-        .no_console()
-        .augment_path()
-        .output()
-        .map_err(|e| format!("Failed to run restic: {e}"))?;
-    let duration_seconds = started.elapsed().as_secs_f64();
+    let (output, duration_seconds) = tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let output = std::process::Command::new(&restic_path)
+            .args(["check", "--json"])
+            .env("RESTIC_REPOSITORY", &repo.path)
+            .env("RESTIC_PASSWORD", &repo.password)
+            .no_console()
+            .augment_path()
+            .output()
+            .map_err(|e| format!("Failed to run restic: {e}"))?;
+        Ok::<_, String>((output, started.elapsed().as_secs_f64()))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

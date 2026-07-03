@@ -53,6 +53,9 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle) {
         Err(_) => return,
     };
 
+    // Fetched once per sweep rather than per repo — it's the same settings lookup every time.
+    let restic_path = crate::commands::get_restic_path(&db);
+
     for repo_meta in repos {
         if !remote_auto_refresh && is_remote(&repo_meta.path) {
             continue;
@@ -63,7 +66,7 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle) {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let restic_path = crate::commands::get_restic_path(&db);
+        let restic_path = restic_path.clone();
         let app2 = app.clone();
 
         let result = tauri::async_runtime::spawn_blocking(move || {
