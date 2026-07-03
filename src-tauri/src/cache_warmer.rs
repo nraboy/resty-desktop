@@ -1,3 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -15,18 +18,27 @@ fn is_remote(path: &str) -> bool {
     REMOTE_PREFIXES.iter().any(|p| path.starts_with(p))
 }
 
+fn hash_str(s: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn spawn(app: tauri::AppHandle) {
     let running = Arc::new(AtomicBool::new(false));
+    // Tracks the last-seen `restic snapshots --json` hash per repo so
+    // refresh_all_snapshots can skip the cache rewrite when nothing changed.
+    let mut snapshot_hashes: HashMap<String, u64> = HashMap::new();
 
     tauri::async_runtime::spawn(async move {
         // Short initial delay to let the app finish initialising before the first sweep.
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        refresh_all_snapshots(&app).await;
+        refresh_all_snapshots(&app, &mut snapshot_hashes).await;
         trigger_sweep(&app, &running);
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            refresh_all_snapshots(&app).await;
+            refresh_all_snapshots(&app, &mut snapshot_hashes).await;
             trigger_sweep(&app, &running);
         }
     });
@@ -34,7 +46,11 @@ pub fn spawn(app: tauri::AppHandle) {
 
 /// Refreshes the snapshots cache for all eligible repos. Always runs on every
 /// 60s tick regardless of the auto_indexing setting; respects remote_auto_refresh.
-async fn refresh_all_snapshots(app: &tauri::AppHandle) {
+/// Skips the cache rewrite (and the `snapshots:refreshed` emit) for a repo when its
+/// `restic snapshots --json` output hasn't changed since the last tick, tracked via
+/// `snapshot_hashes` — avoids a full DELETE+re-INSERT every minute for the common
+/// case of an unchanged snapshot list.
+async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut HashMap<String, u64>) {
     let db = app.state::<AppDb>();
     let master_key = app.state::<MasterKey>();
 
@@ -75,8 +91,14 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle) {
         .await;
 
         if let Ok(Ok(json)) = result {
+            let new_hash = hash_str(&json);
+            if snapshot_hashes.get(&repo_id) == Some(&new_hash) {
+                continue; // Unchanged since last tick — skip the cache rewrite and emit.
+            }
+
             let db2 = app2.state::<AppDb>();
             if db2.set_snapshots(&repo_id, &json).is_ok() {
+                snapshot_hashes.insert(repo_id.clone(), new_hash);
                 let _ = app2.emit("snapshots:refreshed", serde_json::json!({ "repoId": repo_id }));
             }
         }

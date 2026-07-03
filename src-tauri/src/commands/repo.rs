@@ -401,7 +401,7 @@ pub async fn prune_all_repos(
 
         if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
             let unlock_repo = FullRepository { path: path_for_unlock, password: pass_for_unlock };
-            let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path_for_unlock);
+            let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path_for_unlock).await;
             return Err("Cancelled".to_string());
         }
 
@@ -478,7 +478,7 @@ pub async fn prune_repo(
 
     if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         let unlock_repo = FullRepository { path: path_for_unlock, password: pass_for_unlock };
-        let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path_for_unlock);
+        let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path_for_unlock).await;
         return Err("Cancelled".to_string());
     }
 

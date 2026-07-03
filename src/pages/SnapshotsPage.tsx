@@ -103,6 +103,7 @@ export default function SnapshotsPage() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<{ snapshotId: string; repoId: string; success: boolean }>("index:done", (e) => {
+      if (e.payload.repoId !== repoId) return;
       const { snapshotId, success } = e.payload;
       setIndexStatus((prev) => ({
         ...prev,
@@ -120,7 +121,7 @@ export default function SnapshotsPage() {
       else unlisten = u;
     });
     return () => { cancelled = true; unlisten?.(); };
-  }, []);
+  }, [repoId]);
 
   useEffect(() => {
     if (!repoId) return;

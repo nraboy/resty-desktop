@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getRestorePath, listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
 import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
-import { formatSize } from "../lib/format";
+import { formatSize, formatDateOnly } from "../lib/format";
 import Button from "../components/Button";
 import ContextMenu from "../components/ContextMenu";
 import Modal from "../components/Modal";
@@ -407,7 +407,7 @@ export default function BrowsePage() {
                     {entry.type === "dir" ? "—" : formatSize(entry.size)}
                   </td>
                   <td className="px-4 py-2.5 text-gray-500 text-xs">
-                    {entry.mtime ? new Date(entry.mtime).toLocaleDateString() : "—"}
+                    {entry.mtime ? formatDateOnly(entry.mtime) : "—"}
                   </td>
                   <td className="px-4 py-2.5">
                     <button

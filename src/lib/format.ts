@@ -16,17 +16,29 @@ export function formatSize(bytes?: number): string {
   return formatBytes(bytes);
 }
 
+// Constructing an Intl.DateTimeFormat is relatively expensive; formatDate is called
+// once per row in search result lists (up to 200 rows) that re-render on every
+// keystroke/debounce, so a single module-level formatter is reused across calls.
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 /** Format an ISO string or a Unix-seconds timestamp as a locale date-time, zero-padded (e.g. "06/01/2026, 03:45:12 PM"). */
 export function formatDate(value: string | number): string {
   const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
-  return date.toLocaleString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return dateTimeFormatter.format(date);
+}
+
+const dateOnlyFormatter = new Intl.DateTimeFormat(undefined);
+
+/** Format an ISO string as a locale date (no time), e.g. for file-browser mtimes. */
+export function formatDateOnly(value: string): string {
+  return dateOnlyFormatter.format(new Date(value));
 }
 
 /** Like formatDate for Unix-seconds, but renders missing values as "Never". */

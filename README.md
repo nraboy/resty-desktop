@@ -22,11 +22,12 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 - **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning
 - **Snapshot diff** — compare any two snapshots to see exactly what was added, removed, or modified, with per-entry restore directly from the diff view
 - **File browser** — navigate the file tree inside any snapshot and restore individual files, directories, or entire snapshots
-- **File search** — search across all files in an indexed snapshot by name or path; clicking a result opens the file browser at that location
+- **File search** — search by name or path across all files in a single indexed snapshot, or across every indexed snapshot in a repository at once; clicking a result opens the file browser at that location
 - **Bandwidth limits** — optionally throttle upload and download speeds per backup plan for remote repositories
 - **System tray** — optionally minimize to the system tray so scheduled backups continue running while the window is closed
 - **Themes** — dark, light, and system appearance modes
 - **Logs** — persistent history of every backup run with duration, file counts, bytes added, and snapshot ID
+- **Import / Export** — export all repositories, backup plans, and schedules to a passphrase-protected file for backup or migration to another machine; import that file back, or import an existing [Backrest](https://github.com/garethgeorge/backrest) `config.json` to bring over its repos and plans
 
 ## Download
 
