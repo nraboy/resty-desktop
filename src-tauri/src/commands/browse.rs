@@ -109,6 +109,21 @@ pub async fn restore_path(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+
+    // Nest under a short_id subfolder so restoring the same (or different) file across
+    // multiple snapshots into the same target_dir doesn't merge their contents together —
+    // matches restore_snapshot's behavior. Skipped when strip_leading_path is set: that
+    // mode already collapses the result to a bare basename directly in target_dir, which
+    // the caller explicitly asked for.
+    let restic_target = if strip_leading_path {
+        target_dir.clone()
+    } else {
+        std::path::Path::new(&target_dir)
+            .join(&snapshot_id[..8])
+            .to_string_lossy()
+            .into_owned()
+    };
+
     let restic_result = run_restic_blocking(
         repo,
         vec![
@@ -117,7 +132,7 @@ pub async fn restore_path(
             "--include".into(),
             include_path.clone(),
             "--target".into(),
-            target_dir.clone(),
+            restic_target.clone(),
         ],
         restic_path,
     )
@@ -222,6 +237,14 @@ pub async fn restore_snapshot(
 
     let repo_path = repo.path.clone();
     let repo_password = repo.password.clone();
+
+    // Nest under a short_id subfolder so restoring multiple snapshots to the same
+    // target_dir doesn't merge their contents together. validate_snapshot_id above
+    // guarantees at least 8 hex chars, matching restic's own short_id convention.
+    let target_dir = std::path::Path::new(&target_dir)
+        .join(&snapshot_id[..8])
+        .to_string_lossy()
+        .into_owned();
 
     restore_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&restore_handle.child);
