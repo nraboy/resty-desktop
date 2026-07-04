@@ -258,6 +258,7 @@ pub async fn restore_snapshot(
             .args(["restore", &snapshot_id, "--target", &target_dir, "--json"])
             .env("RESTIC_REPOSITORY", &repo_path)
             .env("RESTIC_PASSWORD", &repo_password)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .no_console()
