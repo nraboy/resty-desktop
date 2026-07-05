@@ -199,6 +199,11 @@ export const listFiles = (repoId: string, snapshotId: string, path?: string): Pr
 export const indexSnapshot = (repoId: string, snapshotId: string): Promise<boolean> =>
   invoke("index_snapshot", { repoId, snapshotId });
 
+export const indexSnapshotsBatch = (repoId: string, snapshotIds: string[]): Promise<void> =>
+  invoke("index_snapshots_batch", { repoId, snapshotIds });
+
+export const cancelIndexBatch = (): Promise<void> => invoke("cancel_index_batch");
+
 export const searchSnapshotFiles = (repoId: string, snapshotId: string, query: string): Promise<FileEntry[]> =>
   invoke("search_snapshot_files", { repoId, snapshotId, query });
 

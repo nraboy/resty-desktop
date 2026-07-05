@@ -89,9 +89,12 @@ src/
                             #   search_repo_files, which dedups each matching path to the newest snapshot
                             #   containing it (shown as a snapshot short-id badge per result; clicking opens that
                             #   snapshot's BrowsePage). Banner shows "Searching N of M snapshots" with an "Index
-                            #   All" action when the repo is only partially indexed; a modal with a real
+                            #   All" action when the repo is only partially indexed; "Index All" calls
+                            #   index_snapshots_batch once (backend indexes sequentially, one snapshot at a time,
+                            #   pausing the auto-indexer for the run — see browse.rs); a modal with a real
                             #   progress bar (derived from index:done events matched against the batch's target
-                            #   snapshot ids) tracks the Index All run
+                            #   snapshot ids) tracks the run, with a Stop button (cancel_index_batch; takes effect
+                            #   between snapshots) shown while in progress
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;
@@ -114,7 +117,7 @@ src-tauri/
   src/
     main.rs        # Calls restic_gui_lib::run()
     lib.rs         # Tauri builder; registers all commands; manages AppDb, MasterKey, CopyHandle, MirrorHandle,
-                   #   BackupHandle, PruneHandle as state; native menu bar (auth-aware, skipped on Linux) with
+                   #   BackupHandle, PruneHandle, RestoreHandle, IndexHandle as state; native menu bar (auth-aware, skipped on Linux) with
                    #   Import/Export and Help items; system tray created lazily after unlock (activate_tray);
                    #   TRAY_GEN counter avoids ID collisions; window close → hide-to-tray if tray_enabled, else exit;
                    #   RunEvent::Reopen (macOS only)
@@ -143,6 +146,16 @@ src-tauri/
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
                      #   index_snapshot (fire-and-forget manual indexing, emits index:done when complete);
+                     #   index_snapshots_batch ("Index All": fire-and-forget, indexes snapshot_ids sequentially
+                     #   one at a time in a single spawned task — bounds memory to one snapshot's file list;
+                     #   emits index:done per snapshot, same payload shape as index_snapshot; a failed snapshot
+                     #   doesn't abort the batch); cancel_index_batch (sets IndexHandle::cancel; batch checks it
+                     #   between snapshots, never mid-restic); both index_snapshot and index_snapshots_batch set
+                     #   IndexHandle::manual_active for their duration (cleared via a ManualIndexGuard Drop impl,
+                     #   created inside the spawned task so it stays set for the whole run) so cache_warmer's
+                     #   auto-indexer pauses while manual indexing is active, and take IndexHandle::gate
+                     #   (tokio::sync::Mutex<()>, held across the run_full_index spawn_blocking) so a manual
+                     #   index can never overlap with an in-flight auto-indexed snapshot;
                      #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
                      #   clear_snapshot_index: deletes browse_cache_files + browse_cache_status for one snapshot via db.evict();
                      #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files;
@@ -177,7 +190,11 @@ src-tauri/
                      #   (2) trigger_sweep — only runs if auto_indexing=true, continuously indexes one uncached
                      #   snapshot at a time via run_full_index until nothing remains, emits index:done per snapshot.
                      #   Both phases respect remote_auto_refresh (skip remote repos when disabled).
-                     #   AtomicBool running prevents overlapping file-index sweeps.
+                     #   AtomicBool running prevents overlapping file-index sweeps. trigger_sweep/index_next also
+                     #   check IndexHandle::manual_active and yield (sweep stops cleanly, retries next tick) while
+                     #   manual indexing (index_snapshot / index_snapshots_batch, browse.rs) is active; index_next's
+                     #   run_full_index call takes IndexHandle::gate to close the race against an in-flight manual
+                     #   index — see browse.rs's index_snapshots_batch doc comment.
   scheduler.rs       # 60s background tick; runs due schedules via execute_backup; applies retention after backup;
                      #   skips when locked or when a backup is already running (busy flag); AtomicBool guards against overlapping ticks
 ```

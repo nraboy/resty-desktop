@@ -9,7 +9,7 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 use crate::commands::browse::run_full_index;
-use crate::commands::cache::{AppDb, MasterKey};
+use crate::commands::cache::{AppDb, IndexHandle, MasterKey};
 use crate::commands::repo::run_restic_with_path;
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
@@ -108,6 +108,9 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut Has
 /// Starts a file-indexing sweep if auto_indexing is enabled and one is not
 /// already running. The sweep continuously indexes uncached snapshots one at a
 /// time with no delay between them, stopping only when there is nothing left.
+/// Does not start while manual indexing (single-snapshot or "Index All") is
+/// active — see `IndexHandle::manual_active`; the sweep resumes on a later
+/// tick once manual indexing finishes.
 fn trigger_sweep(app: &tauri::AppHandle, running: &Arc<AtomicBool>) {
     let db = app.state::<AppDb>();
     let auto_indexing = db
@@ -117,6 +120,10 @@ fn trigger_sweep(app: &tauri::AppHandle, running: &Arc<AtomicBool>) {
 
     if !auto_indexing {
         return;
+    }
+
+    if app.state::<IndexHandle>().manual_active.load(Ordering::SeqCst) {
+        return; // manual indexing in progress — yield this tick
     }
 
     if running.swap(true, Ordering::SeqCst) {
@@ -147,8 +154,15 @@ enum SweepResult {
 async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let db = app.state::<AppDb>();
     let master_key = app.state::<MasterKey>();
+    let index_handle = app.state::<IndexHandle>();
 
     if master_key.get().is_err() {
+        return SweepResult::Locked;
+    }
+
+    if index_handle.manual_active.load(Ordering::SeqCst) {
+        // Manual indexing (single-snapshot or "Index All") is active — stop
+        // the sweep loop cleanly; it will restart on a later tick.
         return SweepResult::Locked;
     }
 
@@ -202,6 +216,9 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let emit_repo_id = repo_id.clone();
     let emit_snapshot_id = snapshot_id.clone();
 
+    // Held across the spawn_blocking call so this can never overlap with a
+    // manual index — see IndexHandle::gate.
+    let _permit = index_handle.gate.lock().await;
     let ok = tauri::async_runtime::spawn_blocking(move || {
         let db_inner = app2.state::<AppDb>();
         let result = run_full_index(&db_inner, &repo_id, &repo, &snapshot_id, &restic_path);
@@ -212,6 +229,7 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     })
     .await
     .unwrap_or(false);
+    drop(_permit);
 
     let _ = app.emit("index:done", serde_json::json!({
         "snapshotId": emit_snapshot_id,

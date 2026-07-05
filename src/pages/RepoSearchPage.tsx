@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { getSnapshotIndexStatus, indexSnapshot, listSnapshots, searchRepoFiles } from "../lib/invoke";
+import { cancelIndexBatch, getSnapshotIndexStatus, indexSnapshotsBatch, listSnapshots, searchRepoFiles } from "../lib/invoke";
 import type { RepoFileHit, Snapshot } from "../lib/types";
 import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
@@ -51,6 +51,7 @@ export default function RepoSearchPage() {
   const [indexAllOpen, setIndexAllOpen] = useState(false);
   const [indexAllTargets, setIndexAllTargets] = useState<string[]>([]);
   const [indexAllCompleted, setIndexAllCompleted] = useState<Set<string>>(new Set());
+  const [indexAllStopped, setIndexAllStopped] = useState(false);
   const indexAllTargetsRef = useRef<string[]>([]);
 
   const [query, setQuery] = useState(locationState?.restoredQuery ?? "");
@@ -173,14 +174,25 @@ export default function RepoSearchPage() {
     if (targets.length === 0) return;
     setIndexAllError("");
     setIndexAllCompleted(new Set());
+    setIndexAllStopped(false);
     setIndexAllTargets(targets);
     setIndexAllOpen(true);
     try {
-      for (const id of targets) {
-        await indexSnapshot(repoId, id);
-      }
+      // Indexed sequentially, one snapshot at a time, by the backend — bounds
+      // memory to a single snapshot's file list and pauses the background
+      // auto-indexer for the duration. Progress arrives via index:done below.
+      await indexSnapshotsBatch(repoId, targets);
     } catch {
-      setIndexAllError("Failed to start indexing for some snapshots.");
+      setIndexAllError("Failed to start indexing.");
+    }
+  };
+
+  const handleStopIndexAll = async () => {
+    try {
+      await cancelIndexBatch();
+      setIndexAllStopped(true);
+    } catch {
+      // best-effort; batch will keep running if this fails
     }
   };
 
@@ -367,7 +379,19 @@ export default function RepoSearchPage() {
         open={indexAllOpen}
         onClose={() => setIndexAllOpen(false)}
       >
-        {indexAllDoneCount < indexAllTotal ? (
+        {indexAllStopped && indexAllDoneCount < indexAllTotal ? (
+          <div className="py-2">
+            <p className="text-sm text-gray-300 mb-3">
+              Stopped after {indexAllDoneCount} of {indexAllTotal} snapshots.
+            </p>
+            <p className="text-xs text-gray-600 mb-4">
+              The remaining snapshots were not indexed. You can resume later from this page.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        ) : indexAllDoneCount < indexAllTotal ? (
           <div className="py-2">
             <p className="text-sm text-gray-300 mb-3">
               Indexing {indexAllDoneCount} of {indexAllTotal} snapshots…
@@ -379,9 +403,11 @@ export default function RepoSearchPage() {
               />
             </div>
             <p className="text-xs text-gray-600 mb-4">
-              You can close this and keep browsing — indexing continues in the background.
+              Snapshots are indexed one at a time. You can close this and keep browsing —
+              indexing continues in the background.
             </p>
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={handleStopIndexAll}>Stop</Button>
               <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
             </div>
           </div>

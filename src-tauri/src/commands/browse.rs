@@ -373,14 +373,35 @@ pub(crate) fn run_full_index(
     db.set_browse_status(repo_id, snapshot_id, "complete")
 }
 
+/// Marks `manual_active` for the lifetime of a manual indexing run (single or
+/// batch) so the cache_warmer auto-indexer knows to pause. Cleared on drop —
+/// created inside the spawned task so it stays set for the whole run and
+/// clears on every exit path, including per-snapshot errors.
+struct ManualIndexGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl ManualIndexGuard {
+    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag)
+    }
+}
+impl Drop for ManualIndexGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Manually trigger full indexing for a snapshot. Fire-and-forget: returns
 /// immediately and runs the index in the background. Safe to call on remote
-/// repos since the user explicitly requested it.
+/// repos since the user explicitly requested it. Pauses the auto-indexer
+/// (via `IndexHandle::manual_active`) for the duration and takes the shared
+/// `IndexHandle::gate` around the actual indexing work so it never overlaps
+/// with an in-flight auto-indexed snapshot.
 #[tauri::command]
 pub async fn index_snapshot(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    index_handle: State<'_, super::cache::IndexHandle>,
     repo_id: String,
     snapshot_id: String,
 ) -> Result<bool, String> {
@@ -399,8 +420,12 @@ pub async fn index_snapshot(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
+    let gate = std::sync::Arc::clone(&index_handle.gate);
 
     tauri::async_runtime::spawn(async move {
+        let _guard = ManualIndexGuard::new(manual_active);
+
         let repo_path = repo.path.clone();
         let repo_pass = repo.password.clone();
         let snap_id = snapshot_id.clone();
@@ -408,6 +433,7 @@ pub async fn index_snapshot(
         let rp = restic_path.clone();
         let app2 = app.clone();
 
+        let _permit = gate.lock().await;
         let ok = tauri::async_runtime::spawn_blocking(move || {
             let tmp_repo = super::cache::FullRepository {
                 path: repo_path,
@@ -418,6 +444,7 @@ pub async fn index_snapshot(
         })
         .await
         .unwrap_or(false);
+        drop(_permit);
 
         if !ok {
             let _ = app2
@@ -432,6 +459,111 @@ pub async fn index_snapshot(
     });
 
     Ok(true)
+}
+
+/// Sequentially index a batch of snapshots in a single repo ("Index All").
+/// Runs one `run_full_index` at a time (bounding memory to a single
+/// snapshot's file list — see module docs for the concurrent-indexing crash
+/// this replaces), pauses the auto-indexer for the duration via
+/// `IndexHandle::manual_active`, and takes `IndexHandle::gate` around each
+/// snapshot so it can never overlap with an auto-indexed one. Fire-and-forget:
+/// returns immediately; progress is reported per-snapshot via `index:done`
+/// (same payload shape as `index_snapshot`), matching what the frontend
+/// "Index All" progress UI already listens for. A snapshot that fails to
+/// index does not abort the batch — the loop continues to the next one.
+/// Cancellable between snapshots via `cancel_index_batch`.
+#[tauri::command]
+pub async fn index_snapshots_batch(
+    app: tauri::AppHandle,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    index_handle: State<'_, super::cache::IndexHandle>,
+    repo_id: String,
+    snapshot_ids: Vec<String>,
+) -> Result<(), String> {
+    for id in &snapshot_ids {
+        validate_snapshot_id(id)?;
+    }
+
+    let key = master_key.get()?;
+    let repo = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
+    let gate = std::sync::Arc::clone(&index_handle.gate);
+    let cancel = std::sync::Arc::clone(&index_handle.cancel);
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    tauri::async_runtime::spawn(async move {
+        let _guard = ManualIndexGuard::new(manual_active);
+
+        for snapshot_id in snapshot_ids {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+
+            let db_outer = app.state::<AppDb>();
+            let status_map = match db_outer.get_browse_status(&repo_id) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if matches!(
+                status_map.get(&snapshot_id).map(|s| s.as_str()),
+                Some("complete") | Some("in_progress")
+            ) {
+                continue;
+            }
+            if db_outer
+                .set_browse_status(&repo_id, &snapshot_id, "in_progress")
+                .is_err()
+            {
+                continue;
+            }
+
+            let repo_path = repo.path.clone();
+            let repo_pass = repo.password.clone();
+            let snap_id = snapshot_id.clone();
+            let repo_id2 = repo_id.clone();
+            let rp = restic_path.clone();
+            let app2 = app.clone();
+
+            let _permit = gate.lock().await;
+            let ok = tauri::async_runtime::spawn_blocking(move || {
+                let tmp_repo = super::cache::FullRepository {
+                    path: repo_path,
+                    password: repo_pass,
+                };
+                let db_inner = app2.state::<AppDb>();
+                run_full_index(&db_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            drop(_permit);
+
+            if !ok {
+                let _ = app
+                    .state::<AppDb>()
+                    .set_browse_status(&repo_id, &snapshot_id, "pending");
+            }
+
+            let _ = app.emit(
+                "index:done",
+                serde_json::json!({ "snapshotId": snapshot_id, "repoId": repo_id.clone(), "success": ok }),
+            );
+        }
+    });
+
+    Ok(())
+}
+
+/// Signals an in-progress `index_snapshots_batch` run to stop after the
+/// currently-indexing snapshot finishes. Has no effect if no batch is running.
+#[tauri::command]
+pub fn cancel_index_batch(index_handle: State<'_, super::cache::IndexHandle>) -> Result<(), String> {
+    index_handle
+        .cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 /// Runs on a blocking-pool thread (via `spawn_blocking`) rather than inline: this query

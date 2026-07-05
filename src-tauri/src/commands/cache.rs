@@ -171,6 +171,34 @@ impl RestoreHandle {
     }
 }
 
+/// Coordinates manual (user-triggered) snapshot indexing with the background
+/// cache_warmer auto-indexer so at most one `run_full_index` ever runs at a
+/// time, bounding memory to a single snapshot's file list.
+pub struct IndexHandle {
+    /// Set for the entire duration of any manual indexing run (single-snapshot
+    /// or batch). The cache_warmer sweep checks this to avoid starting new
+    /// auto-indexing work while manual indexing is active.
+    pub manual_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Acquired around every `run_full_index` call, in both the manual and
+    /// auto-indexer paths, held across the `spawn_blocking(...).await`. Closes
+    /// the race where the auto sweep is already mid-index when manual
+    /// indexing starts — guarantees strictly one indexing process at a time.
+    pub gate: Arc<tokio::sync::Mutex<()>>,
+    /// Set by `cancel_index_batch` to stop an in-progress "Index All" batch
+    /// between snapshots (never mid-`restic`).
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl IndexHandle {
+    pub fn new() -> Self {
+        Self {
+            manual_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
 // ── in-memory master-key state ─────────────────────────────────────────────
 
 pub struct MasterKey(pub Mutex<Option<[u8; 32]>>);

@@ -211,6 +211,7 @@ pub fn run() {
             app.manage(cache::BackupHandle::new());
             app.manage(cache::PruneHandle::new());
             app.manage(cache::RestoreHandle::new());
+            app.manage(cache::IndexHandle::new());
 
             // Tray is created lazily after unlock via activate_tray command.
             app.manage(TrayState(Mutex::new(None)));
@@ -319,6 +320,8 @@ pub fn run() {
             browse::restore_snapshot,
             browse::cancel_restore,
             browse::index_snapshot,
+            browse::index_snapshots_batch,
+            browse::cancel_index_batch,
             browse::search_snapshot_files,
             browse::search_repo_files,
             browse::get_snapshot_index_status,
