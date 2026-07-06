@@ -1908,8 +1908,13 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
 }
 
 #[tauri::command]
-pub fn clear_browse_cache(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
-    db.clear_cache()
+pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.clear_cache()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
