@@ -273,13 +273,12 @@ impl AppDb {
                  DROP TABLE IF EXISTS browse_cache_status;
                  PRAGMA user_version = 2;",
             )?;
-            // DROP TABLE only frees pages into SQLite's internal freelist —
-            // it doesn't shrink the file on disk. Installs that had indexed a
-            // lot of snapshots could be sitting on hundreds of MB of dead
-            // space otherwise, so reclaim it as part of this migration rather
-            // than waiting for the user to notice and hit "Clear All Cache".
-            let _ = conn.execute_batch("VACUUM;");
-            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            // DROP TABLE moves pages to SQLite's freelist; the data is gone.
+            // We deliberately do NOT VACUUM here — doing so on the main thread
+            // would block window creation for an O(file-size) rewrite on upgrade.
+            // The freelist pages are reused in place as the cache rebuilds via
+            // re-indexing (no doubling), and users who want to shrink the file
+            // can use "Clear All Cache", which already does its own VACUUM.
         }
 
         conn.execute_batch(
@@ -2477,5 +2476,92 @@ mod tests {
         // A repo with no cached rows returns an empty Vec, not an error — matches
         // the old get_snapshots() `None` -> `Ok(vec![])` fallback in list_snapshots.
         assert!(db.get_snapshots_vec("no-such-repo").unwrap().is_empty());
+    }
+
+    #[test]
+    fn v1_to_v2_migration_does_not_vacuum() {
+        // Build a DB in the v1 state: user_version=1 and v1-shaped browse cache.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;")
+            .expect("set user_version to 1");
+
+        // Create v1-shaped browse_cache_files (old schema: snapshot_id TEXT, name, per-row cached_at).
+        conn.execute_batch(
+            "CREATE TABLE browse_cache_files (
+                 snapshot_id TEXT,
+                 path TEXT,
+                 parent_path TEXT,
+                 name TEXT,
+                 entry_type TEXT,
+                 size INTEGER,
+                 mtime INTEGER,
+                 mode INTEGER
+             );
+             CREATE TABLE browse_cache_status (
+                 repo_id TEXT,
+                 snapshot_id TEXT,
+                 status TEXT,
+                 cached_at INTEGER,
+                 PRIMARY KEY (repo_id, snapshot_id)
+             );",
+        )
+        .expect("create v1 tables");
+
+        // Populate enough rows to span multiple pages so freelist_count is clearly > 0 after DROP.
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO browse_cache_files (snapshot_id, path, parent_path, name, entry_type, size, mtime, mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .expect("prepare insert");
+        for i in 0..2000 {
+            let snap_id = format!("{:064x}", i);
+            let path = format!("/some/deep/path/to/file_{:04}.txt", i);
+            stmt.execute((
+                snap_id.as_str(),
+                path.as_str(),
+                "/some/deep/path/to",
+                "file",
+                "file",
+                1234i64,
+                0i64,
+                0i64,
+            ))
+            .expect("insert row");
+        }
+
+        // Run init_schema — this should perform the v1→v2 migration (but NOT vacuum).
+        AppDb::init_schema(&conn).expect("init_schema v1→v2 migration");
+
+        // user_version must be bumped to 2.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("query user_version");
+        assert_eq!(version, 2, "user_version must be 2 after v1→v2 migration");
+
+        // browse_cache_files must have the v2 schema (interned `snap` column, no `name`).
+        let mut table_info = conn
+            .prepare("PRAGMA table_info(browse_cache_files)")
+            .expect("prepare table_info");
+        let has_snap_column = table_info
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query column names")
+            .any(|name_res| matches!(name_res, Ok(name) if name == "snap"));
+        assert!(
+            has_snap_column,
+            "v2 browse_cache_files must have the interned `snap` column"
+        );
+
+        // Critical regression guard: VACUUM must NOT have run. The dropped-table pages
+        // should still be on the freelist (freelist_count > 0). A VACUUM would have
+        // reclaimed them to ~0 and shrunk the file.
+        let freelist_count: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .expect("query freelist_count");
+        assert!(
+            freelist_count > 0,
+            "freelist_count must be > 0 after migration (no VACUUM); got {}",
+            freelist_count
+        );
     }
 }
