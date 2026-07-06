@@ -1,12 +1,19 @@
-// Collapsible right-side drawer surfacing background activity the user has no other
+// Right-side activity overlay surfacing background activity the user has no other
 // visibility into: auto-indexing progress and scheduler-triggered backups (ACTIVE TASKS),
 // the next couple of due schedules (UPCOMING TASKS), and the last couple of backup runs
 // (RECENT LOGS). Restore/copy/mirror/manual backup/prune already have their own progress
 // modals and are intentionally excluded — see src/lib/activity.tsx.
 //
+// Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
+// normal sibling, so it never changes the width available to routed page content. Clicking it
+// opens a `fixed` drawer that slides in over the content (no reflow, no scrim) — dismissed via
+// the chevron button or a click outside the drawer. The drawer is always mounted and animated
+// with a transform so it slides both in and out; it's just off-screen + non-interactive when
+// closed.
+//
 // Open/closed state is self-contained (toggled here, always closed on launch) so mounting
 // this once in App.tsx doesn't require every page to grow a toolbar toggle button.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
 import { formatBytes, formatRelative } from "../lib/format";
 
@@ -48,11 +55,23 @@ function ErrorIcon() {
 export default function ActivityPanel() {
   const { indexing, activeBackup, upcoming, recentLogs } = useActivity();
   const [open, setOpen] = useState(false);
+  const panelRef = useRef<HTMLElement>(null);
 
   const hasActive = indexing != null || activeBackup != null;
 
-  if (!open) {
-    return (
+  useEffect(() => {
+    if (!open) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, [open]);
+
+  return (
+    <>
       <button
         onClick={() => setOpen(true)}
         title="Show activity"
@@ -65,87 +84,90 @@ export default function ActivityPanel() {
           <span className="absolute top-3 w-1.5 h-1.5 rounded-full bg-blue-500" aria-label="Activity in progress" />
         )}
       </button>
-    );
-  }
 
-  return (
-    <aside className="w-64 flex-shrink-0 bg-gray-900 border-l border-gray-800 flex flex-col h-full overflow-y-auto">
-      <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
-        <h2 className="text-sm font-bold text-gray-50 tracking-tight">Task Activity</h2>
-        <button
-          onClick={() => setOpen(false)}
-          title="Hide activity"
-          className="text-gray-500 hover:text-gray-300 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
-      </div>
-
-      <div className="flex-1">
-        <div className="border-b border-gray-800 pb-1">
-          <SectionHeading>Active Tasks</SectionHeading>
-          {!hasActive && <EmptyRow>Nothing running in the background right now.</EmptyRow>}
-          <div className="space-y-3 px-4 pb-3">
-            {indexing && (
-              <div className="space-y-2">
-                <p className="text-sm text-gray-200">Indexing snapshots</p>
-                <ProgressBar percent={(indexing.cached / Math.max(1, indexing.total)) * 100} />
-                <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
-              </div>
-            )}
-            {activeBackup && (
-              <div className="space-y-2">
-                <p className="text-sm text-gray-200 truncate" title={`${activeBackup.scheduleName} — ${activeBackup.planName}`}>
-                  {activeBackup.planName} <span className="text-gray-500">· {activeBackup.scheduleName}</span>
-                </p>
-                <ProgressBar percent={(activeBackup.progress?.percentDone ?? 0) * 100} />
-                <p className="text-xs text-gray-500">
-                  {activeBackup.progress
-                    ? `${activeBackup.progress.filesDone.toLocaleString()} / ${activeBackup.progress.totalFiles.toLocaleString()} files`
-                    : "Starting…"}
-                </p>
-              </div>
-            )}
-          </div>
+      <aside
+        ref={panelRef}
+        className={`fixed inset-y-0 right-0 w-80 z-40 bg-gray-900 border-l border-gray-800 flex flex-col overflow-y-auto shadow-xl transition-transform duration-200 ${
+          open ? "translate-x-0" : "translate-x-full pointer-events-none"
+        }`}
+      >
+        <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
+          <h2 className="text-sm font-bold text-gray-50 tracking-tight">Task Activity</h2>
+          <button
+            onClick={() => setOpen(false)}
+            title="Hide activity"
+            className="text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
         </div>
 
-        <div className="border-b border-gray-800 pb-1">
-          <SectionHeading>Upcoming Tasks</SectionHeading>
-          {upcoming.length === 0 && <EmptyRow>No enabled schedules due.</EmptyRow>}
-          <div className="space-y-2 px-4 pb-3">
-            {upcoming.map((u) => (
-              <div key={u.scheduleId} className="text-sm">
-                <p className="text-gray-200 truncate">{u.scheduleName}</p>
-                <p className="text-xs text-gray-500 truncate">
-                  {u.planNames.join(", ") || "No plans"} · {formatRelative(u.nextRunAt)}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <SectionHeading>Recent Logs</SectionHeading>
-          {recentLogs.length === 0 && <EmptyRow>No backups have run yet.</EmptyRow>}
-          <div className="space-y-2 px-4 pb-4">
-            {recentLogs.map((entry) => (
-              <div key={entry.id} className="space-y-0.5">
-                <div className="flex items-center gap-2">
-                  {entry.error ? <ErrorIcon /> : <SuccessIcon />}
-                  <p className="text-sm text-gray-200 truncate min-w-0">
-                    {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
+        <div className="flex-1">
+          <div className="border-b border-gray-800 pb-1">
+            <SectionHeading>Active Tasks</SectionHeading>
+            {!hasActive && <EmptyRow>Nothing running in the background right now.</EmptyRow>}
+            <div className="space-y-3 px-4 pb-3">
+              {indexing && (
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-200">Indexing snapshots</p>
+                  <ProgressBar percent={(indexing.cached / Math.max(1, indexing.total)) * 100} />
+                  <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
+                </div>
+              )}
+              {activeBackup && (
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-200 truncate" title={`${activeBackup.scheduleName} — ${activeBackup.planName}`}>
+                    {activeBackup.planName} <span className="text-gray-500">· {activeBackup.scheduleName}</span>
+                  </p>
+                  <ProgressBar percent={(activeBackup.progress?.percentDone ?? 0) * 100} />
+                  <p className="text-xs text-gray-500">
+                    {activeBackup.progress
+                      ? `${activeBackup.progress.filesDone.toLocaleString()} / ${activeBackup.progress.totalFiles.toLocaleString()} files`
+                      : "Starting…"}
                   </p>
                 </div>
-                <p className="text-xs text-gray-500 truncate pl-6" title={entry.error}>
-                  {entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
-                </p>
-              </div>
-            ))}
+              )}
+            </div>
+          </div>
+
+          <div className="border-b border-gray-800 pb-1">
+            <SectionHeading>Upcoming Tasks</SectionHeading>
+            {upcoming.length === 0 && <EmptyRow>No enabled schedules due.</EmptyRow>}
+            <div className="space-y-2 px-4 pb-3">
+              {upcoming.map((u) => (
+                <div key={u.scheduleId} className="text-sm">
+                  <p className="text-gray-200 truncate">{u.scheduleName}</p>
+                  <p className="text-xs text-gray-500 truncate">
+                    {u.planNames.join(", ") || "No plans"} · {formatRelative(u.nextRunAt)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <SectionHeading>Recent Logs</SectionHeading>
+            {recentLogs.length === 0 && <EmptyRow>No backups have run yet.</EmptyRow>}
+            <div className="space-y-2 px-4 pb-4">
+              {recentLogs.map((entry) => (
+                <div key={entry.id} className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    {entry.error ? <ErrorIcon /> : <SuccessIcon />}
+                    <p className="text-sm text-gray-200 truncate min-w-0">
+                      {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
+                    </p>
+                  </div>
+                  <p className="text-xs text-gray-500 truncate pl-6" title={entry.error}>
+                    {entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
-    </aside>
+      </aside>
+    </>
   );
 }
