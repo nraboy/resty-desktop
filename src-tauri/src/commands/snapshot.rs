@@ -449,6 +449,10 @@ pub async fn execute_backup(
                 &history_id, repo_id, plan_id, snapshot_id.as_deref(),
                 started_at, duration, files_new, files_changed, bytes_added, None,
             );
+            // Fires for every backup (manual or scheduled) — the Activity panel's Recent
+            // Logs section listens for this to refresh, since scheduler.rs's
+            // `scheduler:backup-finished` only covers scheduler-triggered runs.
+            let _ = app.emit("backup:history-updated", ());
 
             let body = format!(
                 "{} new, {} changed · {:.1}s",
@@ -466,6 +470,7 @@ pub async fn execute_backup(
                 &history_id, repo_id, plan_id, None,
                 started_at, duration, 0, 0, 0, Some(err.as_str()),
             );
+            let _ = app.emit("backup:history-updated", ());
 
             let _ = app.notification().builder()
                 .title("Backup failed")

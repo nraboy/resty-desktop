@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatBytes, formatSize, formatDate, formatTimestamp, formatDuration } from "./format";
+import { formatBytes, formatSize, formatDate, formatTimestamp, formatDuration, formatRelative } from "./format";
 
 describe("formatBytes", () => {
   it("returns '0 B' for zero", () => {
@@ -102,5 +102,27 @@ describe("formatDuration", () => {
     expect(formatDuration(3600)).toBe("1h 0m");
     expect(formatDuration(3661)).toBe("1h 1m");
     expect(formatDuration(7322)).toBe("2h 2m");
+  });
+});
+
+describe("formatRelative", () => {
+  const now = Math.floor(Date.now() / 1000);
+
+  it("formats near-future timestamps as 'in under a minute'", () => {
+    expect(formatRelative(now + 30)).toBe("in under a minute");
+  });
+
+  it("formats future minutes/hours/days", () => {
+    expect(formatRelative(now + 3 * 60)).toBe("in 3 mins");
+    expect(formatRelative(now + 60)).toBe("in 1 min");
+    expect(formatRelative(now + 3 * 3600)).toBe("in 3 hours");
+    expect(formatRelative(now + 3600)).toBe("in 1 hour");
+    expect(formatRelative(now + 4 * 86400)).toBe("in 4 days");
+  });
+
+  it("formats past timestamps as '... ago'", () => {
+    expect(formatRelative(now - 30)).toBe("just now");
+    expect(formatRelative(now - 10 * 60)).toBe("10 mins ago");
+    expect(formatRelative(now - 3600)).toBe("1 hour ago");
   });
 });

@@ -326,6 +326,7 @@ pub fn run() {
             browse::search_repo_files,
             browse::get_snapshot_index_status,
             browse::clear_snapshot_index,
+            browse::get_index_progress,
             // backup plans
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,
@@ -340,6 +341,7 @@ pub fn run() {
             // cache
             cache::clear_browse_cache,
             cache::clean_cache,
+            cache::compress_database,
             cache::get_db_size,
             cache::list_backup_history,
             // import / export

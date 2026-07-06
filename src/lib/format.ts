@@ -53,3 +53,35 @@ export function formatDuration(secs: number, fractional = false): string {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${Math.floor(secs % 60)}s`;
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
+
+/**
+ * Human-readable relative time from a Unix-seconds timestamp, e.g. "in 3 hours",
+ * "in 4 days", "10 min ago". Used by the Activity panel for upcoming schedules and
+ * recent log entries, where the mockup calls for relative phrasing rather than an
+ * absolute date-time (formatDate/formatTimestamp).
+ */
+export function formatRelative(ts: number): string {
+  const diffSecs = ts - Math.floor(Date.now() / 1000);
+  const future = diffSecs >= 0;
+  const abs = Math.abs(diffSecs);
+
+  let unit: string;
+  let amount: number;
+  if (abs < 60) {
+    unit = "min";
+    amount = 0;
+  } else if (abs < 3600) {
+    amount = Math.round(abs / 60);
+    unit = "min";
+  } else if (abs < 86400) {
+    amount = Math.round(abs / 3600);
+    unit = "hour";
+  } else {
+    amount = Math.round(abs / 86400);
+    unit = "day";
+  }
+
+  if (amount === 0) return future ? "in under a minute" : "just now";
+  const plural = amount === 1 ? unit : `${unit}s`;
+  return future ? `in ${amount} ${plural}` : `${amount} ${plural} ago`;
+}

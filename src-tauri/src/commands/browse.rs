@@ -648,6 +648,40 @@ pub fn clear_snapshot_index(
     db.evict(&repo_id, &snapshot_id)
 }
 
+/// Aggregate "N of M snapshots indexed" across all eligible repos (respects
+/// `remote_auto_refresh`, same filtering as the cache warmer's sweep). The Activity
+/// panel uses this single call instead of fetching every repo's snapshot list plus
+/// its index-status map and summing them on the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexProgress {
+    pub cached: u64,
+    pub total: u64,
+}
+
+#[tauri::command]
+pub async fn get_index_progress(app: tauri::AppHandle) -> Result<IndexProgress, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        let remote_auto_refresh = db
+            .get_setting("remote_auto_refresh", "false")
+            .unwrap_or_else(|_| "false".to_string())
+            == "true";
+
+        let repos = db.list_repos()?;
+        let eligible_repo_ids: Vec<String> = repos
+            .into_iter()
+            .filter(|r| remote_auto_refresh || !crate::cache_warmer::is_remote(&r.path))
+            .map(|r| r.id)
+            .collect();
+
+        let (cached, total) = db.get_index_progress(&eligible_repo_ids)?;
+        Ok(IndexProgress { cached, total })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 
 
 #[cfg(test)]

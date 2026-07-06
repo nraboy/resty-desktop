@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -216,6 +216,8 @@ export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, s
 export const clearSnapshotIndex = (repoId: string, snapshotId: string): Promise<void> =>
   invoke("clear_snapshot_index", { repoId, snapshotId });
 
+export const getIndexProgress = (): Promise<IndexProgress> => invoke("get_index_progress");
+
 export const restorePath = (
   repoId: string,
   snapshotId: string,
@@ -272,6 +274,9 @@ export const clearBrowseCache = (): Promise<number> =>
 
 export const cleanCache = (): Promise<[number, number]> =>
   invoke("clean_cache");
+
+export const compressDatabase = (): Promise<number> =>
+  invoke("compress_database");
 
 export const getDbSize = (): Promise<number> =>
   invoke("get_db_size");

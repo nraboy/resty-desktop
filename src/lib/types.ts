@@ -87,6 +87,11 @@ export interface RestoreProgress {
   secondsElapsed: number;
 }
 
+export interface IndexProgress {
+  cached: number;
+  total: number;
+}
+
 export interface CheckResult {
   success: boolean;
   errors: string[];

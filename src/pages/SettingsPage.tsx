@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
@@ -32,6 +32,8 @@ export default function SettingsPage() {
   const [cacheCleared, setCacheCleared] = useState(false);
   const [cleaningCache, setCleaningCache] = useState(false);
   const [cleanedCount, setCleanedCount] = useState<number | null>(null);
+  const [compressing, setCompressing] = useState(false);
+  const [compressed, setCompressed] = useState(false);
   const [dbSize, setDbSize] = useState<number | null>(null);
 
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
@@ -48,6 +50,7 @@ export default function SettingsPage() {
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const compressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const passwordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [trayEnabled, setTrayEnabledLocal] = useState(false);
@@ -96,6 +99,7 @@ export default function SettingsPage() {
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
+      if (compressTimerRef.current !== null) clearTimeout(compressTimerRef.current);
       if (passwordTimerRef.current !== null) clearTimeout(passwordTimerRef.current);
     };
   }, []);
@@ -154,6 +158,19 @@ export default function SettingsPage() {
       cleanTimerRef.current = setTimeout(() => setCleanedCount(null), 4000);
     } finally {
       setCleaningCache(false);
+    }
+  };
+
+  const handleCompressDatabase = async () => {
+    setCompressing(true);
+    try {
+      const newSize = await compressDatabase();
+      setDbSize(newSize);
+      setCompressed(true);
+      if (compressTimerRef.current !== null) clearTimeout(compressTimerRef.current);
+      compressTimerRef.current = setTimeout(() => setCompressed(false), 2000);
+    } finally {
+      setCompressing(false);
     }
   };
 
@@ -659,17 +676,22 @@ export default function SettingsPage() {
         <h2 className="text-sm font-medium text-gray-300 mb-1">Application Cache</h2>
         <p className="text-xs text-gray-500 mb-3">
           Snapshot listings and repository stats are cached locally to speed up navigation.
-          <strong className="text-gray-400"> Clean Orphaned</strong> removes only orphaned entries left
-          behind by deleted repositories and forgotten snapshots, while
+          <strong className="text-gray-400"> Clean Orphaned Data</strong> removes only orphaned entries left
+          behind by deleted repositories and forgotten snapshots,
           <strong className="text-gray-400"> Clear All Cache</strong> wipes everything (rebuilt on
-          next use).
+          next use), and
+          <strong className="text-gray-400"> Compress Database</strong> reclaims disk space left
+          behind by deleted rows without removing any data.
         </p>
         <div className="flex items-center gap-3">
           <Button variant="secondary" onClick={handleCleanCache} loading={cleaningCache}>
-            Clean Orphaned
+            Clean Orphaned Data
           </Button>
           <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
             Clear All Cache
+          </Button>
+          <Button variant="secondary" onClick={handleCompressDatabase} loading={compressing}>
+            Compress Database
           </Button>
           {cleanedCount !== null && (
             <span className="text-sm text-green-400 flex items-center gap-1">
@@ -687,6 +709,14 @@ export default function SettingsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
               Cleared
+            </span>
+          )}
+          {compressed && (
+            <span className="text-sm text-green-400 flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              Compressed
             </span>
           )}
         </div>

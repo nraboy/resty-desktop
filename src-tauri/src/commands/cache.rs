@@ -5,6 +5,7 @@ use chrono::Local;
 use cron::Schedule as CronSchedule;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -1102,7 +1103,57 @@ impl AppDb {
         }
     }
 
+    /// Aggregate indexing progress across the given eligible repos: how many of their
+    /// cached snapshots have a `browse_cache_status` row of `complete` vs. the total
+    /// snapshot count. Backs the Activity panel's single "N of M indexed" figure so the
+    /// frontend doesn't have to fetch snapshot lists + per-repo index status and sum them
+    /// itself. Mirrors the eligibility filtering `get_next_unindexed_snapshot` uses.
+    pub fn get_index_progress(&self, eligible_repo_ids: &[String]) -> Result<(u64, u64), String> {
+        if eligible_repo_ids.is_empty() {
+            return Ok((0, 0));
+        }
+        let placeholders = eligible_repo_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let total_sql = format!(
+            "SELECT COUNT(*) FROM snapshots_cache WHERE repo_id IN ({placeholders})"
+        );
+        let total: u64 = conn
+            .query_row(&total_sql, rusqlite::params_from_iter(eligible_repo_ids.iter()), |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+
+        let cached_sql = format!(
+            "SELECT COUNT(*) FROM browse_cache_status
+             WHERE repo_id IN ({placeholders}) AND status = 'complete'"
+        );
+        let cached: u64 = conn
+            .query_row(&cached_sql, rusqlite::params_from_iter(eligible_repo_ids.iter()), |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+
+        Ok((cached, total))
+    }
+
     // ── snapshots cache ──────────────────────────────────────────────────────
+
+    /// Whether `snapshots_cache` currently holds any row for this repo. Used by
+    /// the cache warmer to detect a cache that was wiped out-of-band (e.g. the
+    /// Settings page's "Clear All Cache"/"Clean Orphaned Data" buttons), which its
+    /// in-memory last-seen-hash map has no way to observe on its own.
+    pub fn has_cached_snapshots(&self, repo_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM snapshots_cache WHERE repo_id = ?1",
+                params![repo_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
 
     /// Returns cached snapshots for a repo as structs directly — no JSON string
     /// round-trip (the caller previously re-parsed a serialized string this method
@@ -1681,6 +1732,15 @@ impl AppDb {
         Ok((removed, size))
     }
 
+    /// Rewrite the database file to reclaim free pages, without deleting any
+    /// rows. Unlike `clear_cache`, this never touches live data — it's a plain
+    /// `VACUUM` for users who just want to recover disk space.
+    pub fn compress_database(&self) -> Result<u64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
+        Ok(self.checkpoint_and_size(&conn))
+    }
+
     /// Wipe all user data. Returns app to first-launch state.
     pub fn reset_all(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1863,6 +1923,16 @@ pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
 }
 
 #[tauri::command]
+pub async fn compress_database(app: tauri::AppHandle) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.compress_database()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn list_backup_history(db: tauri::State<'_, AppDb>) -> Result<Vec<BackupHistoryEntry>, String> {
     db.list_backup_history()
 }
@@ -1972,6 +2042,45 @@ mod tests {
         seed_snapshot(&db, "repoA", "aaaa111100000000");
         db.set_browse_status("repoA", "aaaa111100000000", "complete").unwrap();
         assert!(db.get_next_unindexed_snapshot(&["repoA".to_string()]).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_index_progress_returns_zero_for_empty_repo_list() {
+        let db = test_db();
+        assert_eq!(db.get_index_progress(&[]).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn get_index_progress_counts_complete_vs_total_across_eligible_repos() {
+        let db = test_db();
+        // set_snapshots is a full replace per repo_id, so both of repoA's snapshots must be
+        // seeded in a single JSON array rather than via two seed_snapshot calls.
+        let repo_a_json = r#"[
+            {"id":"aaaa111100000000","short_id":"aaaa1111","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"aaaa222200000000","short_id":"aaaa2222","time":"2024-02-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots("repoA", repo_a_json).unwrap();
+        seed_snapshot(&db, "repoB", "bbbb111100000000");
+        db.set_browse_status("repoA", "aaaa111100000000", "complete").unwrap();
+        db.set_browse_status("repoA", "aaaa222200000000", "pending").unwrap();
+        // repoB's snapshot has no status row at all — still counts toward total, not cached.
+
+        let (cached, total) = db
+            .get_index_progress(&["repoA".to_string(), "repoB".to_string()])
+            .unwrap();
+        assert_eq!(cached, 1);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn get_index_progress_ignores_repos_not_in_eligible_list() {
+        let db = test_db();
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        seed_snapshot(&db, "repoB", "bbbb111100000000");
+        db.set_browse_status("repoB", "bbbb111100000000", "complete").unwrap();
+
+        let (cached, total) = db.get_index_progress(&["repoA".to_string()]).unwrap();
+        assert_eq!((cached, total), (0, 1), "repoB must not contribute when excluded");
     }
 
     #[test]

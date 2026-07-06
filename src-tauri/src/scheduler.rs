@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::schedule::next_fire_time;
@@ -66,6 +66,16 @@ async fn tick(app: &tauri::AppHandle) {
         };
 
         for plan in plans {
+            // These events are only emitted from this background scheduler tick, never
+            // from a user-initiated run (manual "Run" on BackupPlansPage, or "Run Now" on
+            // SchedulesPage) — that's the signal the Activity panel uses to distinguish a
+            // background scheduled backup (which it surfaces) from a manual one (which
+            // already has its own progress modal and should stay out of the panel).
+            let _ = app.emit(
+                "scheduler:backup-started",
+                serde_json::json!({ "scheduleName": sched.name, "planName": plan.name }),
+            );
+
             let ok = execute_backup(
                 app,
                 &db,
@@ -81,6 +91,8 @@ async fn tick(app: &tauri::AppHandle) {
             )
             .await
             .is_ok();
+
+            let _ = app.emit("scheduler:backup-finished", serde_json::json!({ "success": ok }));
 
             if ok {
                 if let Some(r) = &plan.retention {

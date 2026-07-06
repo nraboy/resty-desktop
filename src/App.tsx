@@ -4,6 +4,8 @@ import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { ThemeProvider } from "./lib/theme";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
+import ActivityPanel from "./components/ActivityPanel";
+import { ActivityProvider } from "./lib/activity";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import SnapshotsPage from "./pages/SnapshotsPage";
 import BrowsePage from "./pages/BrowsePage";
@@ -150,45 +152,48 @@ export default function App() {
       {authState === "unlocked" && (
         <BrowserRouter>
           <MenuEventHandler />
-          <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
-            <Sidebar />
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {showVersionWarning && (
-                <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">
-                  <span>
-                    For the best experience, upgrade to <strong>restic {MIN_RESTIC_MAJOR}.{MIN_RESTIC_MINOR} or newer</strong>. Some retention and grouping features may not work correctly on older versions.
-                  </span>
-                  <button
-                    onClick={() => setShowVersionWarning(false)}
-                    className="flex-shrink-0 text-yellow-300 hover:text-yellow-100 transition-colors"
-                    aria-label="Dismiss"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              )}
-              <main className="flex-1 overflow-y-auto">
-                <ErrorBoundary>
-                  <Routes>
-                    <Route path="/" element={<RepositoriesPage />} />
-                    <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
-                    <Route path="/snapshots/:repoId/search" element={<RepoSearchPage />} />
-                    <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
-                    <Route path="/snapshots/:repoId/:snapshotId/search" element={<SearchPage />} />
-                    <Route path="/snapshots/:repoId/diff/:snapshotA/:snapshotB" element={<DiffPage />} />
-                    <Route path="/backup-plans" element={<BackupPlansPage />} />
-                    <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
-                    <Route path="/schedules" element={<SchedulesPage />} />
-                    <Route path="/schedules/:scheduleId" element={<ScheduleEditPage />} />
-                    <Route path="/logs" element={<LogsPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
-                  </Routes>
-                </ErrorBoundary>
-              </main>
+          <ActivityProvider>
+            <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
+              <Sidebar />
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {showVersionWarning && (
+                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">
+                    <span>
+                      For the best experience, upgrade to <strong>restic {MIN_RESTIC_MAJOR}.{MIN_RESTIC_MINOR} or newer</strong>. Some retention and grouping features may not work correctly on older versions.
+                    </span>
+                    <button
+                      onClick={() => setShowVersionWarning(false)}
+                      className="flex-shrink-0 text-yellow-300 hover:text-yellow-100 transition-colors"
+                      aria-label="Dismiss"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                <main className="flex-1 overflow-y-auto">
+                  <ErrorBoundary>
+                    <Routes>
+                      <Route path="/" element={<RepositoriesPage />} />
+                      <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
+                      <Route path="/snapshots/:repoId/search" element={<RepoSearchPage />} />
+                      <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
+                      <Route path="/snapshots/:repoId/:snapshotId/search" element={<SearchPage />} />
+                      <Route path="/snapshots/:repoId/diff/:snapshotA/:snapshotB" element={<DiffPage />} />
+                      <Route path="/backup-plans" element={<BackupPlansPage />} />
+                      <Route path="/backup-plans/:planId" element={<BackupPlanEditPage />} />
+                      <Route path="/schedules" element={<SchedulesPage />} />
+                      <Route path="/schedules/:scheduleId" element={<ScheduleEditPage />} />
+                      <Route path="/logs" element={<LogsPage />} />
+                      <Route path="/settings" element={<SettingsPage />} />
+                    </Routes>
+                  </ErrorBoundary>
+                </main>
+              </div>
+              <ActivityPanel />
             </div>
-          </div>
+          </ActivityProvider>
         </BrowserRouter>
       )}
     </ThemeProvider>

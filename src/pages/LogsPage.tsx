@@ -53,8 +53,8 @@ export default function LogsPage() {
         const pageEntries = entries.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
         return (
           <>
-            <div className="rounded-xl border border-gray-800 overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded-xl border border-gray-800 overflow-x-auto">
+              <table className="w-full min-w-[800px] text-sm">
                 <thead>
                   <tr className="bg-gray-900 border-b border-gray-800 text-left">
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-6"></th>

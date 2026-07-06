@@ -14,7 +14,7 @@ use crate::commands::repo::run_restic_with_path;
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
 
-fn is_remote(path: &str) -> bool {
+pub(crate) fn is_remote(path: &str) -> bool {
     REMOTE_PREFIXES.iter().any(|p| path.starts_with(p))
 }
 
@@ -92,11 +92,13 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut Has
 
         if let Ok(Ok(json)) = result {
             let new_hash = hash_str(&json);
-            if snapshot_hashes.get(&repo_id) == Some(&new_hash) {
-                continue; // Unchanged since last tick — skip the cache rewrite and emit.
+            let db2 = app2.state::<AppDb>();
+            let unchanged = snapshot_hashes.get(&repo_id) == Some(&new_hash)
+                && db2.has_cached_snapshots(&repo_id).unwrap_or(false);
+            if unchanged {
+                continue; // Unchanged since last tick and cache still populated — skip rewrite/emit.
             }
 
-            let db2 = app2.state::<AppDb>();
             if db2.set_snapshots(&repo_id, &json).is_ok() {
                 snapshot_hashes.insert(repo_id.clone(), new_hash);
                 let _ = app2.emit("snapshots:refreshed", serde_json::json!({ "repoId": repo_id }));
