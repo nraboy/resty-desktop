@@ -1,10 +1,11 @@
 use cron::Schedule as CronSchedule;
 use chrono::Local;
 use std::str::FromStr;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
-use super::snapshot::{apply_retention, execute_backup};
+use super::repo_locks::RepoLocks;
+use super::snapshot::{apply_retention, execute_backup, log_retention_failure};
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
 
@@ -62,23 +63,29 @@ pub fn list_schedules(db: State<'_, AppDb>) -> Result<Vec<Schedule>, String> {
 }
 
 #[tauri::command]
-pub fn save_schedule(db: State<'_, AppDb>, schedule: Schedule) -> Result<(), String> {
+pub fn save_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule: Schedule) -> Result<(), String> {
     // Validate cron and compute next_run_at
     let next_run_at = next_fire_time(&schedule.cron_expr)
         .map(Some)
         .map_err(|e| format!("Invalid cron expression: {e}"))?;
     let s = Schedule { next_run_at, ..schedule };
-    db.save_schedule(&s)
+    db.save_schedule(&s)?;
+    let _ = app.emit("schedules:changed", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub fn remove_schedule(db: State<'_, AppDb>, schedule_id: String) -> Result<(), String> {
-    db.remove_schedule(&schedule_id)
+pub fn remove_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule_id: String) -> Result<(), String> {
+    db.remove_schedule(&schedule_id)?;
+    let _ = app.emit("schedules:changed", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub fn toggle_schedule(db: State<'_, AppDb>, schedule_id: String, enabled: bool) -> Result<(), String> {
-    db.set_schedule_enabled(&schedule_id, enabled)
+pub fn toggle_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule_id: String, enabled: bool) -> Result<(), String> {
+    db.set_schedule_enabled(&schedule_id, enabled)?;
+    let _ = app.emit("schedules:changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -87,6 +94,7 @@ pub async fn run_schedule_now(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     backup_handle: State<'_, BackupHandle>,
+    repo_locks: State<'_, RepoLocks>,
     schedule_id: String,
 ) -> Result<(), String> {
     let schedules = db.list_schedules()?;
@@ -99,7 +107,7 @@ pub async fn run_schedule_now(
     let mut errors: Vec<String> = Vec::new();
     for plan in plans {
         let backup_ok = execute_backup(
-            &app, &db, &master_key, &backup_handle,
+            &app, &db, &master_key, &backup_handle, &repo_locks,
             &plan.repo_id, Some(plan.id.as_str()),
             plan.paths.clone(), plan.tags.clone(), plan.excludes,
             plan.limit_upload, plan.limit_download,
@@ -114,7 +122,9 @@ pub async fn run_schedule_now(
                     || r.keep_monthly.is_some()
                     || r.keep_yearly.is_some()
                 {
-                    let _ = apply_retention(&db, &master_key, &plan.repo_id, &plan.tags, &plan.paths, r);
+                    if let Err(e) = apply_retention(&db, &master_key, &repo_locks, &plan.repo_id, &plan.tags, &plan.paths, r) {
+                        log_retention_failure(&app, &db, &plan.repo_id, Some(&plan.id), &e);
+                    }
                 }
             }
         } else if let Err(e) = backup_ok {

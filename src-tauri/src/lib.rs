@@ -2,7 +2,7 @@ mod cache_warmer;
 mod commands;
 mod scheduler;
 
-use commands::{auth, backup_plan, browse, cache, repo, schedule, snapshot, transfer};
+use commands::{auth, backup_plan, browse, cache, repo, repo_locks, schedule, snapshot, transfer};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -212,6 +212,7 @@ pub fn run() {
             app.manage(cache::PruneHandle::new());
             app.manage(cache::RestoreHandle::new());
             app.manage(cache::IndexHandle::new());
+            app.manage(repo_locks::RepoLocks::new());
 
             // Tray is created lazily after unlock via activate_tray command.
             app.manage(TrayState(Mutex::new(None)));

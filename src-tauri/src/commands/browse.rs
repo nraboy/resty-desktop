@@ -5,6 +5,7 @@ use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, MasterKey, RestoreHandle};
 use super::repo::{run_restic_blocking, run_restic_with_path};
+use super::repo_locks::RepoLocks;
 use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
 
@@ -59,6 +60,7 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
 pub async fn list_files(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
     path: Option<String>,
@@ -77,6 +79,7 @@ pub async fn list_files(
         args.push(p.clone());
     }
 
+    let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(repo, args, restic_path).await?;
 
     let mut entries: Vec<FileEntry> = Vec::new();
@@ -99,6 +102,7 @@ pub async fn list_files(
 pub async fn restore_path(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
     include_path: String,
@@ -124,6 +128,10 @@ pub async fn restore_path(
             .into_owned()
     };
 
+    // `restore` is a shared-lock read — register as a reader, held across the
+    // run_restic_blocking call below for the whole child-process lifetime (same pattern
+    // as list_files/restore_snapshot in this file).
+    let _rg = repo_locks.read(&repo.path);
     let restic_result = run_restic_blocking(
         repo,
         vec![
@@ -203,6 +211,7 @@ pub async fn restore_snapshot(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     restore_handle: State<'_, RestoreHandle>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
     target_dir: String,
@@ -249,6 +258,10 @@ pub async fn restore_snapshot(
     restore_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&restore_handle.child);
     let cancelled_arc = std::sync::Arc::clone(&restore_handle.cancelled);
+
+    // `restore` is a shared-lock read — register as a reader, held across the
+    // spawn_blocking below for the whole child-process lifetime.
+    let _rg = repo_locks.read(&repo_path);
 
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -357,11 +370,14 @@ pub async fn cancel_restore(restore_handle: State<'_, RestoreHandle>) -> Result<
 /// manual `index_snapshot` command and the background `cache_warmer`.
 pub(crate) fn run_full_index(
     db: &AppDb,
+    repo_locks: &RepoLocks,
     repo_id: &str,
     repo: &super::cache::FullRepository,
     snapshot_id: &str,
     restic_path: &str,
 ) -> Result<(), String> {
+    // `ls` is a shared-lock read — register as a reader for the duration of the call.
+    let _rg = repo_locks.read(&repo.path);
     let stdout =
         run_restic_with_path(repo, vec!["ls", "--json", snapshot_id], restic_path)?;
     let entries: Vec<FileEntry> = stdout
@@ -440,7 +456,8 @@ pub async fn index_snapshot(
                 password: repo_pass,
             };
             let db_inner = app.state::<AppDb>();
-            run_full_index(&db_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
+            let repo_locks_inner = app.state::<RepoLocks>();
+            run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
         })
         .await
         .unwrap_or(false);
@@ -534,7 +551,8 @@ pub async fn index_snapshots_batch(
                     password: repo_pass,
                 };
                 let db_inner = app2.state::<AppDb>();
-                run_full_index(&db_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
+                let repo_locks_inner = app2.state::<RepoLocks>();
+                run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
             })
             .await
             .unwrap_or(false);

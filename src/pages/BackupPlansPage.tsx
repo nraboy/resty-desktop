@@ -164,7 +164,7 @@ export default function BackupPlansPage() {
     setRetentionError("");
     setRetentionDone(false);
     try {
-      await forgetByPlan(retentionPlan.repoId, retentionPlan.tags, retentionPlan.paths, retentionPlan.retention);
+      await forgetByPlan(retentionPlan.repoId, retentionPlan.tags, retentionPlan.paths, retentionPlan.retention, retentionPlan.id);
       setRetentionDone(true);
     } catch (err: any) {
       setRetentionError(String(err));
@@ -244,7 +244,7 @@ export default function BackupPlansPage() {
       if (backupPlan.retention) {
         setApplyingRetention(true);
         try {
-          await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention);
+          await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention, backupPlan.id);
         } catch (pruneErr: any) {
           setBackupError("Backup succeeded but pruning failed: " + String(pruneErr));
           return;

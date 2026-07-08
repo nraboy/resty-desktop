@@ -3,7 +3,13 @@ use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
 use super::repo::{run_restic_blocking, run_restic_with_path};
+use super::repo_locks::RepoLocks;
 use super::NoConsole;
+
+/// Sentinel `backup_history.error` value for a genuinely cancelled backup, distinguishing it
+/// from a real failure so Recent Logs / LogsPage can render it neutrally instead of as an
+/// error (see the frontend's matching CANCELLED_BACKUP_ERROR in lib/types.ts).
+pub(crate) const CANCELLED_BACKUP_ERROR: &str = "Cancelled";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,21 +47,49 @@ pub async fn list_snapshots(
 pub async fn refresh_snapshots(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<Vec<Snapshot>, String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(repo, vec!["snapshots".into(), "--json".into()], restic_path).await?;
     let _ = db.set_snapshots(&repo_id, &stdout);
     let snapshots: Vec<Snapshot> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
     Ok(snapshots)
 }
 
+/// Runs `run_restic_blocking`, retrying up to twice (2s apart) if the failure is restic's own
+/// "already locked" error — a residual collision with a *different* machine's or tool's genuine
+/// repo lock that `RepoLocks` (this process's own in-memory coordination — see CLAUDE.md's
+/// Concurrency section) has no visibility into. Matches `apply_retention`'s retry pattern
+/// exactly, just async (`tokio::time::sleep`) instead of sync (`std::thread::sleep`) since every
+/// caller here is an async `#[tauri::command]`. Any other error surfaces immediately — only a
+/// lock collision is worth retrying blind.
+async fn run_restic_blocking_retrying_on_lock(
+    repo: FullRepository,
+    args: Vec<String>,
+    restic_path: String,
+) -> Result<String, String> {
+    let mut result = run_restic_blocking(repo.clone(), args.clone(), restic_path.clone()).await;
+    for _ in 0..2 {
+        match &result {
+            Err(e) if e.contains("already locked") => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                result = run_restic_blocking(repo.clone(), args.clone(), restic_path.clone()).await;
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn delete_snapshot(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
     prune: bool,
@@ -68,7 +102,10 @@ pub async fn delete_snapshot(
     if prune {
         args.push("--prune".to_string());
     }
-    run_restic_blocking(repo, args, restic_path).await?;
+    // `forget` (with or without --prune) takes restic's exclusive lock — wait for the
+    // repo to go idle first (see CLAUDE.md's Concurrency section / repo_locks.rs).
+    let _wg = repo_locks.write(&repo.path).await;
+    run_restic_blocking_retrying_on_lock(repo, args, restic_path).await?;
     let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
     let _ = db.evict_stats(&repo_id);
@@ -79,6 +116,7 @@ pub async fn delete_snapshot(
 pub async fn tag_snapshot(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
     add_tags: Vec<String>,
@@ -88,10 +126,12 @@ pub async fn tag_snapshot(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    // `tag` modifies snapshot metadata — exclusive lock, same as forget/prune.
+    let _wg = repo_locks.write(&repo.path).await;
 
     if !add_tags.is_empty() {
         let tag_str = add_tags.join(",");
-        run_restic_blocking(
+        run_restic_blocking_retrying_on_lock(
             repo.clone(),
             vec!["tag".into(), "--add".into(), tag_str, snapshot_id.clone()],
             restic_path.clone(),
@@ -100,7 +140,7 @@ pub async fn tag_snapshot(
     }
     if !remove_tags.is_empty() {
         let tag_str = remove_tags.join(",");
-        run_restic_blocking(
+        run_restic_blocking_retrying_on_lock(
             repo,
             vec!["tag".into(), "--remove".into(), tag_str, snapshot_id.clone()],
             restic_path,
@@ -147,6 +187,7 @@ const DIFF_ENTRY_LIMIT: usize = 500;
 pub async fn diff_snapshots(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_a: String,
     snapshot_b: String,
@@ -156,6 +197,7 @@ pub async fn diff_snapshots(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(
         repo,
         vec!["diff".into(), snapshot_a.clone(), snapshot_b.clone()],
@@ -197,6 +239,7 @@ pub async fn diff_snapshots(
 pub async fn get_snapshot_stats(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     snapshot_id: String,
 ) -> Result<SnapshotStats, String> {
@@ -204,6 +247,7 @@ pub async fn get_snapshot_stats(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(
         repo,
         vec!["stats".into(), "--json".into(), snapshot_id.clone()],
@@ -224,6 +268,7 @@ pub async fn execute_backup(
     db: &AppDb,
     master_key: &MasterKey,
     backup_handle: &BackupHandle,
+    repo_locks: &RepoLocks,
     repo_id: &str,
     plan_id: Option<&str>,
     paths: Vec<String>,
@@ -305,6 +350,12 @@ pub async fn execute_backup(
     let restic_path_inner = restic_path.clone();
     let restic_path_for_unlock = restic_path.clone();
     let compression_inner = compression.clone();
+
+    // `backup` takes restic's shared lock — register as a reader so an exclusive
+    // op (forget/prune/tag) on this repo knows to wait for us. Held across the
+    // spawn_blocking below so it stays claimed for the whole child-process
+    // lifetime, not just this setup.
+    let _rg = repo_locks.read(&repo.path);
 
     backup_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&backup_handle.child);
@@ -466,16 +517,28 @@ pub async fn execute_backup(
             Ok(stdout.clone())
         }
         Err(ref err) => {
+            // A genuine cancellation is not a failure — log/notify it distinctly instead of
+            // the raw internal "cancelled" control-flow string, which would otherwise always
+            // log/notify as "Backup failed" regardless of was_cancelled.
+            let was_cancelled = backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+            let log_error = if was_cancelled { CANCELLED_BACKUP_ERROR.to_string() } else { err.clone() };
             let _ = db.log_backup(
                 &history_id, repo_id, plan_id, None,
-                started_at, duration, 0, 0, 0, Some(err.as_str()),
+                started_at, duration, 0, 0, 0, Some(log_error.as_str()),
             );
             let _ = app.emit("backup:history-updated", ());
 
-            let _ = app.notification().builder()
-                .title("Backup failed")
-                .body(err)
-                .show();
+            if was_cancelled {
+                let _ = app.notification().builder()
+                    .title("Backup cancelled")
+                    .body("The backup was cancelled before it finished.")
+                    .show();
+            } else {
+                let _ = app.notification().builder()
+                    .title("Backup failed")
+                    .body(err)
+                    .show();
+            }
 
             Err(err.clone())
         }
@@ -488,6 +551,7 @@ pub async fn run_backup(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     backup_handle: State<'_, BackupHandle>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
     plan_id: Option<String>,
     paths: Vec<String>,
@@ -496,7 +560,7 @@ pub async fn run_backup(
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &backup_handle, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download).await
 }
 
 #[tauri::command]
@@ -515,11 +579,32 @@ pub async fn copy_snapshot(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     copy_handle: State<'_, CopyHandle>,
+    repo_locks: State<'_, RepoLocks>,
     src_repo_id: String,
     dest_repo_id: String,
     snapshot_id: String,
 ) -> Result<(), String> {
     validate_snapshot_id(&snapshot_id)?;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Serialize copies: only one may run at a time — this handle previously had no busy
+    // guard, so a second concurrent copy could clobber the first run's child/cancelled state.
+    if copy_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A copy is already in progress".to_string());
+    }
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&copy_handle.busy);
+
     let key = master_key.get()?;
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
@@ -535,6 +620,12 @@ pub async fn copy_snapshot(
     let dst_path_for_unlock = dest_repo.path.clone();
     let dst_pass_for_unlock = dest_repo.password.clone();
     let restic_path_for_unlock = restic_path.clone();
+
+    // `copy` reads from src and writes new blobs into dest, both under restic's shared
+    // lock — register as a reader on both so an exclusive op (forget/prune/tag) on
+    // either repo knows to wait for us. Held across the spawn_blocking below.
+    let _src_rg = repo_locks.read(&src_repo.path);
+    let _dst_rg = repo_locks.read(&dest_repo.path);
 
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -625,9 +716,29 @@ pub async fn mirror_repo(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     mirror_handle: State<'_, MirrorHandle>,
+    repo_locks: State<'_, RepoLocks>,
     src_repo_id: String,
     dest_repo_id: String,
 ) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Serialize mirrors: only one may run at a time — this handle previously had no busy
+    // guard, so a second concurrent mirror could clobber the first run's child/cancelled state.
+    if mirror_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A mirror is already in progress".to_string());
+    }
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&mirror_handle.busy);
+
     let key = master_key.get()?;
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
@@ -643,6 +754,11 @@ pub async fn mirror_repo(
     let dst_path_for_unlock = dest_repo.path.clone();
     let dst_pass_for_unlock = dest_repo.password.clone();
     let restic_path_for_unlock = restic_path.clone();
+
+    // Same reasoning as copy_snapshot: register as a reader on both repos, held
+    // across the spawn_blocking below.
+    let _src_rg = repo_locks.read(&src_repo.path);
+    let _dst_rg = repo_locks.read(&dest_repo.path);
 
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
@@ -782,6 +898,7 @@ fn build_retention_args(tags: &[String], paths: &[String], retention: &Retention
 pub fn apply_retention(
     db: &AppDb,
     master_key: &MasterKey,
+    repo_locks: &RepoLocks,
     repo_id: &str,
     tags: &[String],
     paths: &[String],
@@ -793,7 +910,25 @@ pub fn apply_retention(
 
     let args = build_retention_args(tags, paths, retention);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let result = run_restic_with_path(&repo, args_refs, &restic_path);
+
+    // `forget` takes restic's exclusive lock — wait for the repo to go idle first (see
+    // CLAUDE.md's Concurrency section / repo_locks.rs). This is the primary fix for the
+    // "repository is already locked" race (e.g. the user navigating to SnapshotsPage
+    // right as this backup's retention kicks in, colliding with its background
+    // `refreshSnapshots`); the retry below is now just defense-in-depth for anything not
+    // routed through RepoLocks (an external restic/cron process).
+    let _wg = repo_locks.write_blocking(&repo.path);
+    let mut result = run_restic_with_path(&repo, args_refs.clone(), &restic_path);
+    for _ in 0..2 {
+        match &result {
+            Err(e) if e.contains("already locked") => {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                result = run_restic_with_path(&repo, args_refs.clone(), &restic_path);
+            }
+            _ => break,
+        }
+    }
+
     if result.is_ok() {
         let _ = db.evict_stats(repo_id);
         if let Ok(json) =
@@ -807,21 +942,64 @@ pub fn apply_retention(
     result
 }
 
+/// Records a failed retention application as its own `backup_history` row so it's visible in
+/// Recent Logs / LogsPage even though `apply_retention` has no history entry of its own.
+/// Called by every retention call site (manual `forget_by_plan`, the 60s scheduler tick,
+/// `run_schedule_now`) whenever `apply_retention` returns `Err` — otherwise all three would
+/// silently discard that error, so a backup could succeed while its retention prune failed
+/// with the failure visible nowhere.
+pub(crate) fn log_retention_failure(
+    app: &tauri::AppHandle,
+    db: &AppDb,
+    repo_id: &str,
+    plan_id: Option<&str>,
+    error: &str,
+) {
+    let _ = db.log_backup(
+        &uuid::Uuid::new_v4().to_string(),
+        repo_id,
+        plan_id,
+        None,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        0.0,
+        0,
+        0,
+        0,
+        Some(&format!("Retention failed: {error}")),
+    );
+    // Same event Recent Logs already listens for on every backup outcome — see
+    // execute_backup's log_backup call sites above.
+    let _ = app.emit("backup:history-updated", ());
+}
+
 #[tauri::command]
 pub async fn forget_by_plan(
     app: tauri::AppHandle,
     repo_id: String,
+    plan_id: Option<String>,
     tags: Vec<String>,
     paths: Vec<String>,
     retention: RetentionPolicy,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let db = app.state::<AppDb>();
-        let master_key = app.state::<MasterKey>();
-        apply_retention(db.inner(), master_key.inner(), &repo_id, &tags, &paths, &retention)
+    let app_for_blocking = app.clone();
+    let repo_id_for_blocking = repo_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let db = app_for_blocking.state::<AppDb>();
+        let master_key = app_for_blocking.state::<MasterKey>();
+        let repo_locks = app_for_blocking.state::<RepoLocks>();
+        apply_retention(db.inner(), master_key.inner(), repo_locks.inner(), &repo_id_for_blocking, &tags, &paths, &retention)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if let Err(ref e) = result {
+        let db = app.state::<AppDb>();
+        log_retention_failure(&app, db.inner(), &repo_id, plan_id.as_deref(), e);
+    }
+    result
 }
 
 #[cfg(test)]

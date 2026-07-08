@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 use crate::commands::browse::run_full_index;
 use crate::commands::cache::{AppDb, IndexHandle, MasterKey};
 use crate::commands::repo::run_restic_with_path;
+use crate::commands::repo_locks::RepoLocks;
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
 
@@ -53,6 +54,7 @@ pub fn spawn(app: tauri::AppHandle) {
 async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut HashMap<String, u64>) {
     let db = app.state::<AppDb>();
     let master_key = app.state::<MasterKey>();
+    let repo_locks = app.state::<RepoLocks>();
 
     let key = match master_key.get() {
         Ok(k) => k,
@@ -85,6 +87,9 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut Has
         let restic_path = restic_path.clone();
         let app2 = app.clone();
 
+        // `snapshots` is a shared-lock read — register as a reader, held across the
+        // spawn_blocking below.
+        let _rg = repo_locks.read(&repo.path);
         let result = tauri::async_runtime::spawn_blocking(move || {
             run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
         })
@@ -223,7 +228,8 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let _permit = index_handle.gate.lock().await;
     let ok = tauri::async_runtime::spawn_blocking(move || {
         let db_inner = app2.state::<AppDb>();
-        let result = run_full_index(&db_inner, &repo_id, &repo, &snapshot_id, &restic_path);
+        let repo_locks_inner = app2.state::<RepoLocks>();
+        let result = run_full_index(&db_inner, &repo_locks_inner, &repo_id, &repo, &snapshot_id, &restic_path);
         if result.is_err() {
             let _ = db_inner.set_browse_status(&repo_id, &snapshot_id, "pending");
         }

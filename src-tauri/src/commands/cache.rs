@@ -94,6 +94,10 @@ pub struct FullRepository {
 pub struct CopyHandle {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a copy is executing. Serializes copies so two concurrent
+    /// `copy_snapshot` calls can't corrupt the shared `child`/`cancelled`
+    /// state (matches the pattern already used by BackupHandle/RestoreHandle).
+    pub busy: std::sync::atomic::AtomicBool,
 }
 
 impl CopyHandle {
@@ -101,6 +105,7 @@ impl CopyHandle {
         Self {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -108,6 +113,9 @@ impl CopyHandle {
 pub struct MirrorHandle {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a mirror is executing. Serializes mirrors so two concurrent
+    /// `mirror_repo` calls can't corrupt the shared `child`/`cancelled` state.
+    pub busy: std::sync::atomic::AtomicBool,
 }
 
 impl MirrorHandle {
@@ -115,6 +123,7 @@ impl MirrorHandle {
         Self {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -141,6 +150,11 @@ impl BackupHandle {
 pub struct PruneHandle {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a prune is executing. Serializes prune_repo/prune_all_repos —
+    /// they previously shared this handle with no serialization, so a
+    /// concurrent second run could clobber the first run's `child`/`cancelled`
+    /// state (a second Stop could kill the wrong process, or vice versa).
+    pub busy: std::sync::atomic::AtomicBool,
 }
 
 impl PruneHandle {
@@ -148,6 +162,7 @@ impl PruneHandle {
         Self {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

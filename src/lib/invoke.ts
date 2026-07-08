@@ -187,9 +187,10 @@ export const forgetByPlan = (
   repoId: string,
   tags: string[],
   paths: string[],
-  retention: RetentionPolicy
+  retention: RetentionPolicy,
+  planId?: string
 ): Promise<string> =>
-  invoke("forget_by_plan", { repoId, tags, paths, retention });
+  invoke("forget_by_plan", { repoId, tags, paths, retention, planId: planId ?? null });
 
 // ── browse ────────────────────────────────────────────────────────────────
 

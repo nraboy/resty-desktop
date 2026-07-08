@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
+use super::repo_locks::RepoLocks;
 use super::NoConsole;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,32 +151,36 @@ pub async fn test_repo_connection(
 pub async fn get_repo_stats(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
     if let Ok(Some((total_size, total_file_count, snapshots_count))) = db.get_stats(&repo_id) {
         return Ok(ResticStats { total_size, total_file_count, snapshots_count });
     }
-    fetch_and_cache_stats(&db, &master_key, &repo_id).await
+    fetch_and_cache_stats(&db, &master_key, &repo_locks, &repo_id).await
 }
 
 #[tauri::command]
 pub async fn refresh_repo_stats(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
     let _ = db.evict_stats(&repo_id);
-    fetch_and_cache_stats(&db, &master_key, &repo_id).await
+    fetch_and_cache_stats(&db, &master_key, &repo_locks, &repo_id).await
 }
 
 async fn fetch_and_cache_stats(
     db: &AppDb,
     master_key: &MasterKey,
+    repo_locks: &RepoLocks,
     repo_id: &str,
 ) -> Result<ResticStats, String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
+    let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await?;
     let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
         .ok_or_else(|| "No output from restic stats".to_string())?;
@@ -200,11 +205,16 @@ pub struct CheckResult {
 pub async fn check_repo(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
+    repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<CheckResult, String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+
+    // `check` is a shared-lock read — register as a reader, held across the
+    // spawn_blocking below for the whole child-process lifetime.
+    let _rg = repo_locks.read(&repo.path);
 
     let (output, duration_seconds) = tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
@@ -330,127 +340,45 @@ struct PruneProgress {
     repo_name: String,
 }
 
-#[tauri::command]
-pub async fn prune_all_repos(
-    app: tauri::AppHandle,
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    prune_handle: State<'_, PruneHandle>,
-) -> Result<(), String> {
-    prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
-
-    let key = master_key.get()?;
-    let repos = db.list_repos()?;
-    let total = repos.len();
-    let restic_path = super::get_restic_path(&db);
-
-    for (i, repo) in repos.iter().enumerate() {
-        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("Cancelled".to_string());
-        }
-
-        let _ = app.emit("prune:progress", PruneProgress {
-            current: i,
-            total,
-            repo_name: repo.name.clone(),
-        });
-
-        let full = db.get_full_repo(&repo.id, &key)?;
-        // Stash credentials so we can run `restic unlock` after a cancel-kill.
-        let path_for_unlock = full.path.clone();
-        let pass_for_unlock = full.password.clone();
-        let restic_path_for_unlock = restic_path.clone();
-
-        let child = std::process::Command::new(&restic_path)
-            .arg("prune")
-            .env("RESTIC_REPOSITORY", &full.path)
-            .env("RESTIC_PASSWORD", &full.password)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .no_console()
-            .augment_path()
-            .spawn()
-            .map_err(|e| format!("Failed to run restic: {e}"))?;
-
-        // Store child then immediately release the lock so cancel_prune can always acquire it.
-        {
-            let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
-            *guard = Some(child);
-        }
-
-        // Poll for completion with brief lock windows so cancel_prune is never blocked.
-        let status = loop {
-            if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                break None;
-            }
-            let maybe_status = {
-                let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
-                if let Some(ref mut c) = *guard {
-                    c.try_wait().map_err(|e| e.to_string())?
-                } else {
-                    break None; // killed by cancel_prune
-                }
-            };
-            if let Some(s) = maybe_status {
-                break Some(s);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        };
-
-        {
-            let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
-            *guard = None;
-        }
-
-        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-            let unlock_repo = FullRepository { path: path_for_unlock, password: pass_for_unlock };
-            let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path_for_unlock).await;
-            return Err("Cancelled".to_string());
-        }
-
-        let status = status.unwrap();
-        if !status.success() {
-            return Err(format!("Prune failed for '{}'", repo.name));
-        }
-    }
-
-    let _ = app.emit("prune:progress", PruneProgress {
-        current: total,
-        total,
-        repo_name: String::new(),
-    });
-
-    Ok(())
+/// Outcome of one `restic prune` attempt (see `run_one_prune_attempt`).
+enum PruneAttempt {
+    Success,
+    Cancelled,
+    Failed(String),
 }
 
-#[tauri::command]
-pub async fn prune_repo(
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    prune_handle: State<'_, PruneHandle>,
-    repo_id: String,
-) -> Result<(), String> {
-    prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+/// One spawn-poll-capture attempt of `restic prune` against `full`, respecting
+/// `prune_handle.cancelled` throughout via responsive `try_wait` polling — factored out here so
+/// both call sites, and the retry-on-"already locked" loop each wraps around it, share one
+/// implementation instead of duplicating this logic twice. Captures stderr (previously
+/// discarded via `Stdio::null()`) so a failure can actually be inspected for "already locked"
+/// — and, as a side benefit, callers now get restic's real error text instead of a generic
+/// "Prune failed".
+async fn run_one_prune_attempt(
+    restic_path: &str,
+    full: &FullRepository,
+    prune_handle: &PruneHandle,
+) -> Result<PruneAttempt, String> {
+    use std::io::{BufReader, Read};
 
-    let key = master_key.get()?;
-    let full = db.get_full_repo(&repo_id, &key)?;
-    let restic_path = super::get_restic_path(&db);
-
-    let path_for_unlock = full.path.clone();
-    let pass_for_unlock = full.password.clone();
-    let restic_path_for_unlock = restic_path.clone();
-
-    let child = std::process::Command::new(&restic_path)
+    let mut child = std::process::Command::new(restic_path)
         .arg("prune")
         .env("RESTIC_REPOSITORY", &full.path)
         .env("RESTIC_PASSWORD", &full.password)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .no_console()
         .augment_path()
         .spawn()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
+
+    let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+    let stderr_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        BufReader::new(stderr).read_to_string(&mut s).ok();
+        s
+    });
 
     {
         let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
@@ -459,6 +387,19 @@ pub async fn prune_repo(
 
     let status = loop {
         if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            // A concurrent cancel_prune's own kill() may have raced the child being stored
+            // above and seen `None` in the guard (no-op'd) if cancellation landed between
+            // spawn() returning and this function's own store completing. Without our own kill
+            // attempt here, the guard-clear right below would silently DROP a still-live
+            // std::process::Child — Child::drop() does not kill the OS process — orphaning a
+            // `restic prune` that keeps running (and keeps holding the repo's exclusive lock)
+            // while the UI already reports this as cancelled. Killing an already-exited/already
+            // -killed child is a harmless no-op, so it's safe to always attempt this here.
+            if let Ok(mut guard) = prune_handle.child.lock() {
+                if let Some(ref mut c) = *guard {
+                    let _ = c.kill();
+                }
+            }
             break None;
         }
         let maybe_status = {
@@ -480,18 +421,186 @@ pub async fn prune_repo(
         *guard = None;
     }
 
+    let captured_stderr = stderr_thread.join().unwrap_or_default();
+
     if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-        let unlock_repo = FullRepository { path: path_for_unlock, password: pass_for_unlock };
-        let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path_for_unlock).await;
+        let unlock_repo = FullRepository { path: full.path.clone(), password: full.password.clone() };
+        let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path.to_string()).await;
+        return Ok(PruneAttempt::Cancelled);
+    }
+
+    let status = status.ok_or_else(|| "Prune ended unexpectedly".to_string())?;
+    if status.success() {
+        Ok(PruneAttempt::Success)
+    } else {
+        let msg = captured_stderr.trim();
+        Ok(PruneAttempt::Failed(if msg.is_empty() { "Prune failed".to_string() } else { msg.to_string() }))
+    }
+}
+
+#[tauri::command]
+pub async fn prune_all_repos(
+    app: tauri::AppHandle,
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    prune_handle: State<'_, PruneHandle>,
+    repo_locks: State<'_, RepoLocks>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Serializes prune_repo/prune_all_repos — they previously shared this handle with no
+    // serialization, so a concurrent second run could clobber the first run's
+    // `child`/`cancelled` state (a second Stop could kill the wrong process, or vice versa).
+    if prune_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A prune is already in progress".to_string());
+    }
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&prune_handle.busy);
+
+    prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let key = master_key.get()?;
+    let repos = db.list_repos()?;
+    let total = repos.len();
+    let restic_path = super::get_restic_path(&db);
+
+    for (i, repo) in repos.iter().enumerate() {
+        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Cancelled".to_string());
+        }
+
+        let _ = app.emit("prune:progress", PruneProgress {
+            current: i,
+            total,
+            repo_name: repo.name.clone(),
+        });
+
+        let full = db.get_full_repo(&repo.id, &key)?;
+
+        // `prune` takes restic's exclusive lock — wait for this repo to go idle first
+        // (see CLAUDE.md's Concurrency section / repo_locks.rs). Scoped to this loop
+        // iteration: dropped (releasing the exclusive claim) before the next repo.
+        let _wg = repo_locks.write(&full.path).await;
+
+        // The wait above can take a while if the repo was genuinely busy — re-check
+        // cancellation before spawning, otherwise a Stop click during the wait can't be
+        // caught by cancel_prune (child was still None) and this repo's restic process
+        // would be orphaned, unkillable, running to completion in the background.
+        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Cancelled".to_string());
+        }
+
+        // Retry on a genuine EXTERNAL lock collision (a different machine/tool's restic
+        // process — RepoLocks above only coordinates this app's own operations).
+        let mut outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
+        for _ in 0..2 {
+            match &outcome {
+                PruneAttempt::Failed(msg) if msg.contains("already locked") => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err("Cancelled".to_string());
+                    }
+                    outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
+                }
+                _ => break,
+            }
+        }
+
+        match outcome {
+            PruneAttempt::Success => {}
+            PruneAttempt::Cancelled => return Err("Cancelled".to_string()),
+            PruneAttempt::Failed(msg) => return Err(format!("Prune failed for '{}': {}", repo.name, msg)),
+        }
+    }
+
+    let _ = app.emit("prune:progress", PruneProgress {
+        current: total,
+        total,
+        repo_name: String::new(),
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn prune_repo(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    prune_handle: State<'_, PruneHandle>,
+    repo_locks: State<'_, RepoLocks>,
+    repo_id: String,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    if prune_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A prune is already in progress".to_string());
+    }
+    struct BusyGuard<'a>(&'a AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&prune_handle.busy);
+
+    prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let key = master_key.get()?;
+    let full = db.get_full_repo(&repo_id, &key)?;
+    let restic_path = super::get_restic_path(&db);
+
+    // `prune` takes restic's exclusive lock — wait for the repo to go idle first (see
+    // CLAUDE.md's Concurrency section / repo_locks.rs).
+    let _wg = repo_locks.write(&full.path).await;
+
+    // The wait above can take a while if the repo was genuinely busy. If Stop was clicked
+    // during that wait, prune_handle.child was still None at that moment, so cancel_prune's
+    // kill() was a no-op — bail out now, before spawning, so we never orphan an unkillable
+    // restic process. `_wg` and `_busy` both drop automatically on this early return,
+    // releasing the exclusive claim and the busy flag exactly like every other early-return
+    // path in this function already does.
+    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         return Err("Cancelled".to_string());
     }
 
-    let status = status.unwrap();
-    if !status.success() {
-        return Err("Prune failed".to_string());
+    // Run the prune, retrying up to 2 additional times if it collides with a *different*
+    // process's or machine's genuine restic lock — RepoLocks above only coordinates this app's
+    // own operations, not an external restic/Backrest/other-computer process (see CLAUDE.md's
+    // Concurrency section). Matches apply_retention's retry pattern.
+    let mut outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
+    for _ in 0..2 {
+        match &outcome {
+            PruneAttempt::Failed(msg) if msg.contains("already locked") => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                // A cancel during the inter-retry sleep must stop us from spawning another
+                // attempt — same reasoning as the cancellation check above.
+                if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("Cancelled".to_string());
+                }
+                outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
+            }
+            _ => break,
+        }
     }
 
-    Ok(())
+    match outcome {
+        PruneAttempt::Success => Ok(()),
+        PruneAttempt::Cancelled => Err("Cancelled".to_string()),
+        PruneAttempt::Failed(msg) => Err(msg),
+    }
 }
 
 #[tauri::command]

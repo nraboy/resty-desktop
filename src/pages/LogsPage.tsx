@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { listBackupHistory } from "../lib/invoke";
+import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import type { BackupHistoryEntry } from "../lib/types";
 import { formatBytes, formatDate, formatDuration } from "../lib/format";
 import Button from "../components/Button";
@@ -69,14 +70,23 @@ export default function LogsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {pageEntries.map((entry) => (
+                  {pageEntries.map((entry) => {
+                    const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
+                    const realError = entry.error && !cancelled;
+                    return (
                     <Fragment key={entry.id}>
                       <tr
-                        className={`transition-colors ${entry.error ? "cursor-pointer hover:bg-gray-900/50" : ""}`}
-                        onClick={() => entry.error && setExpanded(expanded === entry.id ? null : entry.id)}
+                        className={`transition-colors ${realError ? "cursor-pointer hover:bg-gray-900/50" : ""}`}
+                        onClick={() => realError && setExpanded(expanded === entry.id ? null : entry.id)}
                       >
                         <td className="px-4 py-3">
-                          {entry.error ? (
+                          {cancelled ? (
+                            <span title="Cancelled">
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-500">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+                              </svg>
+                            </span>
+                          ) : entry.error ? (
                             <span title={entry.error}>
                               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-red-300">
                                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
@@ -99,7 +109,7 @@ export default function LogsPage() {
                           {entry.snapshotId ? entry.snapshotId.slice(0, 8) : <span className="text-gray-600">—</span>}
                         </td>
                       </tr>
-                      {expanded === entry.id && entry.error && (
+                      {expanded === entry.id && realError && (
                         <tr className="bg-red-900/20">
                           <td colSpan={9} className="px-4 py-3">
                             <p className="text-xs font-mono text-red-300 whitespace-pre-wrap break-all">{entry.error}</p>
@@ -107,7 +117,8 @@ export default function LogsPage() {
                         </tr>
                       )}
                     </Fragment>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

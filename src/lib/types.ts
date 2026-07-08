@@ -67,6 +67,12 @@ export interface BackupHistoryEntry {
   error?: string;
 }
 
+/** Sentinel `error` value for a genuinely cancelled backup — see snapshot.rs's
+ *  execute_backup Err branch, the only writer of this field. Distinguishes a
+ *  cancellation from a real failure so Recent Logs / LogsPage can render it
+ *  neutrally rather than as an error. */
+export const CANCELLED_BACKUP_ERROR = "Cancelled";
+
 export interface BackupProgress {
   percentDone: number;
   filesDone: number;

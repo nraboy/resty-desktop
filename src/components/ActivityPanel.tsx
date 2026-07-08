@@ -15,6 +15,8 @@
 // this once in App.tsx doesn't require every page to grow a toolbar toggle button.
 import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
+import { cancelBackup } from "../lib/invoke";
+import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
 
 function ProgressBar({ percent, colorClass = "bg-blue-500" }: { percent: number; colorClass?: string }) {
@@ -52,12 +54,39 @@ function ErrorIcon() {
   );
 }
 
+function CancelledIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-500 flex-shrink-0">
+      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+      <rect x="5" y="5" width="10" height="10" rx="2" />
+    </svg>
+  );
+}
+
 export default function ActivityPanel() {
   const { indexing, activeBackup, upcoming, recentLogs } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
 
   const hasActive = indexing != null || activeBackup != null;
+
+  // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
+  // whatever's in BackupHandle.child regardless of whether it was started manually or by the
+  // scheduler (unchanged since v0.3.0); the only thing missing was a button to call it from
+  // here. Resets automatically once activeBackup clears (scheduler:backup-finished fires
+  // regardless of outcome — success, failure, or this very cancel), so it's ready again the
+  // next time a scheduled backup runs.
+  const [stoppingScheduled, setStoppingScheduled] = useState(false);
+  useEffect(() => {
+    if (!activeBackup) setStoppingScheduled(false);
+  }, [activeBackup]);
 
   useEffect(() => {
     if (!open) return;
@@ -118,12 +147,32 @@ export default function ActivityPanel() {
               )}
               {activeBackup && (
                 <div className="space-y-2">
-                  <p className="text-sm text-gray-200 truncate" title={`${activeBackup.scheduleName} — ${activeBackup.planName}`}>
-                    {activeBackup.planName} <span className="text-gray-500">· {activeBackup.scheduleName}</span>
-                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-gray-200 truncate" title={`${activeBackup.scheduleName} — ${activeBackup.planName}`}>
+                      {activeBackup.planName} <span className="text-gray-500">· {activeBackup.scheduleName}</span>
+                    </p>
+                    {activeBackup.phase === "backup" && (
+                      <button
+                        onClick={async () => {
+                          setStoppingScheduled(true);
+                          try { await cancelBackup(); } catch {}
+                        }}
+                        disabled={stoppingScheduled}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                      >
+                        <StopIcon />
+                      </button>
+                    )}
+                  </div>
                   <ProgressBar percent={(activeBackup.progress?.percentDone ?? 0) * 100} />
                   <p className="text-xs text-gray-500">
-                    {activeBackup.progress
+                    {activeBackup.phase === "retention"
+                      ? "Applying retention rules…"
+                      : stoppingScheduled
+                      ? "Stopping…"
+                      : activeBackup.progress
                       ? `${activeBackup.progress.filesDone.toLocaleString()} / ${activeBackup.progress.totalFiles.toLocaleString()} files`
                       : "Starting…"}
                   </p>
@@ -138,8 +187,11 @@ export default function ActivityPanel() {
             <div className="space-y-2 px-4 pb-3">
               {upcoming.map((u) => (
                 <div key={u.scheduleId} className="text-sm">
-                  <p className="text-gray-200 truncate">{u.scheduleName}</p>
-                  <p className="text-xs text-gray-500 truncate">
+                  <p className="text-gray-200 truncate" title={u.scheduleName}>{u.scheduleName}</p>
+                  <p
+                    className="text-xs text-gray-500 truncate"
+                    title={`${u.planNames.join(", ") || "No plans"} · ${formatRelative(u.nextRunAt)}`}
+                  >
                     {u.planNames.join(", ") || "No plans"} · {formatRelative(u.nextRunAt)}
                   </p>
                 </div>
@@ -151,19 +203,22 @@ export default function ActivityPanel() {
             <SectionHeading>Recent Logs</SectionHeading>
             {recentLogs.length === 0 && <EmptyRow>No backups have run yet.</EmptyRow>}
             <div className="space-y-2 px-4 pb-4">
-              {recentLogs.map((entry) => (
+              {recentLogs.map((entry) => {
+                const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
+                return (
                 <div key={entry.id} className="space-y-0.5">
                   <div className="flex items-center gap-2">
-                    {entry.error ? <ErrorIcon /> : <SuccessIcon />}
+                    {cancelled ? <CancelledIcon /> : entry.error ? <ErrorIcon /> : <SuccessIcon />}
                     <p className="text-sm text-gray-200 truncate min-w-0">
                       {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
                     </p>
                   </div>
-                  <p className="text-xs text-gray-500 truncate pl-6" title={entry.error}>
-                    {entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
+                  <p className="text-xs text-gray-500 truncate pl-6" title={cancelled ? undefined : entry.error}>
+                    {cancelled ? `Cancelled, ${formatRelative(entry.startedAt)}` : entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
                   </p>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

@@ -6,8 +6,9 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
+use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
-use crate::commands::snapshot::{apply_retention, execute_backup};
+use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure};
 
 pub fn spawn(app: tauri::AppHandle) {
     let running = Arc::new(AtomicBool::new(false));
@@ -39,6 +40,7 @@ async fn tick(app: &tauri::AppHandle) {
     let db = app.state::<AppDb>();
     let master_key = app.state::<MasterKey>();
     let backup_handle = app.state::<BackupHandle>();
+    let repo_locks = app.state::<RepoLocks>();
 
     // Skip silently when app is locked
     if master_key.get().is_err() {
@@ -81,6 +83,7 @@ async fn tick(app: &tauri::AppHandle) {
                 &db,
                 &master_key,
                 &*backup_handle,
+                &repo_locks,
                 &plan.repo_id,
                 Some(plan.id.as_str()),
                 plan.paths.clone(),
@@ -92,8 +95,6 @@ async fn tick(app: &tauri::AppHandle) {
             .await
             .is_ok();
 
-            let _ = app.emit("scheduler:backup-finished", serde_json::json!({ "success": ok }));
-
             if ok {
                 if let Some(r) = &plan.retention {
                     if r.keep_last.is_some()
@@ -102,13 +103,37 @@ async fn tick(app: &tauri::AppHandle) {
                         || r.keep_monthly.is_some()
                         || r.keep_yearly.is_some()
                     {
-                        let _ = apply_retention(&db, &master_key, &plan.repo_id, &plan.tags, &plan.paths, r);
+                        // Tell the Activity panel this plan has moved from the byte-transfer
+                        // phase to the retention finalize step (a `forget --prune` that can
+                        // take 10s+). The panel keeps the active task visible and swaps its
+                        // subtitle to "Applying retention rules…" (mirroring the manual-backup
+                        // modal) instead of going blank. Emitted only when retention actually
+                        // runs (plan succeeded + at least one keep flag set), so a plan with
+                        // no retention dismisses immediately via backup-finished below.
+                        let _ = app.emit("scheduler:retention-started", ());
+                        if let Err(e) = apply_retention(&db, &master_key, &repo_locks, &plan.repo_id, &plan.tags, &plan.paths, r) {
+                            log_retention_failure(app, &db, &plan.repo_id, Some(&plan.id), &e);
+                        }
                     }
                 }
             }
+
+            // Dismiss the active task only once the plan is fully done (backup + retention),
+            // then immediately hand off to the next plan's backup-started. Emitted here
+            // (after retention) rather than right after execute_backup so the panel doesn't
+            // blank out mid-plan — previously this fired before retention, hiding the
+            // ~10-20s forget as a dead gap between two plans' backups.
+            let _ = app.emit("scheduler:backup-finished", serde_json::json!({ "success": ok }));
         }
 
         let next = next_fire_time(&sched.cron_expr).ok();
         let _ = db.record_schedule_run(&sched.id, now, next);
+        // record_schedule_run just advanced this schedule's next_run_at to the next
+        // fire time. Emit schedules:changed so the Activity panel's Upcoming Tasks
+        // section re-reads the now-future value — without this it keeps showing the
+        // stale past timestamp ("just now") that made the schedule due in the first
+        // place. (scheduler:backup-finished fires earlier, per-plan, before the
+        // next_run_at update, so it can't carry the refreshed value.)
+        let _ = app.emit("schedules:changed", ());
     }
 }

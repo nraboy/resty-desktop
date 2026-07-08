@@ -41,11 +41,34 @@ src/
                    #   className applies to outer wrapper div (not <input>); <input> is always w-full inside wrapper
     Modal.tsx      # Overlay modal dialog
     Sidebar.tsx    # Left nav with app icon + repo indicator
+    ActivityPanel.tsx # Right-side slide-in drawer (slim always-visible rail + fixed overlay) surfacing
+                   #   background activity the user has no other visibility into: auto-indexing progress
+                   #   and scheduler-triggered backups (Active Tasks — Stop button on the active scheduled
+                   #   backup, wired to cancelBackup() which kills whatever's in BackupHandle.child regardless
+                   #   of whether it was started manually or by the scheduler; shown only during the "backup"
+                   #   phase — hidden during "retention" since apply_retention is a one-shot sync forget with
+                   #   no cancel path; the retention phase swaps the subtitle to "Applying retention rules…",
+                   #   mirroring BackupPlansPage's backup modal, so the ~10-20s forget isn't mistaken for a
+                   #   frozen bar), next few due schedules (Upcoming Tasks — each row truncates with a hover
+                   #   tooltip showing the full plan-name list + relative time, so a schedule with many plans
+                   #   doesn't wrap), last few backup runs (Recent Logs — renders a neutral "Cancelled"
+                   #   glyph/label instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries).
+                   #   Restore/copy/mirror/manual backup/prune already have their own progress modals and are
+                   #   intentionally excluded — see lib/activity.tsx.
   lib/
     types.ts       # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
                    #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan,
-                   #   DiffEntry, DiffResult; isRemoteRepo() helper
+                   #   DiffEntry, DiffResult; isRemoteRepo() helper; CANCELLED_BACKUP_ERROR sentinel (see
+                   #   snapshot.rs's execute_backup) distinguishing a genuine cancel from a real failure
     invoke.ts      # Typed wrappers over tauri invoke()
+    activity.tsx   # ActivityProvider (mounted once in App.tsx, outlives route changes since it must keep
+                   #   updating no matter which page is mounted): indexing progress, the scheduler-triggered
+                   #   activeBackup (never a manual/"Run Now" backup — see scheduler.rs's
+                   #   scheduler:backup-started) carrying a phase ("backup"|"retention") flipped by
+                   #   scheduler:retention-started, upcoming due schedules (refreshed on schedules:changed,
+                   #   which the scheduler emits after record_schedule_run advances next_run_at — NOT on
+                   #   scheduler:backup-finished, which fires per-plan before the advance and would read a
+                   #   stale past timestamp), recentLogs. Powers ActivityPanel.tsx
     format.ts      # formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration
     config.ts      # MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
     utils.ts       # needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
@@ -97,7 +120,9 @@ src/
                             #   between snapshots) shown while in progress
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
-    BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation;
+    BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation
+                            #   (cancelling shows a local "Stopping…" state, then reverts to the Start Backup
+                            #   view — no distinct "cancelled" UI block, matching cancel_backup's own behavior);
                             #   auto-applies retention after successful backup; per-plan Apply Retention button;
                             #   pre-flight FDA check before running: warns if plan includes protected paths and FDA not granted (macOS only)
     BackupPlanEditPage.tsx  # Create/edit plan (name, repo, paths, tags, excludes, retention, bandwidth limits);
@@ -105,7 +130,9 @@ src/
                             #   amber FDA warning suppressed when FDA is confirmed granted (macOS only)
     SchedulesPage.tsx       # List schedules; toggle/delete/run; amber warning when tray disabled
     ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation
-    LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows
+    LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows (only for a
+                            #   real failure — a CANCELLED_BACKUP_ERROR entry renders a neutral "Cancelled"
+                            #   glyph instead of the red error icon, and isn't expandable)
     SettingsPage.tsx        # Theme selector; tray + auto-indexing + remote-auto-refresh toggles; restic binary path;
                             #   compression selector; default restore path; prune all repos with streaming progress;
                             #   import/export card (ImportExportCard);
@@ -117,7 +144,7 @@ src-tauri/
   src/
     main.rs        # Calls restic_gui_lib::run()
     lib.rs         # Tauri builder; registers all commands; manages AppDb, MasterKey, CopyHandle, MirrorHandle,
-                   #   BackupHandle, PruneHandle, RestoreHandle, IndexHandle as state; native menu bar (auth-aware, skipped on Linux) with
+                   #   BackupHandle, PruneHandle, RestoreHandle, IndexHandle, RepoLocks as state; native menu bar (auth-aware, skipped on Linux) with
                    #   Import/Export and Help items; system tray created lazily after unlock (activate_tray);
                    #   TRAY_GEN counter avoids ID collisions; window close → hide-to-tray if tray_enabled, else exit;
                    #   RunEvent::Reopen (macOS only)
@@ -135,13 +162,40 @@ src-tauri/
                      #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane);
                      #   run_restic_blocking() (pub(crate) async helper): runs a one-shot restic command on a
                      #   spawn_blocking thread, owning its args so they can cross that boundary — used by every
-                     #   async command that shells out once (see Restic Integration for the full policy)
+                     #   async command that shells out once (see Restic Integration for the full policy);
+                     #   check_repo/get_repo_stats/refresh_repo_stats each acquire a RepoLocks read guard (see
+                     #   Concurrency section); prune_repo/prune_all_repos share a run_one_prune_attempt helper
+                     #   (spawns the child, polls via try_wait, captures stderr, retries twice on restic's own
+                     #   "already locked"), take a RepoLocks write guard first and re-check PruneHandle::cancelled
+                     #   immediately after acquiring it (closes a Stop-during-the-lock-wait orphan-process gap),
+                     #   and — inside run_one_prune_attempt's cancelled branch — make their own kill attempt on
+                     #   the child before clearing PruneHandle::child (closes a second, narrower race: a
+                     #   concurrent cancel_prune that saw `None` because it ran before the child was stored would
+                     #   otherwise let the guard-clear silently drop a still-live process — Child::drop doesn't
+                     #   kill). Both prune commands also gained a `busy` guard on PruneHandle (a second concurrent
+                     #   attempt now fails fast with "A prune is already in progress" instead of corrupting the
+                     #   shared child/cancelled state)
+      repo_locks.rs  # RepoLocks: in-memory per-repo-path shared/exclusive lock registry (see Concurrency section)
       snapshot.rs    # list/refresh/delete/tag snapshots; get_snapshot_stats; execute_backup (shared pub async fn);
                      #   run_backup; cancel_backup; apply_retention (shared pub fn, intentionally sync — see
-                     #   Intentional Designs); forget_by_plan (async, runs apply_retention via spawn_blocking);
-                     #   copy_snapshot; cancel_copy; mirror_repo; cancel_mirror; unlock_repo; diff_snapshots;
+                     #   Intentional Designs); forget_by_plan (async, runs apply_retention via spawn_blocking,
+                     #   takes an optional plan_id, calls log_retention_failure on error); copy_snapshot;
+                     #   cancel_copy; mirror_repo; cancel_mirror; unlock_repo; diff_snapshots;
                      #   validate_snapshot_id() (pub(crate), 8–64 hex) guards all snapshot ID inputs here and in browse.rs;
-                     #   list_snapshots returns Vec<Snapshot> directly from AppDb::get_snapshots_vec (no JSON round-trip)
+                     #   list_snapshots returns Vec<Snapshot> directly from AppDb::get_snapshots_vec (no JSON round-trip);
+                     #   CANCELLED_BACKUP_ERROR sentinel ("Cancelled") — execute_backup's Err branch logs/notifies
+                     #   a genuine cancellation distinctly instead of the raw internal "cancelled" string, which
+                     #   would otherwise always read as "Backup failed"; log_retention_failure (pub(crate)) records
+                     #   a failed retention application as its own backup_history row ("Retention failed: <err>")
+                     #   so it's visible in Recent Logs/LogsPage even though apply_retention has no history entry
+                     #   of its own — called from all three retention call sites (forget_by_plan, the scheduler
+                     #   tick, run_schedule_now) whenever apply_retention errors, so a backup can no longer
+                     #   succeed while its retention prune fails silently; copy_snapshot/mirror_repo each gained
+                     #   a `busy` guard on CopyHandle/MirrorHandle (a second concurrent attempt now fails fast
+                     #   with "A copy/mirror is already in progress" instead of corrupting shared state);
+                     #   execute_backup/copy_snapshot/mirror_repo/refresh_snapshots/get_snapshot_stats/
+                     #   diff_snapshots each acquire a RepoLocks read guard, delete_snapshot/tag_snapshot/
+                     #   apply_retention each acquire a write guard (see Concurrency section)
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
@@ -159,19 +213,26 @@ src-tauri/
                      #   get_snapshot_index_status (map of snapshot_id → "pending"|"in_progress"|"complete");
                      #   clear_snapshot_index: deletes browse_cache_files + browse_cache_status for one snapshot via db.evict();
                      #   run_full_index (pub(crate) shared with cache_warmer): runs restic ls --json and bulk-inserts into browse_cache_files;
+                     #   list_files/restore_path/restore_snapshot/run_full_index each acquire a RepoLocks read
+                     #   guard, held across the restic call for the whole child-process lifetime (see Concurrency section);
                      #   search_snapshot_files (requires "complete" index): LIKE search on name+path in browse_cache_files, capped at 200 results;
                      #   search_repo_files: LIKE search across every "complete" snapshot in a repo via AppDb::search_repo_files,
                      #   capped at 200 results; both search commands are async and run the actual query via
                      #   tauri::async_runtime::spawn_blocking — see Persistence & Caching for why
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
-      schedule.rs    # list/save/remove/toggle schedules; run_schedule_now; describe_cron_expr;
+      schedule.rs    # list/save/remove/toggle schedules; run_schedule_now (calls log_retention_failure on a
+                     #   retention error, same as forget_by_plan/scheduler.rs); describe_cron_expr;
                      #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
       transfer.rs    # export_data/preview_import/import_data; portable .json bundle (readable,
                      #   only repo passwords encrypted under an export passphrase); every object has its
                      #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup;
                      #   preview_backrest_import/import_backrest_config: one-way import of Backrest config.json
                      #   (plaintext pw re-encrypted under master key; lossy — see Import / Export)
-      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle;
+      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle
+                     #   (CopyHandle/MirrorHandle/PruneHandle each also have a `busy` guard, closing a gap where they
+                     #   previously shared their handle with no serialization — a concurrent second run could clobber
+                     #   the first run's child/cancelled state; a second concurrent attempt now returns a clean
+                     #   "already in progress" error, matching BackupHandle/RestoreHandle's existing pattern);
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
                      #   get_snapshots_vec: reads snapshots_cache rows straight into Vec<Snapshot> (paths/tags JSON
                      #   columns parsed once) — no intermediate JSON-string serialization;
@@ -194,9 +255,24 @@ src-tauri/
                      #   check IndexHandle::manual_active and yield (sweep stops cleanly, retries next tick) while
                      #   manual indexing (index_snapshot / index_snapshots_batch, browse.rs) is active; index_next's
                      #   run_full_index call takes IndexHandle::gate to close the race against an in-flight manual
-                     #   index — see browse.rs's index_snapshots_batch doc comment.
-  scheduler.rs       # 60s background tick; runs due schedules via execute_backup; applies retention after backup;
-                     #   skips when locked or when a backup is already running (busy flag); AtomicBool guards against overlapping ticks
+                     #   index — see browse.rs's index_snapshots_batch doc comment;
+                     #   refresh_all_snapshots and index_next's run_full_index call each acquire a RepoLocks read
+                     #   guard (see Concurrency section)
+  scheduler.rs       # 60s background tick; runs due schedules via execute_backup; applies retention after backup,
+                     #   calling log_retention_failure (snapshot.rs) if it errors so the failure isn't silently
+                     #   swallowed; skips when locked or when a backup is already running (busy flag); AtomicBool
+                     #   guards against overlapping ticks. Per-plan event sequence to the Activity panel:
+                     #   scheduler:backup-started → execute_backup → (scheduler:retention-started → apply_retention,
+                     #   only when retention actually runs) → scheduler:backup-finished (emitted AFTER retention so
+                     #   the active task stays visible for the whole plan — backup+retention — and retention is what
+                     #   dismisses it before the next plan; previously fired right after execute_backup, hiding the
+                     #   ~10-20s forget as a dead gap between two plans' backups). After all plans: record_schedule_run
+                     #   advances next_run_at, then emits schedules:changed so Upcoming Tasks refreshes to the next
+                     #   fire time — scheduler:backup-finished fires earlier per-plan, before next_run_at is updated,
+                     #   so it can't carry the refreshed value (activity.tsx refreshes upcoming on schedules:changed,
+                     #   NOT on backup-finished). Note: this 60s tick also bounds how soon a newly-due schedule starts
+                     #   (up to ~60s after its due instant) — this is tick granularity, not RepoLocks contention
+                     #   (backup and indexing both take non-blocking read guards).
 ```
 
 ## Routes
@@ -223,7 +299,7 @@ src-tauri/
 - Every restic `Command` sets `.stdin(Stdio::null())` alongside `.no_console()` (`mod.rs`'s `NoConsole` trait). Without it, stdin defaults to `Stdio::inherit()`, which in a windowless Tauri app on Windows can be an invalid handle; process wrappers that do their own internal `CreateProcess` (e.g. Scoop shims) can fail to spawn the real binary when handed that invalid inherited handle ("Could not create process" errors, unrelated to restic/SSH/SFTP config). Any new restic `Command` must set `.stdin(Stdio::null())` too.
 - All restic subprocess calls run off the async runtime: streaming commands spawn a `Child` inside `tauri::async_runtime::spawn_blocking` (e.g. `execute_backup`, `restore_snapshot`, `copy_snapshot`, `mirror_repo`); one-shot commands go through `run_restic_blocking` (`repo.rs`), which does the same for a single `Command::output()` call. `prune_all_repos`/`prune_repo` are the one exception to the "spawn inside `spawn_blocking`" pattern: they spawn their `Child` inline with null stdio and poll it via `try_wait` + `tokio::time::sleep` in short lock windows, so `cancel_prune` is never blocked waiting on the mutex — this is intentional, not a gap. Their cancel-path `restic unlock` (clearing the lock after a kill) goes through `run_restic_blocking` like every other one-shot call. An `async fn` `#[tauri::command]` must never call `std::process::Command` (or `run_restic_with_path`) inline — that blocks a shared tokio worker and starves every other async command and the `AppDb` lock (see Persistence & Caching). Plain `run_restic_with_path` is still called directly from code that's already inside a `spawn_blocking` closure (e.g. `run_full_index`) — that's correct as-is, not a gap.
 - `restic ls --json` outputs NDJSON; first line is snapshot summary (skipped); subsequent lines are `FileEntry`.
-- `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`. Serialized via a `busy` flag on `BackupHandle` — only one backup runs at a time; a concurrent attempt (e.g. a scheduler tick firing during a manual backup) returns `"A backup is already in progress"`. Sequential callers (`run_schedule_now`, scheduler loop) are unaffected since each `await` releases the flag before the next starts.
+- `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`. Serialized via a `busy` flag on `BackupHandle` — only one backup runs at a time; a concurrent attempt (e.g. a scheduler tick firing during a manual backup) returns `"A backup is already in progress"`. Sequential callers (`run_schedule_now`, scheduler loop) are unaffected since each `await` releases the flag before the next starts. On a genuine cancellation (`BackupHandle::cancelled` set), the `Err` branch logs `CANCELLED_BACKUP_ERROR` ("Cancelled") to `backup_history` instead of the raw `"cancelled"` control-flow string, and fires a "Backup cancelled" notification instead of "Backup failed" — see `CANCELLED_BACKUP_ERROR` in `lib/types.ts` and `LogsPage`/`ActivityPanel`'s matching neutral rendering.
 - `cancel_backup`, `cancel_copy`, `cancel_mirror`, `cancel_prune`, `cancel_restore` all run `restic unlock` after SIGKILL to clear stale locks.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo.
 - `mirror_repo` uses `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots src→dest.
@@ -232,6 +308,75 @@ src-tauri/
 - `restore_snapshot` streams `restic restore --json`; emits `restore:progress` events. Stderr drained on background thread. Serialized via a `busy` flag on `RestoreHandle` (same pattern as `BackupHandle`) — a concurrent attempt returns `"A restore is already in progress"`. Cancellable via `cancel_restore`; on cancel, a successful exit still wins over the cancelled flag (handles the race where Stop is clicked right as the restore finishes).
 - `unlock_app` runs `restic unlock` on all repos in background after password verified.
 - Stats cache evicted after backup/forget for remote repos; not auto-repopulated (restic stats reads full pack indexes).
+
+## Concurrency: Per-Repository Lock Registry
+
+Restic itself distinguishes **shared** locks (most commands — `backup`, `restore`, `copy`,
+`mirror`'s `copy`, `check`, `snapshots`, `stats`, `ls`) from **exclusive** locks (`forget`,
+`prune`, `tag` — nothing else may touch the repo while one of these runs). The app had no
+cross-operation awareness of this distinction, so an exclusive op could fire while a shared op
+was still running against the same repo and fail with restic's own `"repository is already
+locked by PID …"` error — reproduced by starting a manual backup and navigating to the
+Repositories page (which calls `get_repo_stats`) while it runs, then watching the backup's
+post-run retention (`forget --prune`) collide with that still-in-flight `stats` call.
+
+`RepoLocks` (`src-tauri/src/commands/repo_locks.rs`, managed state) is an in-memory
+`HashMap<repo_path, {readers, exclusive}>` — keyed by **repository path** (restic's true lock
+identity, so two `repo_id`s pointing at the same path correctly serialize), not `repo_id`. Two
+RAII guards, both releasing on `Drop`:
+
+- **`ReadGuard`** (`RepoLocks::read`) — shared-lock ops acquire this. **Never blocks**; just
+  increments a counter and returns immediately. A slow exclusive op must never make a listing
+  or stats call hang, so readers are deliberately one-directional: they don't wait for writers,
+  they just proceed.
+- **`WriteGuard`** (`RepoLocks::write` async / `write_blocking` sync) — exclusive-lock ops
+  acquire this. Polls until the repo has zero readers and isn't already exclusive, then
+  atomically claims it — **waits genuinely, with no timeout or force-claim escape hatch.** An
+  earlier version force-claimed after 15s, which reintroduced the exact lock collision this
+  registry exists to prevent whenever the shared op it was waiting on ran longer than 15s — a
+  real, confirmed regression, not a hypothetical one. Restic's own lock, plus the retry below,
+  remain the backstop for a genuine residual collision (e.g. an external restic/cron process
+  `RepoLocks` has no visibility into).
+
+Wired into every shared-lock op that talks to a repo (`execute_backup`, `restore_snapshot`,
+`restore_path`, `copy_snapshot`/`mirror_repo` — both src **and** dest — `refresh_snapshots`,
+`get_snapshot_stats`, `diff_snapshots`, `refresh_repo_stats`/`get_repo_stats`, `check_repo`,
+`list_files`, and `run_full_index` — the shared core of `index_snapshot`/
+`index_snapshots_batch` **and** the `cache_warmer` auto-sweep, so instrumenting it once covers
+all indexing readers) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
+`prune_repo`/`prune_all_repos`, `apply_retention` — covering all three of its callers:
+`forget_by_plan`, the scheduler tick, `run_schedule_now`). For a streaming op, the guard is a
+local held across the `spawn_blocking(...).await` so it stays claimed for the whole
+child-process lifetime, not just setup. `restic unlock` calls (cancel paths, `unlock_app`) are
+**exempt** — they're the recovery mechanism and must never wait.
+
+`prune_repo`/`prune_all_repos` re-check `PruneHandle::cancelled` immediately after acquiring
+their write guard and before spawning the `prune` child — the `write()` wait itself has no
+cancellation hook, so without this check a Stop click during that wait would let an unkillable
+orphaned `restic prune` process keep running in the background while the app reported
+"Cancelled". A second, narrower race exists at the moment the child is actually stored: if a
+concurrent `cancel_prune` runs its own kill() between `spawn()` returning and the child being
+stored in `PruneHandle::child`, that kill() sees `None` and no-ops. `run_one_prune_attempt`'s
+own polling loop makes its own kill attempt on the stored child the moment it observes
+`cancelled` — closing the gap regardless of which side of that race actually happened; killing
+an already-exited or already-killed child is a harmless no-op.
+
+`RepoLocks` only coordinates this app's own operations — it has no visibility into a different
+machine or tool (restic CLI, Backrest, another Resty Desktop instance elsewhere) genuinely
+holding the repo's real restic lock. All four exclusive-lock commands (`delete_snapshot`,
+`tag_snapshot` via `run_restic_blocking_retrying_on_lock` in `snapshot.rs`; `prune_repo`/
+`prune_all_repos` via `run_one_prune_attempt` in `repo.rs`) retry up to twice, 2s apart, on
+restic's own "already locked" error before surfacing it — matching `apply_retention`'s original
+retry pattern, just applied consistently everywhere an exclusive lock is taken. `prune_repo`/
+`prune_all_repos` capture stderr for this purpose (previously discarded via `Stdio::null()`), so
+a prune failure now also surfaces restic's actual error text instead of a generic "Prune failed".
+
+Coverage is intentionally partial-safe: because writers only wait on the `readers` counter (never
+the other way around), an un-instrumented reader just degrades to pre-`RepoLocks` behavior for
+that one pairing — it can't introduce a new failure, only leave one collision un-prevented. Don't
+"complete" this by making readers wait for writers too — a slow exclusive op on a large/remote
+repo would then make snapshot listings and stats hang, which is a worse regression than the rare
+lock collision this registry exists to prevent.
 
 ## Security Architecture
 
@@ -300,6 +445,18 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   directory's full entry list with no pagination or virtualization. All are known and intentionally
   deferred (structural refactor / new dependency required) — revisit deliberately, don't
   rediscover them as "new" findings.
+- **Backup progress bars are non-monotonic by design.** restic's `percent_done` (= `bytes_done /
+  total_bytes`) fluctuates early in a run — restic scans the directory tree concurrently with
+  uploading, so `total_bytes` grows as more files are discovered, which inflates the ratio (the bar
+  shoots up) and then drops it as the denominator grows, before finally climbing to 100%. Both the
+  Activity panel (`ActivityPanel.tsx`) and the manual backup modal (`BackupPlansPage.tsx`) display
+  `percent_done` raw — `execute_backup` parses it straight from restic's `status` lines
+  (`snapshot.rs`). Investigated fixes — a monotonic high-water mark, or an indeterminate bar during
+  the scan phase then determinate — were deliberately **not** applied: a high-water mark would latch
+  onto the early spike and stall near it for the rest of the run, looking "stuck", which is worse
+  UX than the self-correcting fluctuation (it always lands at 100%); the indeterminate variant needs
+  a new `ProgressBar` + a scan-stabilization heuristic. Don't re-investigate without revisiting that
+  trade-off.
 
 ## Import / Export
 
@@ -344,6 +501,10 @@ gray.50–950, blue.300/400/700/900, green.400
 - `bg-red-700` for buttons → theme-mapped, becomes pastel pink in light mode. Use `bg-red-600 hover:bg-red-800`.
 - Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface.
 
+## Versioning
+
+The app version's source of truth is `src-tauri/tauri.conf.json` (Tauri reads it for the bundled app). On a release bump, keep `tauri.conf.json`, `package.json`, and `package-lock.json` (both the top-level `version` and `packages[""].version`) in sync. `src-tauri/Cargo.toml`'s `version` is deliberately left at `0.0.0` — that crate version is unused (Tauri does not read it for the app version), and `0.0.0` signals "not the source of truth" to avoid confusion; do not bump it.
+
 ## Build Profile
 
 `src-tauri/Cargo.toml` sets `[profile.release]`: `strip = true`, `lto = true`, `codegen-units = 1` — a smaller/faster release binary at the cost of longer compile time (accepted; CI/local dev builds are unaffected since this only applies to `--release`). `opt-level` is left at the release default (`3`). `panic = "abort"` is deliberately **not** set — see Intentional Designs.
@@ -363,14 +524,17 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `commands/cache.rs`, `commands/crypto.rs`, `commands/snapshot.rs`, and `commands/transfer.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `commands/cache.rs`, `commands/crypto.rs`, `commands/repo_locks.rs`, `commands/snapshot.rs`, `commands/schedule.rs`, and `commands/transfer.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash
+npm run typecheck   # tsc --noEmit (tsconfig has strict + noUnusedLocals/Parameters)
 npm run test:vite   # frontend tests only
 npm run test:rust   # Rust tests only (cargo test)
 npm run test:all    # both
 ```
+
+There is no `npm run lint` script today — no linter (ESLint/Biome) is set up. `npm run typecheck` is the only static-analysis gate; run it after frontend edits (it also catches unused locals/parameters via tsconfig).
 
 ## Running the App
 

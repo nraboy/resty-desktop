@@ -29,6 +29,11 @@ export interface ActiveScheduledBackup {
   scheduleName: string;
   planName: string;
   progress: BackupProgress | null;
+  /** "backup" = bytes transferring; "retention" = the post-backup forget
+   *  (apply_retention) is running. Drives the panel subtitle so the finalize
+   *  step isn't mistaken for a frozen bar. See scheduler.rs's
+   *  scheduler:retention-started. */
+  phase: "backup" | "retention";
 }
 
 interface ActivityState {
@@ -98,23 +103,35 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
 
     const unlistenIndexDone = listen("index:done", refreshIndexing);
     const unlistenSnapshotsRefreshed = listen("snapshots:refreshed", refreshIndexing);
+    const unlistenSchedulesChanged = listen("schedules:changed", refreshUpcoming);
 
     const unlistenBackupStarted = listen<{ scheduleName: string; planName: string }>(
       "scheduler:backup-started",
       (e) => {
         pendingBackupRef.current = e.payload;
-        setActiveBackup({ ...e.payload, progress: null });
+        setActiveBackup({ ...e.payload, progress: null, phase: "backup" });
       }
     );
     const unlistenBackupProgress = listen<BackupProgress>("backup:progress", (e) => {
       if (!pendingBackupRef.current) return; // not a scheduler-triggered backup — ignore
-      setActiveBackup({ ...pendingBackupRef.current, progress: e.payload });
+      // Functional update preserves `phase` (a plain spread of pendingBackupRef would
+      // drop it). No backup:progress events arrive during retention anyway, so progress
+      // stays frozen at its last value once retention-started flips the phase.
+      setActiveBackup((prev) => (prev ? { ...prev, progress: e.payload } : prev));
+    });
+    const unlistenRetentionStarted = listen("scheduler:retention-started", () => {
+      // Flip phase on the currently-active (just-backed-up) plan. Guarded so a stray
+      // event with no active task is a no-op rather than fabricating one.
+      setActiveBackup((prev) => (prev ? { ...prev, phase: "retention" } : prev));
     });
     const unlistenBackupFinished = listen("scheduler:backup-finished", () => {
-      pendingBackupRef.current = null;
-      setActiveBackup(null);
-      refreshUpcoming();
-    });
+        pendingBackupRef.current = null;
+        setActiveBackup(null);
+        // upcoming is refreshed via the schedules:changed event the scheduler emits
+        // after record_schedule_run advances next_run_at — that fires after all plans
+        // + retention complete, which is when the next fire time is actually known.
+        // Refreshing here would read the stale (past) next_run_at.
+      });
     // Fires for every backup, manual or scheduled (snapshot.rs's execute_backup) — unlike
     // scheduler:backup-finished above, which only covers scheduler-triggered runs and would
     // otherwise leave a manually-run backup missing from Recent Logs until the next
@@ -125,8 +142,10 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       clearInterval(tickTimer);
       unlistenIndexDone.then((fn) => fn());
       unlistenSnapshotsRefreshed.then((fn) => fn());
+      unlistenSchedulesChanged.then((fn) => fn());
       unlistenBackupStarted.then((fn) => fn());
       unlistenBackupProgress.then((fn) => fn());
+      unlistenRetentionStarted.then((fn) => fn());
       unlistenBackupFinished.then((fn) => fn());
       unlistenHistoryUpdated.then((fn) => fn());
     };

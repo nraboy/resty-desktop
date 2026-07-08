@@ -4,6 +4,7 @@ pub mod browse;
 pub mod cache;
 pub mod crypto;
 pub mod repo;
+pub mod repo_locks;
 pub mod schedule;
 pub mod snapshot;
 pub mod transfer;
