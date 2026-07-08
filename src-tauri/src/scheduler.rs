@@ -10,11 +10,22 @@ use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
 use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure};
 
+// Seconds to sleep until the next wall-clock minute boundary (:00).
+// Returns 60 when already exactly on a boundary so we never busy-spin.
+fn secs_until_next_minute(now_secs: u64) -> u64 {
+    60 - (now_secs % 60)
+}
+
 pub fn spawn(app: tauri::AppHandle) {
     let running = Arc::new(AtomicBool::new(false));
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_next_minute(now)))
+                .await;
 
             if running.load(Ordering::SeqCst) {
                 continue;
@@ -66,6 +77,15 @@ async fn tick(app: &tauri::AppHandle) {
             Ok(p) => p,
             Err(_) => continue,
         };
+
+        // Advance next_run_at up front, before the first plan starts, rather than after
+        // the whole schedule (all plans + retention) finishes. A multi-plan schedule can
+        // take minutes to run; leaving the old next_run_at in place until everything
+        // completes made Upcoming Tasks show a stale past time (and the schedule
+        // re-eligible as "due") for the entire run instead of just the instant it fired.
+        let next = next_fire_time(&sched.cron_expr).ok();
+        let _ = db.record_schedule_run(&sched.id, now, next);
+        let _ = app.emit("schedules:changed", ());
 
         for plan in plans {
             // These events are only emitted from this background scheduler tick, never
@@ -125,15 +145,23 @@ async fn tick(app: &tauri::AppHandle) {
             // ~10-20s forget as a dead gap between two plans' backups.
             let _ = app.emit("scheduler:backup-finished", serde_json::json!({ "success": ok }));
         }
+    }
+}
 
-        let next = next_fire_time(&sched.cron_expr).ok();
-        let _ = db.record_schedule_run(&sched.id, now, next);
-        // record_schedule_run just advanced this schedule's next_run_at to the next
-        // fire time. Emit schedules:changed so the Activity panel's Upcoming Tasks
-        // section re-reads the now-future value — without this it keeps showing the
-        // stale past timestamp ("just now") that made the schedule due in the first
-        // place. (scheduler:backup-finished fires earlier, per-plan, before the
-        // next_run_at update, so it can't carry the refreshed value.)
-        let _ = app.emit("schedules:changed", ());
+#[cfg(test)]
+mod tests {
+    use super::secs_until_next_minute;
+
+    #[test]
+    fn secs_until_next_minute_at_boundary() {
+        assert_eq!(secs_until_next_minute(0), 60);
+        assert_eq!(secs_until_next_minute(120), 60);
+    }
+
+    #[test]
+    fn secs_until_next_minute_mid_minute() {
+        assert_eq!(secs_until_next_minute(1), 59);
+        assert_eq!(secs_until_next_minute(59), 1);
+        assert_eq!(secs_until_next_minute(150), 30);
     }
 }
