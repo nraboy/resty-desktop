@@ -104,6 +104,8 @@ export default function RepositoriesPage() {
       openModal("init");
       setSearchParams({}, { replace: true });
     }
+    // setSearchParams is a stable react-router reference
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   const refreshRow = (repo: Repository) => {

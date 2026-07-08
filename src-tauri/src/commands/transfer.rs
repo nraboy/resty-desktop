@@ -729,7 +729,7 @@ mod tests {
     fn derive_export_key_requires_non_empty_password() {
         let enc = ExportEncryption {
             kdf: "argon2id".to_string(),
-            salt: B64.encode(&[0u8; 16]),
+            salt: B64.encode([0u8; 16]),
         };
         assert!(derive_export_key(&enc, None).is_err());
         assert!(derive_export_key(&enc, Some("")).is_err());
@@ -739,7 +739,7 @@ mod tests {
     fn derive_export_key_is_deterministic() {
         let enc = ExportEncryption {
             kdf: "argon2id".to_string(),
-            salt: B64.encode(&[0u8; 16]),
+            salt: B64.encode([0u8; 16]),
         };
         let k1 = derive_export_key(&enc, Some("mypass")).unwrap();
         let k2 = derive_export_key(&enc, Some("mypass")).unwrap();
@@ -750,7 +750,7 @@ mod tests {
     fn derive_export_key_differs_on_different_passwords() {
         let enc = ExportEncryption {
             kdf: "argon2id".to_string(),
-            salt: B64.encode(&[0u8; 16]),
+            salt: B64.encode([0u8; 16]),
         };
         let k1 = derive_export_key(&enc, Some("pass1")).unwrap();
         let k2 = derive_export_key(&enc, Some("pass2")).unwrap();
@@ -759,8 +759,8 @@ mod tests {
 
     #[test]
     fn derive_export_key_differs_on_different_salts() {
-        let enc1 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode(&[0u8; 16]) };
-        let enc2 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode(&[1u8; 16]) };
+        let enc1 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode([0u8; 16]) };
+        let enc2 = ExportEncryption { kdf: "argon2id".to_string(), salt: B64.encode([1u8; 16]) };
         let k1 = derive_export_key(&enc1, Some("same-pass")).unwrap();
         let k2 = derive_export_key(&enc2, Some("same-pass")).unwrap();
         assert_ne!(k1, k2);
@@ -772,7 +772,7 @@ mod tests {
     fn export_key_to_encrypt_then_decrypt_round_trip() {
         let enc = ExportEncryption {
             kdf: "argon2id".to_string(),
-            salt: B64.encode(&[7u8; 16]),
+            salt: B64.encode([7u8; 16]),
         };
         let export_key = derive_export_key(&enc, Some("my-export-pass")).unwrap();
         let (nonce, ct) = super::super::crypto::encrypt(&export_key, b"repo-password-123").unwrap();
@@ -788,7 +788,7 @@ mod tests {
     fn export_key_wrong_passphrase_fails_decrypt() {
         let enc = ExportEncryption {
             kdf: "argon2id".to_string(),
-            salt: B64.encode(&[7u8; 16]),
+            salt: B64.encode([7u8; 16]),
         };
         let export_key = derive_export_key(&enc, Some("correct-pass")).unwrap();
         let wrong_key = derive_export_key(&enc, Some("wrong-pass")).unwrap();

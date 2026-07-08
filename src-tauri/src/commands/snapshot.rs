@@ -183,6 +183,42 @@ pub struct DiffResult {
 
 const DIFF_ENTRY_LIMIT: usize = 500;
 
+/// Parses `restic diff`'s plain-text output (`+`/`-`/`M`/`T`-prefixed lines) into a
+/// `DiffResult`, capping stored entries at `DIFF_ENTRY_LIMIT` while still counting the
+/// full totals (so `truncated` reflects reality). Pure — no restic call — so
+/// `diff_snapshots` (the async command wrapper) can be tested by feeding it captured
+/// stdout instead of shelling out to a real restic binary.
+fn parse_diff_output(stdout: &str) -> DiffResult {
+    let mut entries: Vec<DiffEntry> = Vec::new();
+    let mut total_added = 0u32;
+    let mut total_removed = 0u32;
+    let mut total_modified = 0u32;
+
+    for line in stdout.lines() {
+        let (change, path) = if let Some(path) = line.strip_prefix("+  ") {
+            total_added += 1;
+            ("added", path)
+        } else if let Some(path) = line.strip_prefix("-  ") {
+            total_removed += 1;
+            ("removed", path)
+        } else if let Some(path) = line.strip_prefix("M  ").or_else(|| line.strip_prefix("T  ")) {
+            total_modified += 1;
+            ("modified", path)
+        } else {
+            continue;
+        };
+
+        if entries.len() < DIFF_ENTRY_LIMIT {
+            entries.push(DiffEntry { path: path.trim().to_string(), change: change.to_string() });
+        }
+    }
+
+    let total = total_added + total_removed + total_modified;
+    let truncated = total as usize > entries.len();
+
+    DiffResult { entries, total_added, total_removed, total_modified, truncated }
+}
+
 #[tauri::command]
 pub async fn diff_snapshots(
     db: State<'_, AppDb>,
@@ -205,34 +241,7 @@ pub async fn diff_snapshots(
     )
     .await?;
 
-    let mut entries: Vec<DiffEntry> = Vec::new();
-    let mut total_added = 0u32;
-    let mut total_removed = 0u32;
-    let mut total_modified = 0u32;
-
-    for line in stdout.lines() {
-        let (change, path) = if line.starts_with("+  ") {
-            total_added += 1;
-            ("added", &line[3..])
-        } else if line.starts_with("-  ") {
-            total_removed += 1;
-            ("removed", &line[3..])
-        } else if line.starts_with("M  ") || line.starts_with("T  ") {
-            total_modified += 1;
-            ("modified", &line[3..])
-        } else {
-            continue;
-        };
-
-        if entries.len() < DIFF_ENTRY_LIMIT {
-            entries.push(DiffEntry { path: path.trim().to_string(), change: change.to_string() });
-        }
-    }
-
-    let total = total_added + total_removed + total_modified;
-    let truncated = total as usize > entries.len();
-
-    Ok(DiffResult { entries, total_added, total_removed, total_modified, truncated })
+    Ok(parse_diff_output(&stdout))
 }
 
 #[tauri::command]
@@ -254,7 +263,7 @@ pub async fn get_snapshot_stats(
         restic_path,
     )
     .await?;
-    let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
+    let last_line = super::repo::last_nonblank_line(&stdout)
         .ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
     Ok(SnapshotStats {
@@ -263,6 +272,7 @@ pub async fn get_snapshot_stats(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_backup(
     app: &tauri::AppHandle,
     db: &AppDb,
@@ -457,6 +467,10 @@ pub async fn execute_backup(
     // cancelled flag (see the reordering above), `cancelled` can be true even when
     // `result` is `Ok` — that repo was never left locked, so skip the needless unlock.
     if result.is_err() && backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        // Deliberately fire-and-forget: unlock is a best-effort cleanup, not something
+        // the caller needs to await (see the "restic unlock calls are exempt" note in
+        // CLAUDE.md's Concurrency section).
+        #[allow(clippy::let_underscore_future)]
         let _ = tauri::async_runtime::spawn_blocking(move || {
             let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock };
             let _ = run_restic_with_path(&repo, vec!["unlock"], &restic_path_for_unlock);
@@ -546,6 +560,7 @@ pub async fn execute_backup(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_backup(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
@@ -1004,7 +1019,7 @@ pub async fn forget_by_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_retention_args, validate_snapshot_id};
+    use super::{build_retention_args, parse_diff_output, validate_snapshot_id};
     use crate::commands::cache::RetentionPolicy;
 
     #[test]
@@ -1135,5 +1150,59 @@ mod tests {
         };
         let args = build_retention_args(&[], &[], &policy);
         assert_eq!(args, vec!["forget", "--prune", "--json"]);
+    }
+
+    // ── parse_diff_output ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_diff_output_maps_each_prefix_to_its_change_type() {
+        let stdout = "+  /home/new.txt\n-  /home/gone.txt\nM  /home/changed.txt\nT  /home/retyped.txt\n";
+        let result = parse_diff_output(stdout);
+        assert_eq!(result.total_added, 1);
+        assert_eq!(result.total_removed, 1);
+        assert_eq!(result.total_modified, 2); // M and T both count as "modified"
+        assert_eq!(result.entries.len(), 4);
+        assert_eq!(result.entries[0].change, "added");
+        assert_eq!(result.entries[0].path, "/home/new.txt");
+        assert_eq!(result.entries[1].change, "removed");
+        assert_eq!(result.entries[2].change, "modified");
+        assert_eq!(result.entries[3].change, "modified");
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn parse_diff_output_skips_unrecognized_lines() {
+        let stdout = "+  /home/new.txt\nsome unrelated restic banner line\n?  /home/unknown.txt\n";
+        let result = parse_diff_output(stdout);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.total_added, 1);
+        assert_eq!(result.total_removed, 0);
+        assert_eq!(result.total_modified, 0);
+    }
+
+    #[test]
+    fn parse_diff_output_trims_path_whitespace() {
+        let result = parse_diff_output("+   /home/padded.txt  \n");
+        assert_eq!(result.entries[0].path, "/home/padded.txt");
+    }
+
+    #[test]
+    fn parse_diff_output_empty_input_is_all_zero_and_not_truncated() {
+        let result = parse_diff_output("");
+        assert_eq!(result.entries.len(), 0);
+        assert_eq!(result.total_added, 0);
+        assert_eq!(result.total_removed, 0);
+        assert_eq!(result.total_modified, 0);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn parse_diff_output_caps_entries_at_limit_but_keeps_full_totals() {
+        // DIFF_ENTRY_LIMIT is 500 — feed 501 added lines.
+        let stdout = (0..501).map(|i| format!("+  /home/file{i}.txt\n")).collect::<String>();
+        let result = parse_diff_output(&stdout);
+        assert_eq!(result.entries.len(), 500);
+        assert_eq!(result.total_added, 501);
+        assert!(result.truncated);
     }
 }

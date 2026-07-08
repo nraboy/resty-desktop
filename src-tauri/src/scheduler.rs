@@ -82,7 +82,7 @@ async fn tick(app: &tauri::AppHandle) {
                 app,
                 &db,
                 &master_key,
-                &*backup_handle,
+                &backup_handle,
                 &repo_locks,
                 &plan.repo_id,
                 Some(plan.id.as_str()),

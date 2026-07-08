@@ -141,12 +141,8 @@ fn trigger_sweep(app: &tauri::AppHandle, running: &Arc<AtomicBool>) {
     let running = Arc::clone(running);
 
     tauri::async_runtime::spawn(async move {
-        loop {
-            match index_next(&app).await {
-                SweepResult::Indexed => continue, // immediately try the next one
-                SweepResult::NothingLeft | SweepResult::Locked => break,
-            }
-        }
+        // Loop until nothing's left to index (or we yield to manual indexing).
+        while let SweepResult::Indexed = index_next(&app).await {}
         running.store(false, Ordering::SeqCst);
     });
 }
@@ -246,4 +242,31 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     }));
 
     if ok { SweepResult::Indexed } else { SweepResult::NothingLeft }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_remote;
+
+    #[test]
+    fn is_remote_recognizes_every_remote_prefix() {
+        for (path, label) in [
+            ("s3:bucket/path", "s3"),
+            ("sftp:user@host:/repo", "sftp"),
+            ("rest:https://host/repo", "rest"),
+            ("azure:container:/repo", "azure"),
+            ("gs:bucket:/repo", "gs"),
+            ("b2:bucket:/repo", "b2"),
+            ("rclone:remote:/repo", "rclone"),
+        ] {
+            assert!(is_remote(path), "expected {label} path to be remote: {path}");
+        }
+    }
+
+    #[test]
+    fn is_remote_false_for_local_paths() {
+        assert!(!is_remote("/Users/nic/repos/backup"));
+        assert!(!is_remote(r"C:\repos\backup"));
+        assert!(!is_remote("relative/repo/path"));
+    }
 }

@@ -529,12 +529,26 @@ git push origin v0.0.X
 
 ```bash
 npm run typecheck   # tsc --noEmit (tsconfig has strict + noUnusedLocals/Parameters)
+npm run lint         # eslint src (react-hooks rules only, see below)
+npm run lint:rust    # cargo clippy --all-targets -- -D warnings
+npm run lint:all     # both of the above
 npm run test:vite   # frontend tests only
 npm run test:rust   # Rust tests only (cargo test)
 npm run test:all    # both
 ```
 
-There is no `npm run lint` script today — no linter (ESLint/Biome) is set up. `npm run typecheck` is the only static-analysis gate; run it after frontend edits (it also catches unused locals/parameters via tsconfig).
+Linting is deliberately narrow and **not wired into CI** — it's a local-only gate you're expected
+to run yourself after touching hook logic or Rust code, not a merge blocker. `eslint.config.js`
+enables only `eslint-plugin-react-hooks` (`rules-of-hooks` + `exhaustive-deps`) — no
+`typescript-eslint` rule sets, no stylistic rules — because `npm run typecheck` already covers
+type errors and stylistic linting adds churn without preventing the regressions this project
+actually sees. `npm run lint:rust` runs `cargo clippy` with `-D warnings`; the few call sites that
+can't reasonably shrink (`#[tauri::command]`s with many parameters, one intentionally
+fire-and-forget `spawn_blocking` unlock) carry a targeted `#[allow(clippy::...)]` with a comment,
+matching the pre-existing pattern in `cache.rs`. Neither linter catches this project's actual
+biggest regression risk — the concurrency/ordering invariants documented in the Concurrency and
+Restic Integration sections above (`RepoLocks` ordering, `busy` flags, cancel-path races); those
+remain the job of tests and review, not static analysis.
 
 ## Running the App
 

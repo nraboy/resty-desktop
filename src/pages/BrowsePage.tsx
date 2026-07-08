@@ -261,7 +261,6 @@ export default function BrowsePage() {
         {pathStack.map((p, i) => {
           if (!p) return null;
           return (
-            // eslint-disable-next-line react/no-array-index-key
             <span key={i} className="contents">
               <span className="text-gray-700">/</span>
               <button

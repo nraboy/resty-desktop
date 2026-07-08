@@ -10,6 +10,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "clean": "rm -rf dist src-tauri/target",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "lint:all": "npm run lint && npm run lint:rust",
     "test:vite": "vitest run",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:all": "npm run test:vite && npm run test:rust"
@@ -28,9 +32,13 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.4.21",
+    "eslint": "^9",
+    "eslint-plugin-react-hooks": "^5",
+    "globals": "^15",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "typescript": "~5.8.3",
+    "typescript-eslint": "^8",
     "vite": "^7.0.4",
     "vitest": "^4.1.9"
   }

@@ -13,6 +13,42 @@ pub struct ResticStats {
     pub snapshots_count: u64,
 }
 
+/// Finds the last non-blank line in restic `--json` stdout. restic sometimes emits
+/// blank/whitespace-only trailing lines; the real JSON payload is always the last
+/// non-blank one. Shared by `parse_stats_json` here and `get_snapshot_stats` in
+/// snapshot.rs, both of which parse `restic stats --json` output.
+pub(crate) fn last_nonblank_line(stdout: &str) -> Option<&str> {
+    stdout.lines().rfind(|l| !l.trim().is_empty())
+}
+
+/// Parses `restic stats --json` stdout into `ResticStats`. Pure — no restic call, no
+/// DB write — so `fetch_and_cache_stats` (the async command wrapper) can be tested by
+/// feeding it captured stdout instead of shelling out to a real restic binary.
+pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
+    let last_line = last_nonblank_line(stdout).ok_or_else(|| "No output from restic stats".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
+    Ok(ResticStats {
+        total_size: v["total_size"].as_u64().unwrap_or(0),
+        total_file_count: v["total_file_count"].as_u64().unwrap_or(0),
+        snapshots_count: v["snapshots_count"].as_u64().unwrap_or(0),
+    })
+}
+
+/// Validates a user-supplied restic binary path (already trimmed). Pure — no
+/// filesystem I/O beyond checking existence of an already-resolved absolute path, no
+/// DB write — so `set_restic_path` can be tested without a `tauri::State<AppDb>`.
+pub(crate) fn validate_restic_path(trimmed: &str) -> Result<(), String> {
+    if trimmed.is_empty() {
+        return Err("Restic path must not be empty".to_string());
+    }
+    // If the value looks like an absolute path, verify the file exists.
+    if (trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(":\\"))
+        && !std::path::Path::new(trimmed).is_file() {
+            return Err(format!("No file found at '{trimmed}'"));
+        }
+    Ok(())
+}
+
 pub fn run_restic_with_path(
     repo: &FullRepository,
     args: Vec<&str>,
@@ -182,14 +218,7 @@ async fn fetch_and_cache_stats(
     let restic_path = super::get_restic_path(db);
     let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await?;
-    let last_line = stdout.lines().filter(|l| !l.trim().is_empty()).last()
-        .ok_or_else(|| "No output from restic stats".to_string())?;
-    let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
-    let stats = ResticStats {
-        total_size: v["total_size"].as_u64().unwrap_or(0),
-        total_file_count: v["total_file_count"].as_u64().unwrap_or(0),
-        snapshots_count: v["snapshots_count"].as_u64().unwrap_or(0),
-    };
+    let stats = parse_stats_json(&stdout)?;
     let _ = db.set_stats(repo_id, stats.total_size, stats.total_file_count, stats.snapshots_count);
     Ok(stats)
 }
@@ -273,15 +302,7 @@ pub fn get_restic_path(db: State<'_, AppDb>) -> Result<String, String> {
 #[tauri::command]
 pub fn set_restic_path(db: State<'_, AppDb>, path: String) -> Result<(), String> {
     let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("Restic path must not be empty".to_string());
-    }
-    // If the value looks like an absolute path, verify the file exists.
-    if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(":\\") {
-        if !std::path::Path::new(trimmed).is_file() {
-            return Err(format!("No file found at '{trimmed}'"));
-        }
-    }
+    validate_restic_path(trimmed)?;
     db.set_setting("restic_path", trimmed)
 }
 
@@ -668,11 +689,11 @@ pub fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
         }
         let db_path = format!("{home}/Library/Application Support/com.apple.TCC/TCC.db");
         match std::fs::File::open(&db_path) {
-            Ok(_) => return Ok(FullDiskAccessStatus { supported: true, granted: true }),
+            Ok(_) => Ok(FullDiskAccessStatus { supported: true, granted: true }),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Ok(FullDiskAccessStatus { supported: true, granted: false });
+                Ok(FullDiskAccessStatus { supported: true, granted: false })
             }
-            Err(_) => return Ok(FullDiskAccessStatus { supported: true, granted: false }),
+            Err(_) => Ok(FullDiskAccessStatus { supported: true, granted: false }),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -689,4 +710,99 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
             .map_err(|e| format!("Failed to open System Settings: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{last_nonblank_line, parse_stats_json, validate_restic_path};
+
+    // ── last_nonblank_line / parse_stats_json ──────────────────────────────
+
+    #[test]
+    fn last_nonblank_line_finds_single_line() {
+        assert_eq!(last_nonblank_line(r#"{"total_size":1}"#), Some(r#"{"total_size":1}"#));
+    }
+
+    #[test]
+    fn last_nonblank_line_skips_trailing_blank_lines() {
+        let stdout = "{\"total_size\":1}\n\n   \n";
+        assert_eq!(last_nonblank_line(stdout), Some(r#"{"total_size":1}"#));
+    }
+
+    #[test]
+    fn last_nonblank_line_picks_last_of_multiple_json_lines() {
+        // restic can emit progress/status lines before the final summary line.
+        let stdout = "{\"message_type\":\"status\"}\n{\"total_size\":42,\"total_file_count\":3,\"snapshots_count\":1}\n";
+        assert_eq!(
+            last_nonblank_line(stdout),
+            Some(r#"{"total_size":42,"total_file_count":3,"snapshots_count":1}"#)
+        );
+    }
+
+    #[test]
+    fn last_nonblank_line_all_blank_returns_none() {
+        assert_eq!(last_nonblank_line("\n  \n\t\n"), None);
+        assert_eq!(last_nonblank_line(""), None);
+    }
+
+    #[test]
+    fn parse_stats_json_well_formed() {
+        let stdout = r#"{"total_size":100,"total_file_count":10,"snapshots_count":2}"#;
+        let stats = parse_stats_json(stdout).unwrap();
+        assert_eq!(stats.total_size, 100);
+        assert_eq!(stats.total_file_count, 10);
+        assert_eq!(stats.snapshots_count, 2);
+    }
+
+    #[test]
+    fn parse_stats_json_missing_fields_default_to_zero() {
+        let stats = parse_stats_json(r#"{"total_size":5}"#).unwrap();
+        assert_eq!(stats.total_size, 5);
+        assert_eq!(stats.total_file_count, 0);
+        assert_eq!(stats.snapshots_count, 0);
+    }
+
+    #[test]
+    fn parse_stats_json_empty_stdout_is_error() {
+        let err = parse_stats_json("").unwrap_err();
+        assert!(err.contains("No output"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_stats_json_malformed_json_is_error() {
+        assert!(parse_stats_json("not json").is_err());
+    }
+
+    // ── validate_restic_path ────────────────────────────────────────────────
+
+    #[test]
+    fn validate_restic_path_rejects_empty() {
+        assert!(validate_restic_path("").is_err());
+    }
+
+    #[test]
+    fn validate_restic_path_accepts_bare_command_name() {
+        // "restic" alone (no path separator) is never checked against the filesystem —
+        // it's resolved against $PATH at call time, not by this validator.
+        assert!(validate_restic_path("restic").is_ok());
+    }
+
+    #[test]
+    fn validate_restic_path_accepts_existing_absolute_file() {
+        // The current test binary is guaranteed to exist at an absolute path.
+        let exe = std::env::current_exe().unwrap();
+        assert!(validate_restic_path(exe.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn validate_restic_path_rejects_nonexistent_absolute_file() {
+        let err = validate_restic_path("/nonexistent/xyz/restic").unwrap_err();
+        assert!(err.contains("No file found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_restic_path_rejects_nonexistent_windows_style_paths() {
+        assert!(validate_restic_path(r"C:\nonexistent\restic.exe").is_err());
+        assert!(validate_restic_path(r"\nonexistent\restic").is_err());
+    }
 }

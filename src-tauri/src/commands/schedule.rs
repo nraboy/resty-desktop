@@ -25,7 +25,7 @@ pub(crate) fn next_fire_time(expr: &str) -> Result<i64, String> {
 }
 
 pub(crate) fn describe_cron(expr: &str) -> String {
-    let parts: Vec<&str> = expr.trim().split_whitespace().collect();
+    let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() != 5 {
         return expr.to_string();
     }
@@ -197,6 +197,13 @@ mod tests {
         assert_eq!(describe_cron("0 0 * * *"), "Daily at 00:00");
         assert_eq!(describe_cron("30 12 * * *"), "Daily at 12:30");
         assert_eq!(describe_cron("15 3 * * *"), "Daily at 03:15");
+    }
+
+    #[test]
+    fn test_describe_cron_ignores_surrounding_whitespace() {
+        // split_whitespace() already discards leading/trailing whitespace runs, so a
+        // padded expression must describe identically to its unpadded form.
+        assert_eq!(describe_cron("  0 0 * * *  "), describe_cron("0 0 * * *"));
     }
 
     #[test]

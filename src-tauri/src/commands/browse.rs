@@ -99,6 +99,7 @@ pub async fn list_files(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_path(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
@@ -206,6 +207,7 @@ pub struct RestoreProgress {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_snapshot(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,

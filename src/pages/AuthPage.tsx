@@ -31,6 +31,9 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
       openResetModalFn();
       onResetModalOpened?.();
     }
+    // onResetModalOpened is an unmemoized ack callback; including it would re-fire this
+    // effect on every parent render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openResetModal]);
 
   const handleSubmit = async (e: React.FormEvent) => {

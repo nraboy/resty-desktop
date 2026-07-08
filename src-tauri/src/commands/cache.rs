@@ -17,6 +17,9 @@ use super::snapshot::Snapshot;
 /// never drift — the Logs page never shows rows the trim would have deleted.
 const BACKUP_HISTORY_LIMIT: i64 = 1000;
 
+/// (salt, verification_nonce, verification_ciphertext) from the `master_key` table.
+type MasterKeyRow = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 // ── public types (serialised to frontend) ─────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,7 +435,7 @@ impl AppDb {
         Ok(())
     }
 
-    pub fn load_master_key_row(&self) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    pub fn load_master_key_row(&self) -> Result<MasterKeyRow, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT salt, verification_nonce, verification_ciphertext FROM master_key WHERE id = 1",
@@ -683,7 +686,7 @@ impl AppDb {
                     excludes: serde_json::from_str(&excludes_json).map_err(|e| e.to_string())?,
                     retention: retention_json
                         .as_deref()
-                        .map(|s| serde_json::from_str(s))
+                        .map(serde_json::from_str)
                         .transpose()
                         .map_err(|e: serde_json::Error| e.to_string())?,
                     limit_upload,
@@ -700,7 +703,7 @@ impl AppDb {
         let retention_json = plan
             .retention
             .as_ref()
-            .map(|r| serde_json::to_string(r))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e: serde_json::Error| e.to_string())?;
 
@@ -1632,7 +1635,7 @@ impl AppDb {
                     excludes: serde_json::from_str(&excludes_json).map_err(|e: serde_json::Error| e.to_string())?,
                     retention: retention_json
                         .as_deref()
-                        .map(|s| serde_json::from_str(s))
+                        .map(serde_json::from_str)
                         .transpose()
                         .map_err(|e: serde_json::Error| e.to_string())?,
                     limit_upload,
@@ -1980,7 +1983,7 @@ mod tests {
 
         // Verify repoA's status is gone.
         let status_a = db.get_browse_status("repoA").unwrap();
-        assert!(status_a.get("snap123").is_none());
+        assert!(!status_a.contains_key("snap123"));
 
         // Verify repoB's status remains.
         let status_b = db.get_browse_status("repoB").unwrap();
@@ -2020,7 +2023,7 @@ mod tests {
             mtime: None,
             mode: None,
         };
-        db.insert_browse_files("snap-old00000000", &[shared_entry.clone()]).unwrap();
+        db.insert_browse_files("snap-old00000000", std::slice::from_ref(&shared_entry)).unwrap();
         db.insert_browse_files("snap-new00000000", &[shared_entry]).unwrap();
         db.insert_browse_files("snap-pending0000", &[only_in_pending]).unwrap();
 
@@ -2542,7 +2545,7 @@ mod tests {
 
         db.insert_browse_files("snap1", &[shared.clone(), only_in_snap1.clone()])
             .unwrap();
-        db.insert_browse_files("snap2", &[shared.clone()]).unwrap();
+        db.insert_browse_files("snap2", std::slice::from_ref(&shared)).unwrap();
         db.set_browse_status(repo_id, "snap1", "complete").unwrap();
         db.set_browse_status(repo_id, "snap2", "complete").unwrap();
 
