@@ -495,7 +495,21 @@ gray.50–950, blue.300/400/700/900, green.400
 
 ## Versioning
 
-The app version's source of truth is `src-tauri/tauri.conf.json` (Tauri reads it for the bundled app). On a release bump, keep `tauri.conf.json`, `package.json`, and `package-lock.json` (both the top-level `version` and `packages[""].version`) in sync. `src-tauri/Cargo.toml`'s `version` is deliberately left at `0.0.0` — that crate version is unused (Tauri does not read it for the app version), and `0.0.0` signals "not the source of truth" to avoid confusion; do not bump it.
+`src-tauri/tauri.conf.json`'s `version` field is the **only** version that matters — it's a literal
+semver string, not a path, so Tauri reads it directly and never falls back to `package.json` (per
+`@tauri-apps/cli`'s own config schema, that fallback only applies when `version` is set to a path
+pointing at a `package.json` file, or omitted entirely, in which case it falls back to
+`Cargo.toml`). The in-app version shown in `Sidebar.tsx` comes from `@tauri-apps/api/app`'s
+`getVersion()`, which also resolves from `tauri.conf.json`. On a release bump, only
+`tauri.conf.json` needs to change.
+
+`package.json` and `package-lock.json` deliberately carry **no** `version` field — there's nothing
+in the toolchain or CI that reads it (confirmed: neither workflow in `.github/workflows/` nor any
+frontend/backend code references it), so there's nothing to keep in sync. Don't add one back.
+
+`src-tauri/Cargo.toml`'s `version` is similarly deliberately left at `0.0.0` — that crate version is
+unused (Tauri does not read it for the app version), and `0.0.0` signals "not the source of truth"
+to avoid confusion; do not bump it.
 
 ## Build Profile
 

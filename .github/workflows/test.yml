@@ -21,6 +21,8 @@ jobs:
           cache: 'npm'
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -34,6 +36,12 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run lint
+        run: npm run lint:all
 
       - name: Run frontend tests
         run: npm run test:vite
