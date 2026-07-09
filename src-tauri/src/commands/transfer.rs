@@ -177,15 +177,21 @@ pub fn export_data(
     if let Some((export_key, _)) = &encryption {
         for r in &all_repos {
             let full = db.get_full_repo(&r.id, &key)?;
-            let (nonce, ct) = crypto::encrypt(export_key, full.password.as_bytes())?;
+            // A passwordless repo (empty stored password) carries no secret, so
+            // write empty nonce/ciphertext rather than encrypting empty bytes
+            // (which would still emit a nonce + auth tag and look like a real
+            // secret). decrypt_secret short-circuits the empty form on import.
+            let password = if full.password.is_empty() {
+                EncSecret { nonce: String::new(), ciphertext: String::new() }
+            } else {
+                let (nonce, ct) = crypto::encrypt(export_key, full.password.as_bytes())?;
+                EncSecret { nonce: B64.encode(nonce), ciphertext: B64.encode(ct) }
+            };
             repositories.push(ExportRepo {
                 id: r.id.clone(),
                 name: r.name.clone(),
                 path: r.path.clone(),
-                password: EncSecret {
-                    nonce: B64.encode(nonce),
-                    ciphertext: B64.encode(ct),
-                },
+                password,
             });
         }
     }
@@ -257,6 +263,13 @@ fn derive_export_key(enc: &ExportEncryption, password: Option<&str>) -> Result<[
 }
 
 fn decrypt_secret(key: &[u8; 32], secret: &EncSecret) -> Result<Vec<u8>, String> {
+    // An empty secret denotes a passwordless repo (no secret to protect). Treat
+    // it as an empty password without attempting a decrypt. Old bundles that
+    // encrypted empty bytes still carry a real nonce+tag and take the decrypt
+    // path below (decrypting to empty) — so this stays backward compatible.
+    if secret.nonce.is_empty() && secret.ciphertext.is_empty() {
+        return Ok(Vec::new());
+    }
     let nonce = B64.decode(&secret.nonce).map_err(|e| e.to_string())?;
     let ct = B64.decode(&secret.ciphertext).map_err(|e| e.to_string())?;
     crypto::decrypt(key, &nonce, &ct)
@@ -273,8 +286,18 @@ pub fn preview_import(file_path: String, export_password: Option<String>) -> Res
     if let (Some(enc), Some(pw)) = (&bundle.encryption, export_password.as_deref()) {
         if !pw.is_empty() {
             let key = derive_export_key(enc, Some(pw))?;
-            if let Some(first) = bundle.repositories.first() {
-                let mut plaintext = decrypt_secret(&key, &first.password)?;
+            // Verify the passphrase against a repo that actually carries a
+            // secret. A passwordless repo's empty secret would decrypt to
+            // nothing without exercising the key, letting a wrong passphrase
+            // pass preview. If every repo is passwordless there's no secret to
+            // test against — skip (import still enforces a non-empty passphrase
+            // via derive_export_key).
+            if let Some(with_secret) = bundle
+                .repositories
+                .iter()
+                .find(|r| !r.password.nonce.is_empty() || !r.password.ciphertext.is_empty())
+            {
+                let mut plaintext = decrypt_secret(&key, &with_secret.password)?;
                 plaintext.zeroize();
             }
         }
@@ -710,6 +733,16 @@ mod tests {
         };
         let decrypted = decrypt_secret(&key, &enc).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_secret_empty_secret_yields_empty_password() {
+        // Passwordless repos export as an empty secret; import must read that
+        // back as an empty password without attempting (and failing) a decrypt.
+        let key = [1u8; 32];
+        let enc = EncSecret { nonce: String::new(), ciphertext: String::new() };
+        let decrypted = decrypt_secret(&key, &enc).unwrap();
+        assert!(decrypted.is_empty());
     }
 
     #[test]

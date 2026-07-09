@@ -12,20 +12,28 @@ export default function Modal({ title, open, onClose, children }: ModalProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
+  // Focus management: runs only on the open/close transition, not on every parent
+  // re-render — onClose is intentionally excluded from these deps. Callers pass an
+  // inline arrow function (e.g. `onClose={() => setModalMode(null)}`), so its identity
+  // changes on every keystroke-triggered re-render; including it here previously caused
+  // this effect (and its refocus-the-close-button body) to rerun on every keystroke,
+  // stealing focus out of whatever input the user was typing into.
   useEffect(() => {
     if (!open) return;
-
     previouslyFocused.current = document.activeElement as HTMLElement | null;
     closeButtonRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus();
+    };
+  }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      previouslyFocused.current?.focus();
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
   if (!open) return null;

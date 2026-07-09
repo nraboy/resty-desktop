@@ -321,10 +321,11 @@ pub async fn restore_snapshot(
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
 
-        let mut child = std::process::Command::new(&restic_path)
-            .args(["restore", &snapshot_id, "--target", &target_dir, "--json"])
-            .env("RESTIC_REPOSITORY", &repo_path)
-            .env("RESTIC_PASSWORD", &repo_password)
+        let mut cmd = std::process::Command::new(&restic_path);
+        cmd.args(["restore", &snapshot_id, "--target", &target_dir, "--json"])
+            .env("RESTIC_REPOSITORY", &repo_path);
+        super::repo::apply_repo_password(&mut cmd, &repo_password);
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

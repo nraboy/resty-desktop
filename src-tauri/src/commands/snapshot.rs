@@ -454,11 +454,12 @@ pub async fn execute_backup(
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
 
-        let mut child = std::process::Command::new(&restic_path_inner)
-            .args(&args)
+        let mut cmd = std::process::Command::new(&restic_path_inner);
+        cmd.args(&args)
             .env("RESTIC_REPOSITORY", &repo_path)
-            .env("RESTIC_PASSWORD", &repo_password)
-            .env("RESTIC_COMPRESSION", &compression_inner)
+            .env("RESTIC_COMPRESSION", &compression_inner);
+        super::repo::apply_repo_password(&mut cmd, &repo_password);
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -761,12 +762,13 @@ pub async fn copy_snapshot(
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
 
-        let mut child = std::process::Command::new(&restic_path)
-            .args(["copy", &snapshot_id])
+        let mut cmd = std::process::Command::new(&restic_path);
+        cmd.args(["copy", &snapshot_id])
             .env("RESTIC_REPOSITORY", &dest_repo.path)
-            .env("RESTIC_PASSWORD", &dest_repo.password)
-            .env("RESTIC_FROM_REPOSITORY", &src_repo.path)
-            .env("RESTIC_FROM_PASSWORD", &src_repo.password)
+            .env("RESTIC_FROM_REPOSITORY", &src_repo.path);
+        super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
+        super::repo::apply_from_repo_password(&mut cmd, &src_repo.password);
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -913,12 +915,13 @@ pub async fn mirror_repo(
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
 
-        let mut child = std::process::Command::new(&restic_path)
-            .args(["copy"])
+        let mut cmd = std::process::Command::new(&restic_path);
+        cmd.args(["copy"])
             .env("RESTIC_REPOSITORY", &dest_repo.path)
-            .env("RESTIC_PASSWORD", &dest_repo.password)
-            .env("RESTIC_FROM_REPOSITORY", &src_repo.path)
-            .env("RESTIC_FROM_PASSWORD", &src_repo.password)
+            .env("RESTIC_FROM_REPOSITORY", &src_repo.path);
+        super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
+        super::repo::apply_from_repo_password(&mut cmd, &src_repo.password);
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

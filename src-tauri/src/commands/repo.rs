@@ -35,6 +35,19 @@ pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
     })
 }
 
+/// Rejects an empty password for repo *creation* (`init_repo`). Passwordless
+/// repos may be opened/imported/exported, but not created from this app. This is
+/// a defense-in-depth guard behind the UI (the Init modal already requires a
+/// password); extracted as a helper so it can be unit-tested without Tauri state.
+/// Uses `is_empty()` to match the codebase's empty-string-means-passwordless
+/// convention (see `apply_repo_password`).
+pub(crate) fn validate_init_password(password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("A password is required to create a repository.".to_string());
+    }
+    Ok(())
+}
+
 /// Validates a user-supplied restic binary path (already trimmed). Pure — no
 /// filesystem I/O beyond checking existence of an already-resolved absolute path, no
 /// DB write — so `set_restic_path` can be tested without a `tauri::State<AppDb>`.
@@ -50,15 +63,39 @@ pub(crate) fn validate_restic_path(trimmed: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Applies a repo's password to a restic `Command`: a normal password sets
+/// `RESTIC_PASSWORD`; an empty stored password means a repo created with
+/// `restic init --insecure-no-password`, which restic requires the caller to pass
+/// `--insecure-no-password` on every subsequent command (an empty/unset
+/// `RESTIC_PASSWORD` alone makes restic prompt interactively, not use no password).
+/// Setting both the flag and the env var is a restic error, so the two are mutually
+/// exclusive.
+pub(crate) fn apply_repo_password(cmd: &mut std::process::Command, password: &str) {
+    if password.is_empty() {
+        cmd.arg("--insecure-no-password");
+    } else {
+        cmd.env("RESTIC_PASSWORD", password);
+    }
+}
+
+/// Same as `apply_repo_password` but for a copy/mirror source repo's `--from-*` flags.
+pub(crate) fn apply_from_repo_password(cmd: &mut std::process::Command, password: &str) {
+    if password.is_empty() {
+        cmd.arg("--from-insecure-no-password");
+    } else {
+        cmd.env("RESTIC_FROM_PASSWORD", password);
+    }
+}
+
 pub fn run_restic_with_path(
     repo: &FullRepository,
     args: Vec<&str>,
     restic_path: &str,
 ) -> Result<String, String> {
-    let output = std::process::Command::new(restic_path)
-        .args(args)
-        .env("RESTIC_REPOSITORY", &repo.path)
-        .env("RESTIC_PASSWORD", &repo.password)
+    let mut cmd = std::process::Command::new(restic_path);
+    cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
+    apply_repo_password(&mut cmd, &repo.password);
+    let output = cmd
         .stdin(std::process::Stdio::null())
         .no_console()
         .augment_path()
@@ -161,6 +198,7 @@ pub async fn init_repo(
     path: String,
     password: String,
 ) -> Result<(), String> {
+    validate_init_password(&password)?;
     let restic_path = super::get_restic_path(&db);
     let dummy = FullRepository { path: path.clone(), password: password.clone() };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
@@ -270,10 +308,10 @@ pub async fn check_repo(
 
     let spawn_result = tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let output = std::process::Command::new(&restic_path)
-            .args(["check", "--json"])
-            .env("RESTIC_REPOSITORY", &repo.path)
-            .env("RESTIC_PASSWORD", &repo.password)
+        let mut cmd = std::process::Command::new(&restic_path);
+        cmd.args(["check", "--json"]).env("RESTIC_REPOSITORY", &repo.path);
+        apply_repo_password(&mut cmd, &repo.password);
+        let output = cmd
             .stdin(std::process::Stdio::null())
             .no_console()
             .augment_path()
@@ -416,10 +454,10 @@ async fn run_one_prune_attempt(
 ) -> Result<PruneAttempt, String> {
     use std::io::{BufReader, Read};
 
-    let mut child = std::process::Command::new(restic_path)
-        .arg("prune")
-        .env("RESTIC_REPOSITORY", &full.path)
-        .env("RESTIC_PASSWORD", &full.password)
+    let mut cmd = std::process::Command::new(restic_path);
+    cmd.arg("prune").env("RESTIC_REPOSITORY", &full.path);
+    apply_repo_password(&mut cmd, &full.password);
+    let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -851,7 +889,61 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_nonblank_line, parse_stats_json, validate_restic_path};
+    use super::{
+        apply_from_repo_password, apply_repo_password, last_nonblank_line, parse_stats_json,
+        validate_init_password, validate_restic_path,
+    };
+
+    // ── validate_init_password ─────────────────────────────────────────────
+
+    #[test]
+    fn validate_init_password_rejects_empty() {
+        assert_eq!(
+            validate_init_password("").unwrap_err(),
+            "A password is required to create a repository."
+        );
+    }
+
+    #[test]
+    fn validate_init_password_accepts_non_empty() {
+        assert!(validate_init_password("hunter2").is_ok());
+    }
+
+    // ── apply_repo_password / apply_from_repo_password ─────────────────────
+
+    #[test]
+    fn apply_repo_password_sets_env_for_non_empty_password() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_repo_password(&mut cmd, "hunter2");
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_PASSWORD" && *v == Some(std::ffi::OsStr::new("hunter2"))));
+        assert!(!cmd.get_args().any(|a| a == "--insecure-no-password"));
+    }
+
+    #[test]
+    fn apply_repo_password_sets_flag_for_empty_password() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_repo_password(&mut cmd, "");
+        assert!(cmd.get_args().any(|a| a == "--insecure-no-password"));
+        assert!(!cmd.get_envs().any(|(k, _)| k == "RESTIC_PASSWORD"));
+    }
+
+    #[test]
+    fn apply_from_repo_password_sets_env_for_non_empty_password() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_from_repo_password(&mut cmd, "hunter2");
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_FROM_PASSWORD" && *v == Some(std::ffi::OsStr::new("hunter2"))));
+        assert!(!cmd.get_args().any(|a| a == "--from-insecure-no-password"));
+    }
+
+    #[test]
+    fn apply_from_repo_password_sets_flag_for_empty_password() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_from_repo_password(&mut cmd, "");
+        assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
+        assert!(!cmd.get_envs().any(|(k, _)| k == "RESTIC_FROM_PASSWORD"));
+    }
 
     // ── last_nonblank_line / parse_stats_json ──────────────────────────────
 

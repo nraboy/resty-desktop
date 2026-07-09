@@ -45,11 +45,13 @@ export default function RepositoriesPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", path: "", password: "" });
+  const [noPassword, setNoPassword] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   const [editTarget, setEditTarget] = useState<Repository | null>(null);
   const [editName, setEditName] = useState("");
   const [editPath, setEditPath] = useState("");
   const [editPassword, setEditPassword] = useState("");
+  const [editNoPassword, setEditNoPassword] = useState(false);
   const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -156,7 +158,7 @@ export default function RepositoriesPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!form.name || !form.path || !form.password) {
+    if (!form.name || !form.path || (!noPassword && !form.password)) {
       setError("All fields are required.");
       return;
     }
@@ -167,11 +169,12 @@ export default function RepositoriesPage() {
       if (modalMode === "init") {
         await initRepo(id, form.name, form.path, form.password);
       } else {
-        await addRepo(id, form.name, form.path, form.password);
+        await addRepo(id, form.name, form.path, noPassword ? "" : form.password);
       }
       await load();
       setModalMode(null);
       setForm({ name: "", path: "", password: "" });
+      setNoPassword(false);
       if (!isRemoteRepo(form.path)) {
         refreshSnapshots(id).catch(() => {});
         refreshRepoStats(id)
@@ -199,7 +202,7 @@ export default function RepositoriesPage() {
 
   const handleRename = async (e: FormEvent) => {
     e.preventDefault();
-    if (!editTarget || !editName.trim() || !editPath.trim() || !editPassword.trim()) return;
+    if (!editTarget || !editName.trim() || !editPath.trim() || (!editNoPassword && !editPassword.trim())) return;
     setRenaming(true);
     try {
       if (editName.trim() !== editTarget.name) {
@@ -208,9 +211,10 @@ export default function RepositoriesPage() {
       if (editPath.trim() !== editTarget.path) {
         await updateRepoPath(editTarget.id, editPath.trim());
       }
+      const newPassword = editNoPassword ? "" : editPassword.trim();
       const originalPassword = await getRepoPassword(editTarget.id);
-      if (editPassword.trim() !== originalPassword) {
-        await updateRepoPassword(editTarget.id, editPassword.trim());
+      if (newPassword !== originalPassword) {
+        await updateRepoPassword(editTarget.id, newPassword);
       }
       await load();
       setEditTarget(null);
@@ -221,6 +225,7 @@ export default function RepositoriesPage() {
 
   const openModal = (mode: ModalMode) => {
     setForm({ name: "", path: "", password: "" });
+    setNoPassword(false);
     setError("");
     setTestResult(null);
     setPathMode("local");
@@ -228,14 +233,14 @@ export default function RepositoriesPage() {
   };
 
   const handleTest = async () => {
-    if (!form.path || !form.password) {
+    if (!form.path || (!noPassword && !form.password)) {
       setTestResult({ ok: false, message: "Path and password are required to test." });
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
-      await testRepoConnection(form.path, form.password);
+      await testRepoConnection(form.path, noPassword ? "" : form.password);
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -446,8 +451,11 @@ export default function RepositoriesPage() {
                       setEditName(repo.name);
                       setEditPath(repo.path);
                       setEditPassword("");
+                      setEditNoPassword(false);
                       setEditTestResult(null);
-                      getRepoPassword(repo.id).then(setEditPassword).catch(() => {});
+                      getRepoPassword(repo.id)
+                        .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
+                        .catch(() => {});
                     }}
                     className="text-gray-500 hover:text-blue-400"
                     title="Rename"
@@ -618,13 +626,26 @@ export default function RepositoriesPage() {
               </div>
             )}
           </div>
-          <Input
-            label="Password"
-            type="password"
-            placeholder="Repository password"
-            value={editPassword}
-            onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
-          />
+          {editNoPassword ? (
+            // Passwordless repo: read-only indicator. The password/passwordless
+            // boundary can't be crossed here — converting a repo requires
+            // re-init (not supported), and flipping a password repo to
+            // passwordless would just store "" and brick it.
+            <div className="flex flex-col gap-1">
+              <label className="text-sm text-gray-400 font-medium">Password</label>
+              <div className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm italic text-gray-500">
+                No Password (--insecure-no-password)
+              </div>
+            </div>
+          ) : (
+            <Input
+              label="Password"
+              type="password"
+              placeholder="Repository password"
+              value={editPassword}
+              onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
+            />
+          )}
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
@@ -636,14 +657,14 @@ export default function RepositoriesPage() {
               variant="secondary"
               loading={editTesting}
               onClick={async () => {
-                if (!editPath.trim() || !editPassword.trim()) {
+                if (!editPath.trim() || (!editNoPassword && !editPassword.trim())) {
                   setEditTestResult({ ok: false, message: "Path and password are required to test." });
                   return;
                 }
                 setEditTesting(true);
                 setEditTestResult(null);
                 try {
-                  await testRepoConnection(editPath.trim(), editPassword.trim());
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim());
                   setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
@@ -862,8 +883,11 @@ export default function RepositoriesPage() {
                 setEditName(repo.name);
                 setEditPath(repo.path);
                 setEditPassword("");
+                setEditNoPassword(false);
                 setEditTestResult(null);
-                getRepoPassword(repo.id).then(setEditPassword).catch(() => {});
+                getRepoPassword(repo.id)
+                  .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
+                  .catch(() => {});
               },
             },
             {
@@ -957,7 +981,22 @@ export default function RepositoriesPage() {
             placeholder="Repository password"
             value={form.password}
             onChange={(e) => { setForm({ ...form, password: e.target.value }); setTestResult(null); }}
+            disabled={modalMode === "add" && noPassword}
           />
+          {modalMode === "add" && (
+            <label className="flex items-center gap-2 text-sm text-gray-400">
+              <input
+                type="checkbox"
+                checked={noPassword}
+                onChange={(e) => {
+                  setNoPassword(e.target.checked);
+                  setForm((f) => ({ ...f, password: "" }));
+                  setTestResult(null);
+                }}
+              />
+              No Password (--insecure-no-password)
+            </label>
+          )}
           {testResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}
