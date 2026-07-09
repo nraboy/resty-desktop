@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatBytes, formatSize, formatDate, formatTimestamp, formatDuration, formatRelative } from "./format";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative } from "./format";
 
 describe("formatBytes", () => {
   it("returns '0 B' for zero", () => {
@@ -59,6 +59,16 @@ describe("formatDate", () => {
 
   it("produces consistent output for same input", () => {
     expect(formatDate(1705320000)).toBe(formatDate(1705320000));
+  });
+});
+
+describe("formatDateOnly", () => {
+  it("accepts an ISO string and returns a non-empty string", () => {
+    expect(formatDateOnly("2024-01-15T12:00:00Z")).toBeTruthy();
+  });
+
+  it("produces consistent output for the same input", () => {
+    expect(formatDateOnly("2024-01-15T12:00:00Z")).toBe(formatDateOnly("2024-01-15T12:00:00Z"));
   });
 });
 

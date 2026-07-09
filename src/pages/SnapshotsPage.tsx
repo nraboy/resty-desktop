@@ -11,6 +11,7 @@ import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu"
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
+import Spinner from "../components/Spinner";
 
 const PAGE_SIZE = 10;
 
@@ -1248,10 +1249,7 @@ export default function SnapshotsPage() {
       >
         {statsLoading ? (
           <div className="flex flex-col items-center justify-center py-10 gap-3 text-sm text-gray-400">
-            <svg className="animate-spin w-6 h-6 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
+            <Spinner className="w-6 h-6 text-blue-400" />
             Running restic stats…
           </div>
         ) : statsError ? (

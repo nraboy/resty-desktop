@@ -421,6 +421,28 @@ async fn run_one_prune_attempt(
                     let _ = c.kill();
                 }
             }
+            // kill() only sends the signal — it doesn't wait for the OS to tear the process
+            // down, and dropping a `Child` handle (the guard-clear right below) does NOT reap
+            // it either. Without this, the killed process lingers as a zombie that Rust never
+            // waits on again. While it's a zombie its PID is still "alive" as far as a
+            // same-host liveness check is concerned, which can fool restic's own stale-lock
+            // detection into believing the lock's owning process is still running — so the
+            // `unlock` call below silently no-ops and the repo stays exclusively locked for
+            // the next prune attempt. Poll (non-blockingly) until the process is actually
+            // reaped before proceeding.
+            loop {
+                let reaped = {
+                    let mut guard = prune_handle.child.lock().map_err(|e| e.to_string())?;
+                    match *guard {
+                        Some(ref mut c) => c.try_wait().map_err(|e| e.to_string())?.is_some(),
+                        None => true,
+                    }
+                };
+                if reaped {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
             break None;
         }
         let maybe_status = {

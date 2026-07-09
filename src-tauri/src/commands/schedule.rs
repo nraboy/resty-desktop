@@ -230,4 +230,18 @@ mod tests {
         // Invalid time (non-numeric)
         assert_eq!(describe_cron("abc * * * *"), "abc * * * *");
     }
+
+    #[test]
+    fn test_describe_cron_both_dom_and_dow_set() {
+        // When both day-of-month and day-of-week are restricted, falls through
+        // to the generic "Daily at ..." branch rather than the weekly/monthly ones.
+        assert_eq!(describe_cron("0 0 15 * 1"), "Daily at 00:00");
+        assert_eq!(describe_cron("30 12 1 * 5"), "Daily at 12:30");
+    }
+
+    #[test]
+    fn test_to_7field() {
+        assert_eq!(to_7field("0 0 * * *"), "0 0 0 * * * *");
+        assert_eq!(to_7field("  30 12 * * *  "), "0 30 12 * * * *");
+    }
 }

@@ -37,6 +37,7 @@ export default function SettingsPage() {
   const [dbSize, setDbSize] = useState<number | null>(null);
 
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
+  const [pruneStarted, setPruneStarted] = useState(false);
   const [pruning, setPruning] = useState(false);
   const [pruneDone, setPruneDone] = useState(false);
   const [pruneCancelled, setPruneCancelled] = useState(false);
@@ -127,11 +128,16 @@ export default function SettingsPage() {
 
   const handleTrayToggle = async (enabled: boolean) => {
     setTrayEnabledLocal(enabled);
-    await setTrayEnabled(enabled).catch(() => {});
-    if (enabled) {
-      await activateTray().catch(() => {});
-    } else {
-      await deactivateTray().catch(() => {});
+    try {
+      await setTrayEnabled(enabled);
+      if (enabled) {
+        await activateTray();
+      } else {
+        await deactivateTray();
+      }
+    } catch (err: any) {
+      setTrayEnabledLocal(!enabled);
+      setError(String(err));
     }
   };
 
@@ -175,6 +181,7 @@ export default function SettingsPage() {
   };
 
   const handlePruneAll = async () => {
+    setPruneStarted(true);
     setPruning(true);
     setPruneDone(false);
     setPruneCancelled(false);
@@ -218,6 +225,7 @@ export default function SettingsPage() {
     pruneUnlistenRef.current?.();
     pruneUnlistenRef.current = null;
     setPruneModalOpen(false);
+    setPruneStarted(false);
     setPruneDone(false);
     setPruneCancelled(false);
     setPruneError("");
@@ -309,6 +317,7 @@ export default function SettingsPage() {
               <button
                 role="switch"
                 aria-checked={trayEnabled}
+                aria-label="Keep app running in tray when window is closed"
                 onClick={() => handleTrayToggle(!trayEnabled)}
                 className={[
                   "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
@@ -343,10 +352,14 @@ export default function SettingsPage() {
               <button
                 role="switch"
                 aria-checked={autoIndexing}
+                aria-label="Automatic background file indexing"
                 onClick={() => {
                   const next = !autoIndexing;
                   setAutoIndexingLocal(next);
-                  setAutoIndexing(next).catch(() => {});
+                  setAutoIndexing(next).catch((err) => {
+                    setAutoIndexingLocal(!next);
+                    setError(String(err));
+                  });
                 }}
                 className={[
                   "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
@@ -373,10 +386,14 @@ export default function SettingsPage() {
               <button
                 role="switch"
                 aria-checked={remoteAutoRefresh}
+                aria-label="Auto-refresh data for remote repositories"
                 onClick={() => {
                   const next = !remoteAutoRefresh;
                   setRemoteAutoRefreshLocal(next);
-                  setRemoteAutoRefresh(next).catch(() => {});
+                  setRemoteAutoRefresh(next).catch((err) => {
+                    setRemoteAutoRefreshLocal(!next);
+                    setError(String(err));
+                  });
                 }}
                 className={[
                   "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
@@ -596,13 +613,24 @@ export default function SettingsPage() {
           Remove orphaned data from all repositories. This cleans up pack files not referenced by
           any snapshot, such as leftovers from interrupted backups or manually forgotten snapshots.
         </p>
-        <Button variant="secondary" onClick={() => { setPruneModalOpen(true); handlePruneAll(); }}>
+        <Button variant="secondary" onClick={() => setPruneModalOpen(true)}>
           Prune All Repositories
         </Button>
       </div>
 
       <Modal open={pruneModalOpen} onClose={closePruneModal} title="Prune All Repositories">
-        {pruneDone ? (
+        {!pruneStarted ? (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-300">
+              This permanently removes unreferenced data from every repository — pack files not
+              tied to any snapshot. It cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPruneModalOpen(false)}>Cancel</Button>
+              <Button variant="danger" onClick={handlePruneAll}>Prune All</Button>
+            </div>
+          </div>
+        ) : pruneDone ? (
           <div className="space-y-4">
             <p className="text-sm text-gray-300">
               All {pruneTotal} {pruneTotal === 1 ? "repository has" : "repositories have"} been pruned successfully.

@@ -6,6 +6,7 @@ import type { FileEntry, Snapshot } from "../lib/types";
 import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
+import Spinner from "../components/Spinner";
 
 type IndexState = "loading" | "not_indexed" | "indexing" | "ready";
 
@@ -198,10 +199,7 @@ export default function SearchPage() {
 
       {indexState === "loading" && (
         <div className="flex items-center gap-3 text-sm text-gray-500 py-12 justify-center">
-          <svg className="animate-spin w-5 h-5 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-          </svg>
+          <Spinner className="w-5 h-5 text-blue-400" />
           Checking index status…
         </div>
       )}
@@ -231,10 +229,7 @@ export default function SearchPage() {
       {indexState === "indexing" && (
         <div className="flex flex-col items-center justify-center py-16 gap-5 text-center max-w-sm mx-auto">
           <div className="p-4 rounded-full bg-gray-800">
-            <svg className="animate-spin w-10 h-10 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
+            <Spinner className="w-10 h-10 text-blue-400" />
           </div>
           <div>
             <p className="text-gray-100 font-medium mb-1">Building file index…</p>
@@ -266,10 +261,7 @@ export default function SearchPage() {
 
           {searching && (
             <div className="flex items-center gap-2 text-sm text-gray-500 py-8 justify-center">
-              <svg className="animate-spin w-4 h-4 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-              </svg>
+              <Spinner className="w-4 h-4 text-blue-400" />
               Searching…
             </div>
           )}

@@ -10,6 +10,7 @@ import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
+import Spinner from "../components/Spinner";
 
 export default function BackupPlansPage() {
   const navigate = useNavigate();
@@ -509,10 +510,7 @@ export default function BackupPlansPage() {
             <div className="min-h-[48px] flex flex-col justify-center">
               {retentionRunning && (
                 <div className="flex items-center gap-2 text-sm text-gray-400">
-                  <svg className="animate-spin w-4 h-4 text-blue-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                  </svg>
+                  <Spinner className="w-4 h-4 text-blue-400 flex-shrink-0" />
                   Applying retention policy…
                 </div>
               )}

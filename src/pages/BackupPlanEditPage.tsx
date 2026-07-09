@@ -14,6 +14,7 @@ import type { BackupPlan, Repository } from "../lib/types";
 import { needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
+import Modal from "../components/Modal";
 
 type ExcludeMode = "simple" | "expert";
 
@@ -69,6 +70,7 @@ export default function BackupPlanEditPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState("");
 
   const [name, setName] = useState("");
@@ -211,7 +213,11 @@ export default function BackupPlanEditPage() {
     setSaving(true);
     setError("");
     try {
-      const toNum = (s: string) => s.trim() === "" ? undefined : parseInt(s, 10);
+      const toNum = (s: string) => {
+        if (s.trim() === "") return undefined;
+        const n = parseInt(s, 10);
+        return Number.isNaN(n) ? undefined : n;
+      };
       const retentionFields = [keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly];
       const retention = retentionFields.some((s) => s.trim() !== "")
         ? {
@@ -258,6 +264,7 @@ export default function BackupPlanEditPage() {
     } catch (err: any) {
       setError(String(err));
       setDeleting(false);
+      setConfirmDelete(false);
     }
   };
 
@@ -595,11 +602,27 @@ export default function BackupPlanEditPage() {
         </div>
 
         {!isNew && (
-          <Button variant="danger" loading={deleting} onClick={handleDelete}>
+          <Button variant="danger" onClick={() => setConfirmDelete(true)}>
             Delete Plan
           </Button>
         )}
       </div>
+
+      <Modal
+        title="Delete Backup Plan"
+        open={confirmDelete}
+        onClose={() => !deleting && setConfirmDelete(false)}
+      >
+        <p className="text-sm text-gray-300 mb-5">
+          Are you sure you want to delete{" "}
+          <span className="font-semibold text-gray-50">{name || "this plan"}</span>?
+          This only removes the plan definition — existing snapshots are not affected.
+        </p>
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancel</Button>
+          <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
+        </div>
+      </Modal>
     </div>
   );
 }

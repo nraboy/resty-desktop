@@ -302,6 +302,8 @@ impl AppDb {
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
             CREATE TABLE IF NOT EXISTS master_key (
                 id                      INTEGER PRIMARY KEY CHECK (id = 1),
                 salt                    BLOB NOT NULL,
@@ -821,7 +823,7 @@ impl AppDb {
             None => Vec::new(),
             Some(snap) => {
                 let mut stmt = conn
-                    .prepare(
+                    .prepare_cached(
                         "SELECT path, entry_type, size, mtime, mode
                          FROM browse_cache_files
                          WHERE snap = ?1 AND parent_path = ?2",
@@ -926,7 +928,7 @@ impl AppDb {
     ) -> Result<std::collections::HashMap<String, String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT snapshot_id, status FROM browse_cache_status WHERE repo_id = ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -972,7 +974,7 @@ impl AppDb {
         // Escape LIKE metacharacters in the user's query so they're treated literally.
         let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT path, entry_type, size, mtime, mode
                  FROM browse_cache_files
                  WHERE snap = ?1
@@ -1013,7 +1015,7 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let pattern = format!("%{}%", query.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_"));
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT bcf.path, bcf.entry_type, bcf.size, bcf.mtime, bcf.mode,
                         isn.snapshot_id, sc.short_id, MAX(sc.time)
                  FROM browse_cache_files bcf
@@ -1056,10 +1058,19 @@ impl AppDb {
         snapshot_id: &str,
         entries: &[FileEntry],
     ) -> Result<(), String> {
-        for chunk in entries.chunks(500) {
+        // Resolve the interned snapshot id once up front — snap is constant across
+        // every chunk, so re-interning inside the loop (as before) was a redundant
+        // INSERT OR IGNORE + SELECT per chunk on the bulk-index hot path.
+        let snap = {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             let snap = Self::intern_snapshot(&tx, snapshot_id)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            snap
+        };
+        for chunk in entries.chunks(500) {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
             {
                 let mut stmt = tx
                     .prepare_cached(
@@ -1179,7 +1190,7 @@ impl AppDb {
     pub fn get_snapshots_vec(&self, repo_id: &str) -> Result<Vec<Snapshot>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT snapshot_id, short_id, time, hostname, username, paths, tags
                  FROM snapshots_cache WHERE repo_id = ?1
                  ORDER BY time ASC",
@@ -1248,28 +1259,34 @@ impl AppDb {
     pub fn append_snapshots(&self, repo_id: &str, json: &str) -> Result<(), String> {
         let rows = parse_snapshot_rows(json)?;
         let now = timestamp();
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare_cached(
-                "INSERT OR REPLACE INTO snapshots_cache
-                 (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .map_err(|e| e.to_string())?;
-        for s in &rows {
-            stmt.execute(params![
-                repo_id,
-                s.id,
-                s.short_id,
-                s.time,
-                s.hostname,
-                s.username,
-                s.paths,
-                s.tags,
-                now
-            ])
-            .map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Wrapped in a transaction so N appended rows (e.g. a batch backup run) commit
+        // as a single fsync instead of one implicit autocommit transaction per row.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO snapshots_cache
+                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(|e| e.to_string())?;
+            for s in &rows {
+                stmt.execute(params![
+                    repo_id,
+                    s.id,
+                    s.short_id,
+                    s.time,
+                    s.hostname,
+                    s.username,
+                    s.paths,
+                    s.tags,
+                    now
+                ])
+                .map_err(|e| e.to_string())?;
+            }
         }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1345,7 +1362,7 @@ impl AppDb {
     pub fn list_backup_history(&self) -> Result<Vec<BackupHistoryEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT h.id, h.repo_id, r.name, h.plan_id, p.name,
                         h.snapshot_id, h.started_at, h.duration_seconds,
                         h.files_new, h.files_changed, h.bytes_added, h.error
@@ -2148,6 +2165,43 @@ mod tests {
         assert_eq!(parent_path_of("/foo"), "");
         assert_eq!(parent_path_of("/"), "");
         assert_eq!(parent_path_of(""), "");
+    }
+
+    #[test]
+    fn test_name_of() {
+        assert_eq!(name_of("/foo/bar/baz.txt"), "baz.txt");
+        assert_eq!(name_of("/foo"), "foo");
+        assert_eq!(name_of("foo"), "foo");
+        assert_eq!(name_of("/foo/bar/"), "bar");
+        assert_eq!(name_of("foo/bar/"), "bar");
+        assert_eq!(name_of("/"), "");
+        assert_eq!(name_of(""), "");
+    }
+
+    #[test]
+    fn test_parse_snapshot_rows() {
+        let json = r#"[
+            {"id": "abc123", "short_id": "abc123", "time": "2024-01-15T12:00:00Z",
+             "hostname": "host1", "username": "user1", "paths": ["/foo", "/bar"], "tags": ["a", "b"]},
+            {"id": "def456", "short_id": "def456", "time": "2024-01-16T12:00:00Z",
+             "hostname": "host2", "username": null, "paths": ["/baz"], "tags": null}
+        ]"#;
+        let rows = parse_snapshot_rows(json).unwrap();
+        assert_eq!(rows.len(), 2);
+
+        assert_eq!(rows[0].id, "abc123");
+        assert_eq!(rows[0].paths, serde_json::to_string(&vec!["/foo", "/bar"]).unwrap());
+        assert_eq!(rows[0].tags, Some(serde_json::to_string(&vec!["a", "b"]).unwrap()));
+
+        assert_eq!(rows[1].id, "def456");
+        assert_eq!(rows[1].username, None);
+        assert_eq!(rows[1].tags, None);
+    }
+
+    #[test]
+    fn test_parse_snapshot_rows_invalid_json() {
+        assert!(parse_snapshot_rows("not json").is_err());
+        assert!(parse_snapshot_rows("{}").is_err());
     }
 
     // ── rotate_master_key ───────────────────────────────────────────────────
