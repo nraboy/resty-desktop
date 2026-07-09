@@ -516,6 +516,10 @@ pub async fn execute_backup(
                             bytes_done: Some(progress.bytes_done),
                             bytes_total: Some(progress.total_bytes),
                             label: None,
+                            seconds_elapsed: Some(progress.seconds_elapsed),
+                            seconds_remaining: progress.seconds_remaining,
+                            current_files: Some(progress.current_files.clone()),
+                            repo_id: None,
                         });
                     }
                     Some("summary") => summary_line = Some(line),

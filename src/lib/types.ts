@@ -123,6 +123,12 @@ export interface TaskProgress {
   bytesDone?: number;
   bytesTotal?: number;
   label?: string;
+  // Per-kind detail, kept lossless vs the legacy *:progress events even though
+  // no consumer reads these yet — see tasks.rs's TaskProgress doc comment.
+  secondsElapsed?: number;
+  secondsRemaining?: number;
+  currentFiles?: string[];
+  repoId?: string;
 }
 
 export interface TaskEvent {

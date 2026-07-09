@@ -370,6 +370,10 @@ pub async fn restore_snapshot(
                         bytes_done: Some(progress.bytes_restored),
                         bytes_total: Some(progress.total_bytes),
                         label: None,
+                        seconds_elapsed: Some(progress.seconds_elapsed),
+                        seconds_remaining: None,
+                        current_files: None,
+                        repo_id: None,
                     });
                 }
             }

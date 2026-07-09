@@ -77,6 +77,25 @@ pub struct TaskProgress {
     pub bytes_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    // The four fields below carry per-kind progress detail that the normalized
+    // fields above can't hold — kept optional so the bus stays lossless vs the
+    // legacy `*:progress` events (backup:progress, restore:progress,
+    // prune:progress) even though no consumer reads them yet. See CLAUDE.md's
+    // Operation Event Bus section.
+    /// Backup and restore: elapsed time since the operation started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_elapsed: Option<u64>,
+    /// Backup only: restic's ETA for completion, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_remaining: Option<u64>,
+    /// Backup only: file paths currently being scanned/uploaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_files: Option<Vec<String>>,
+    /// Prune-all only: the repo this tick's progress applies to, distinct from
+    /// the envelope's top-level `repo_id` (intentionally "" for a multi-repo
+    /// prune-all, since there's no single repo for the whole operation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -544,7 +563,37 @@ mod tests {
         assert_eq!(json["progress"]["itemsDone"], 1);
         // Optional fields left None must be omitted, not emitted as null.
         assert!(json["progress"].get("itemsTotal").is_none());
+        assert!(json["progress"].get("secondsElapsed").is_none());
         assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn build_event_serializes_per_kind_progress_detail() {
+        // Pins the four fields added so the bus stays lossless vs the legacy
+        // backup:progress/restore:progress/prune:progress payloads (see
+        // tasks.rs's TaskProgress doc comment) and keeps types.ts in sync.
+        let ev = build_event(
+            "abc123",
+            TaskKind::Backup,
+            TaskPhase::Progress,
+            "repo-1",
+            None,
+            TaskOrigin::Manual,
+            Some(TaskProgress {
+                seconds_elapsed: Some(12),
+                seconds_remaining: Some(34),
+                current_files: Some(vec!["a.txt".to_string(), "b.txt".to_string()]),
+                repo_id: Some("repo-7".to_string()),
+                ..Default::default()
+            }),
+            None,
+        );
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["progress"]["secondsElapsed"], 12);
+        assert_eq!(json["progress"]["secondsRemaining"], 34);
+        assert_eq!(json["progress"]["currentFiles"][0], "a.txt");
+        assert_eq!(json["progress"]["currentFiles"][1], "b.txt");
+        assert_eq!(json["progress"]["repoId"], "repo-7");
     }
 
     #[test]

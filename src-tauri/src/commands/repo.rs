@@ -588,6 +588,7 @@ pub async fn prune_all_repos(
                 items_done: Some(i as u64),
                 items_total: Some(total as u64),
                 label: Some(repo.name.clone()),
+                repo_id: Some(repo.id.clone()),
                 ..Default::default()
             });
 

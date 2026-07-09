@@ -396,6 +396,10 @@ retrofitting every operation at that point.
 (`started`|`progress`|`cancelling`|`cancelled`|`finished`|`failed`), `repoId`, `targetId`
 (plan/snapshot/schedule id, when one applies), `origin` (`manual`|`scheduler`|`background`),
 `progress` (normalized `percentDone`/`itemsDone`/`itemsTotal`/`bytesDone`/`bytesTotal`/`label`,
+plus `secondsElapsed`/`secondsRemaining`/`currentFiles`/`repoId` — per-kind detail kept lossless
+vs the legacy `backup:progress`/`restore:progress`/`prune:progress` payloads even though no
+consumer reads it yet (`currentFiles`/`secondsRemaining` are backup-only, `repoId` is prune-all's
+per-tick repo, distinct from the envelope's own `repoId` which is `""` for a multi-repo prune) —
 only on `phase: progress`), `error` (only on `phase: failed`), `at` (unix millis).
 
 **Why `operationId` is the core of the design, not an afterthought:** today's per-operation events
