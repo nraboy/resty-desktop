@@ -74,6 +74,8 @@ export interface BackupHistoryEntry {
 export const CANCELLED_BACKUP_ERROR = "Cancelled";
 
 export interface BackupProgress {
+  repoId: string;
+  planId?: string;
   percentDone: number;
   filesDone: number;
   totalFiles: number;
@@ -85,6 +87,8 @@ export interface BackupProgress {
 }
 
 export interface RestoreProgress {
+  repoId: string;
+  snapshotId: string;
   percentDone: number;
   filesRestored: number;
   totalFiles: number;

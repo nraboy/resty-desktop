@@ -358,6 +358,7 @@ pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
 struct PruneProgress {
     current: usize,
     total: usize,
+    repo_id: String,
     repo_name: String,
 }
 
@@ -524,6 +525,7 @@ pub async fn prune_all_repos(
         let _ = app.emit("prune:progress", PruneProgress {
             current: i,
             total,
+            repo_id: repo.id.clone(),
             repo_name: repo.name.clone(),
         });
 
@@ -568,6 +570,7 @@ pub async fn prune_all_repos(
     let _ = app.emit("prune:progress", PruneProgress {
         current: total,
         total,
+        repo_id: String::new(),
         repo_name: String::new(),
     });
 

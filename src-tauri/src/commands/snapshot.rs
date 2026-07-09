@@ -14,6 +14,8 @@ pub(crate) const CANCELLED_BACKUP_ERROR: &str = "Cancelled";
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupProgress {
+    pub repo_id: String,
+    pub plan_id: Option<String>,
     pub percent_done: f64,
     pub files_done: u64,
     pub total_files: u64,
@@ -360,6 +362,8 @@ pub async fn execute_backup(
     let restic_path_inner = restic_path.clone();
     let restic_path_for_unlock = restic_path.clone();
     let compression_inner = compression.clone();
+    let repo_id_inner = repo_id.to_string();
+    let plan_id_inner = plan_id.map(|s| s.to_string());
 
     // `backup` takes restic's shared lock — register as a reader so an exclusive
     // op (forget/prune/tag) on this repo knows to wait for us. Held across the
@@ -415,6 +419,8 @@ pub async fn execute_backup(
                 match v["message_type"].as_str() {
                     Some("status") => {
                         let progress = BackupProgress {
+                            repo_id: repo_id_inner.clone(),
+                            plan_id: plan_id_inner.clone(),
                             percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
                             files_done: v["files_done"].as_u64().unwrap_or(0),
                             total_files: v["total_files"].as_u64().unwrap_or(0),

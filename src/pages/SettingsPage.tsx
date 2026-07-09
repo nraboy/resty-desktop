@@ -190,7 +190,7 @@ export default function SettingsPage() {
     setPruneTotal(0);
     setPruneRepoName("");
 
-    const unlisten = await listen<{ current: number; total: number; repoName: string }>(
+    const unlisten = await listen<{ current: number; total: number; repoId: string; repoName: string }>(
       "prune:progress",
       ({ payload }) => {
         setPruneCurrent(payload.current);

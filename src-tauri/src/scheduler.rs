@@ -95,7 +95,13 @@ async fn tick(app: &tauri::AppHandle) {
             // already has its own progress modal and should stay out of the panel).
             let _ = app.emit(
                 "scheduler:backup-started",
-                serde_json::json!({ "scheduleName": sched.name, "planName": plan.name }),
+                serde_json::json!({
+                    "scheduleId": sched.id,
+                    "scheduleName": sched.name,
+                    "planId": plan.id,
+                    "planName": plan.name,
+                    "repoId": plan.repo_id,
+                }),
             );
 
             let ok = execute_backup(
@@ -130,7 +136,10 @@ async fn tick(app: &tauri::AppHandle) {
                         // modal) instead of going blank. Emitted only when retention actually
                         // runs (plan succeeded + at least one keep flag set), so a plan with
                         // no retention dismisses immediately via backup-finished below.
-                        let _ = app.emit("scheduler:retention-started", ());
+                        let _ = app.emit(
+                            "scheduler:retention-started",
+                            serde_json::json!({ "planId": plan.id, "repoId": plan.repo_id }),
+                        );
                         if let Err(e) = apply_retention(&db, &master_key, &repo_locks, &plan.repo_id, &plan.tags, &plan.paths, r) {
                             log_retention_failure(app, &db, &plan.repo_id, Some(&plan.id), &e);
                         }
@@ -143,7 +152,10 @@ async fn tick(app: &tauri::AppHandle) {
             // (after retention) rather than right after execute_backup so the panel doesn't
             // blank out mid-plan — previously this fired before retention, hiding the
             // ~10-20s forget as a dead gap between two plans' backups.
-            let _ = app.emit("scheduler:backup-finished", serde_json::json!({ "success": ok }));
+            let _ = app.emit(
+                "scheduler:backup-finished",
+                serde_json::json!({ "success": ok, "planId": plan.id, "scheduleId": sched.id }),
+            );
         }
     }
 }

@@ -198,6 +198,8 @@ pub async fn restore_path(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreProgress {
+    pub repo_id: String,
+    pub snapshot_id: String,
     pub percent_done: f64,
     pub files_restored: u64,
     pub total_files: u64,
@@ -248,6 +250,7 @@ pub async fn restore_snapshot(
 
     let repo_path = repo.path.clone();
     let repo_password = repo.password.clone();
+    let repo_id_inner = repo_id.clone();
 
     // Nest under a short_id subfolder so restoring multiple snapshots to the same
     // target_dir doesn't merge their contents together. validate_snapshot_id above
@@ -301,6 +304,8 @@ pub async fn restore_snapshot(
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 if v["message_type"].as_str() == Some("status") {
                     let progress = RestoreProgress {
+                        repo_id: repo_id_inner.clone(),
+                        snapshot_id: snapshot_id.clone(),
                         percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
                         files_restored: v["files_restored"].as_u64().unwrap_or(0),
                         total_files: v["total_files"].as_u64().unwrap_or(0),
