@@ -370,6 +370,94 @@ pairing — it can't introduce a new failure, only leave one collision un-preven
 repo would then make snapshot listings and stats hang, a worse regression than the rare
 collision this registry exists to prevent.
 
+## Operation Event Bus
+
+`src-tauri/src/tasks.rs` defines a second, **uniform** event layer on top of the ad-hoc
+per-operation events described above (`backup:progress`, `restore:progress`, `prune:progress`,
+`index:done`, `scheduler:*`). Those events grew one at a time, so their payloads are
+inconsistent — some carry no id at all, some only a display name, and roughly half the restic
+operations (`copy`, `mirror`, single-repo `prune`, `forget`/retention, `check`, `diff`,
+`restore_path`, `unlock`) emit nothing. The `task` event bus exists so every operation reports a
+consistent, correlatable lifecycle — **in addition to**, never instead of, its existing detailed
+feed — so a future background-task consumer has a uniform contract to build on instead of
+retrofitting every operation at that point.
+
+**Two layers, deliberately kept separate:**
+- **`task` (this bus)** — one Tauri event, uniform envelope, every covered operation. This is the
+  coordination layer a future subscriber uses.
+- **Existing detailed feeds** (`backup:progress`, etc.) — unchanged, still power every shipped
+  modal and the Activity panel. Rich, per-kind detail (current file names, ETA) lives here, not in
+  the normalized `task` envelope.
+
+**Envelope** (`TaskEvent`, camelCase over the wire):
+`operationId` (unique per operation instance — see below), `kind` (`backup`|`restore`|
+`restorePath`|`copy`|`mirror`|`prune`|`forget`|`tag`|`check`|`diff`|`index`|`unlock`|`stats`|
+`testConnection`|`browse`|`init`), `phase`
+(`started`|`progress`|`cancelling`|`cancelled`|`finished`|`failed`), `repoId`, `targetId`
+(plan/snapshot/schedule id, when one applies), `origin` (`manual`|`scheduler`|`background`),
+`progress` (normalized `percentDone`/`itemsDone`/`itemsTotal`/`bytesDone`/`bytesTotal`/`label`,
+only on `phase: progress`), `error` (only on `phase: failed`), `at` (unix millis).
+
+**Why `operationId` is the core of the design, not an afterthought:** today's per-operation events
+get away with carrying no id (or just a display name) only because of this app's single-in-flight
+`busy` flags — one backup, one restore, one prune at a time. A future background-task system that
+runs operations concurrently breaks that invariant, at which point `repoId` alone can no longer
+tell two simultaneous operations apart. `operationId` (a 16-char alphanumeric id, same scheme as
+`backup_history.id`) is generated once per operation and threaded through every event for its
+lifetime specifically so that retrofit never has to happen.
+
+**`OperationCtx<S: TaskSink>`** owns one operation's lifecycle: `OperationCtx::new(...)` emits
+`started`; `.progress_emitter()` returns a cheap `Clone`-able `TaskProgressEmitter` for emitting
+`progress` from inside a `spawn_blocking` closure (the ctx itself stays in the outer async scope
+so it can read the final `Result`); exactly one of `.finished()` / `.failed(err)` / `.cancelled()`
+must be called on every exit path. If none is called (an unhandled early return or panic unwind),
+`Drop` emits a trailing `failed("operation dropped")` — a **backstop only**, not the intended
+path; every wired call site is expected to call a terminal method explicitly (see the
+`'body: { ... break 'body Err(...) }` labeled-block pattern in `prune_all_repos`/`prune_repo`,
+used specifically so every one of their several early-return points still reports through
+`OperationCtx` instead of falling through to the Drop backstop). `TaskSink` is a trait (implemented
+for `AppHandle`) purely so `tasks.rs`'s tests can record emitted events without a real app.
+
+Cancellable operations (backup, restore, copy, mirror, prune, and the `index_snapshots_batch`
+"Index All" batch) carry a `current_task: TaskSlot` (`Arc<Mutex<Option<TaskRef>>>`) on their
+existing handle (`BackupHandle`, `RestoreHandle`, ..., `IndexHandle`) — `OperationCtx::new`
+publishes its `TaskRef` (including the operation's `origin`, so `emit_cancelling` reports the
+operation's real origin rather than assuming every cancel is user-initiated) there on start and
+clears it on terminal; the matching `cancel_*` command calls
+`emit_cancelling(&app, &handle.current_task)` right before its existing kill/stop logic, so
+`cancelling` always precedes the `cancelled`/`finished` the operation itself emits once it actually
+stops. For the index batch specifically, `cancelling` only means "no further snapshots will start" —
+the snapshot already in flight still finishes normally (`finished`/`failed`), since cancellation is
+checked only between snapshots, never mid-`restic`. Operations with no cancel path (check, diff,
+tag, unlock, forget, single-snapshot `index_snapshot`) pass `None` for the slot.
+
+**Coverage:** every restic-shelling operation is wired, including the click-bounded metadata reads
+(`get_repo_stats`/`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the
+outer commands, so a cache hit that never shells out correctly emits nothing — `get_snapshot_stats`,
+`test_repo_connection`, `list_files`). Two categories are excluded, deliberately:
+- **Not real restic operations at all** — `list_snapshots` (`AppDb::get_snapshots_vec`, pure cached
+  DB read) and `get_snapshot_index_status` (sync DB read). Nothing runs that a task could represent.
+- **Continuous background work, not user-bounded** — `cache_warmer`'s `refresh_all_snapshots` tick
+  (runs automatically every 60s, forever, per eligible repo, for as long as the app is open). Unlike
+  every other wired operation this isn't bounded by a user action, so it was kept off the bus to
+  avoid unbounded event volume over a long-running session; revisit deliberately if a future
+  consumer needs ambient background activity visible too.
+
+Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
+two categories.
+
+**Frontend scope — emit now, subscribe later, by design.** `src/lib/types.ts` mirrors the envelope
+(`TaskEvent`, `TaskKind`, `TaskPhase`, `TaskOrigin`, `TaskProgress`) so a future consumer has a
+ready-made contract, but **no stateful frontend code subscribes to `task`** — not
+`ActivityProvider`, not any page. This is deliberate, not an oversight: a live consumer wired
+before there's an actual feature needing it risks the same fate as an earlier, scrapped attempt at
+this pattern (over-eager re-renders, a shape that rots before it's ever exercised). The only
+frontend listener is `App.tsx`'s dev-only `console.debug("[task]", ...)` effect — stateless (never
+calls `setState`), gated on `import.meta.env.DEV`, safe to delete. The floor against "emitting into
+the void" without a live consumer is `tasks.rs`'s own test suite (a recording `TaskSink` asserting
+lifecycle ordering and the exact camelCase JSON shape) plus the shared TypeScript types keeping the
+two sides in sync.
+
 ## Security Architecture
 
 - Master password → Argon2id → 32-byte key; AES-GCM encrypts verification plaintext; salt+nonce+ciphertext stored in `master_key` table. Password never stored.
@@ -406,6 +494,14 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `tauri::async_runtime::spawn`ed tasks (not foreground commands), immediately after
   `execute_backup` (which already does its heavy work via `spawn_blocking`). Only the foreground
   `forget_by_plan` command wraps `apply_retention` in `spawn_blocking`.
+- **`list_snapshots` and `get_snapshot_index_status` don't emit on the `task` event bus (see
+  Operation Event Bus)** because neither shells out to restic — nothing runs that a task could
+  represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**, despite calling restic,
+  because it fires automatically every 60s forever rather than being bounded by a user action —
+  wiring it would mean unbounded event volume over a long session. Every other restic-shelling
+  command, including click-bounded metadata reads like `get_repo_stats`/`get_snapshot_stats`/
+  `test_repo_connection`/`list_files`, is wired. Don't add the excluded three without revisiting
+  that tradeoff.
 - **`get_repo_stats` fetches stats for *all* repos including remote ones, and RepositoriesPage
   requests them for every repo on mount — on purpose.** It returns the cached value immediately
   when present and only shells out to `restic stats` on a cache miss; the `—` placeholder in the

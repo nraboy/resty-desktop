@@ -9,6 +9,7 @@ use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
 use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure};
+use crate::tasks::TaskOrigin;
 
 // Seconds to sleep until the next wall-clock minute boundary (:00).
 // Returns 60 when already exactly on a boundary so we never busy-spin.
@@ -117,6 +118,7 @@ async fn tick(app: &tauri::AppHandle) {
                 plan.excludes,
                 plan.limit_upload,
                 plan.limit_download,
+                TaskOrigin::Scheduler,
             )
             .await
             .is_ok();
@@ -140,7 +142,10 @@ async fn tick(app: &tauri::AppHandle) {
                             "scheduler:retention-started",
                             serde_json::json!({ "planId": plan.id, "repoId": plan.repo_id }),
                         );
-                        if let Err(e) = apply_retention(&db, &master_key, &repo_locks, &plan.repo_id, &plan.tags, &plan.paths, r) {
+                        if let Err(e) = apply_retention(
+                            app, &db, &master_key, &repo_locks, &plan.repo_id, Some(&plan.id),
+                            &plan.tags, &plan.paths, r, TaskOrigin::Scheduler,
+                        ) {
                             log_retention_failure(app, &db, &plan.repo_id, Some(&plan.id), &e);
                         }
                     }

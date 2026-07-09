@@ -6,6 +6,7 @@ use tauri::{Emitter, State};
 use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
 use super::repo_locks::RepoLocks;
 use super::snapshot::{apply_retention, execute_backup, log_retention_failure};
+use crate::tasks::TaskOrigin;
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
 
@@ -111,6 +112,9 @@ pub async fn run_schedule_now(
             &plan.repo_id, Some(plan.id.as_str()),
             plan.paths.clone(), plan.tags.clone(), plan.excludes,
             plan.limit_upload, plan.limit_download,
+            // "Run Now" is user-initiated, same distinction the scheduler:* events
+            // already draw (see scheduler.rs) — not a background scheduler tick.
+            TaskOrigin::Manual,
         )
         .await;
 
@@ -122,7 +126,10 @@ pub async fn run_schedule_now(
                     || r.keep_monthly.is_some()
                     || r.keep_yearly.is_some()
                 {
-                    if let Err(e) = apply_retention(&db, &master_key, &repo_locks, &plan.repo_id, &plan.tags, &plan.paths, r) {
+                    if let Err(e) = apply_retention(
+                        &app, &db, &master_key, &repo_locks, &plan.repo_id, Some(&plan.id),
+                        &plan.tags, &plan.paths, r, TaskOrigin::Manual,
+                    ) {
                         log_retention_failure(&app, &db, &plan.repo_id, Some(&plan.id), &e);
                     }
                 }

@@ -5,6 +5,7 @@ use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
+use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResticStats {
@@ -172,42 +173,56 @@ pub async fn init_repo(
 /// Test an unsaved repo connection (used by the "Test Connection" button in the add modal).
 #[tauri::command]
 pub async fn test_repo_connection(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     path: String,
     password: String,
 ) -> Result<(), String> {
     let restic_path = super::get_restic_path(&db);
+    // No saved repoId yet (the repo isn't added until the test passes) — matches
+    // prune_all_repos' empty-repoId convention for the same "no single id" case.
+    let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
     let dummy = FullRepository { path, password };
-    run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
+    let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
         .await
-        .map(|_| ())
+        .map(|_| ());
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn get_repo_stats(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
     if let Ok(Some((total_size, total_file_count, snapshots_count))) = db.get_stats(&repo_id) {
+        // Cache hit — no restic call happens, so there's no operation to report;
+        // matches the "not a real restic operation" reasoning for list_snapshots.
         return Ok(ResticStats { total_size, total_file_count, snapshots_count });
     }
-    fetch_and_cache_stats(&db, &master_key, &repo_locks, &repo_id).await
+    fetch_and_cache_stats(&app, &db, &master_key, &repo_locks, &repo_id).await
 }
 
 #[tauri::command]
 pub async fn refresh_repo_stats(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
     let _ = db.evict_stats(&repo_id);
-    fetch_and_cache_stats(&db, &master_key, &repo_locks, &repo_id).await
+    fetch_and_cache_stats(&app, &db, &master_key, &repo_locks, &repo_id).await
 }
 
 async fn fetch_and_cache_stats(
+    app: &tauri::AppHandle,
     db: &AppDb,
     master_key: &MasterKey,
     repo_locks: &RepoLocks,
@@ -216,8 +231,14 @@ async fn fetch_and_cache_stats(
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
+    let task_ctx = OperationCtx::new(app.clone(), TaskKind::Stats, repo_id, None, TaskOrigin::Manual, None);
     let _rg = repo_locks.read(&repo.path);
-    let stdout = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await?;
+    let result = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await;
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    let stdout = result?;
     let stats = parse_stats_json(&stdout)?;
     let _ = db.set_stats(repo_id, stats.total_size, stats.total_file_count, stats.snapshots_count);
     Ok(stats)
@@ -232,6 +253,7 @@ pub struct CheckResult {
 
 #[tauri::command]
 pub async fn check_repo(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -240,12 +262,13 @@ pub async fn check_repo(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(app, TaskKind::Check, repo_id, None, TaskOrigin::Manual, None);
 
     // `check` is a shared-lock read — register as a reader, held across the
     // spawn_blocking below for the whole child-process lifetime.
     let _rg = repo_locks.read(&repo.path);
 
-    let (output, duration_seconds) = tauri::async_runtime::spawn_blocking(move || {
+    let spawn_result = tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
         let output = std::process::Command::new(&restic_path)
             .args(["check", "--json"])
@@ -259,7 +282,17 @@ pub async fn check_repo(
         Ok::<_, String>((output, started.elapsed().as_secs_f64()))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+
+    // A `finished` task means the check *ran*; the pass/fail verdict is part of
+    // CheckResult's data, not the task's own outcome. Only a spawn/process failure
+    // (couldn't even run restic) is a task-level `failed`.
+    match &spawn_result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    let (output, duration_seconds) = spawn_result?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -512,73 +545,120 @@ pub async fn prune_all_repos(
 
     prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    let key = master_key.get()?;
-    let repos = db.list_repos()?;
-    let total = repos.len();
-    let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Prune,
+        // No single repoId for a multi-repo prune — left empty, matching the
+        // "done" prune:progress event's existing empty-repoId convention.
+        String::new(),
+        None,
+        TaskOrigin::Manual,
+        Some(prune_handle.current_task.clone()),
+    );
+    let task_progress = task_ctx.progress_emitter();
 
-    for (i, repo) in repos.iter().enumerate() {
-        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("Cancelled".to_string());
-        }
+    // Everything fallible below is captured into `result` (via `break 'body` /
+    // explicit match instead of `?`/`return`) rather than exiting the fn directly,
+    // so the task_ctx terminal call below always runs exactly once, matching the
+    // right phase (Finished/Cancelled/Failed) for every exit path.
+    let result: Result<(), String> = 'body: {
+        let key = match master_key.get() {
+            Ok(k) => k,
+            Err(e) => break 'body Err(e),
+        };
+        let repos = match db.list_repos() {
+            Ok(r) => r,
+            Err(e) => break 'body Err(e),
+        };
+        let total = repos.len();
+        let restic_path = super::get_restic_path(&db);
 
-        let _ = app.emit("prune:progress", PruneProgress {
-            current: i,
-            total,
-            repo_id: repo.id.clone(),
-            repo_name: repo.name.clone(),
-        });
+        for (i, repo) in repos.iter().enumerate() {
+            if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                break 'body Err("Cancelled".to_string());
+            }
 
-        let full = db.get_full_repo(&repo.id, &key)?;
+            let _ = app.emit("prune:progress", PruneProgress {
+                current: i,
+                total,
+                repo_id: repo.id.clone(),
+                repo_name: repo.name.clone(),
+            });
+            task_progress.emit(TaskProgress {
+                items_done: Some(i as u64),
+                items_total: Some(total as u64),
+                label: Some(repo.name.clone()),
+                ..Default::default()
+            });
 
-        // `prune` takes restic's exclusive lock — wait for this repo to go idle first
-        // (see CLAUDE.md's Concurrency section / repo_locks.rs). Scoped to this loop
-        // iteration: dropped (releasing the exclusive claim) before the next repo.
-        let _wg = repo_locks.write(&full.path).await;
+            let full = match db.get_full_repo(&repo.id, &key) {
+                Ok(r) => r,
+                Err(e) => break 'body Err(e),
+            };
 
-        // The wait above can take a while if the repo was genuinely busy — re-check
-        // cancellation before spawning, otherwise a Stop click during the wait can't be
-        // caught by cancel_prune (child was still None) and this repo's restic process
-        // would be orphaned, unkillable, running to completion in the background.
-        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("Cancelled".to_string());
-        }
+            // `prune` takes restic's exclusive lock — wait for this repo to go idle first
+            // (see CLAUDE.md's Concurrency section / repo_locks.rs). Scoped to this loop
+            // iteration: dropped (releasing the exclusive claim) before the next repo.
+            let _wg = repo_locks.write(&full.path).await;
 
-        // Retry on a genuine EXTERNAL lock collision (a different machine/tool's restic
-        // process — RepoLocks above only coordinates this app's own operations).
-        let mut outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
-        for _ in 0..2 {
-            match &outcome {
-                PruneAttempt::Failed(msg) if msg.contains("already locked") => {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return Err("Cancelled".to_string());
+            // The wait above can take a while if the repo was genuinely busy — re-check
+            // cancellation before spawning, otherwise a Stop click during the wait can't be
+            // caught by cancel_prune (child was still None) and this repo's restic process
+            // would be orphaned, unkillable, running to completion in the background.
+            if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                break 'body Err("Cancelled".to_string());
+            }
+
+            // Retry on a genuine EXTERNAL lock collision (a different machine/tool's restic
+            // process — RepoLocks above only coordinates this app's own operations).
+            let mut outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+                Ok(o) => o,
+                Err(e) => break 'body Err(e),
+            };
+            for _ in 0..2 {
+                match &outcome {
+                    PruneAttempt::Failed(msg) if msg.contains("already locked") => {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                            break 'body Err("Cancelled".to_string());
+                        }
+                        outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+                            Ok(o) => o,
+                            Err(e) => break 'body Err(e),
+                        };
                     }
-                    outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
+                    _ => break,
                 }
-                _ => break,
+            }
+
+            match outcome {
+                PruneAttempt::Success => {}
+                PruneAttempt::Cancelled => break 'body Err("Cancelled".to_string()),
+                PruneAttempt::Failed(msg) => break 'body Err(format!("Prune failed for '{}': {}", repo.name, msg)),
             }
         }
 
-        match outcome {
-            PruneAttempt::Success => {}
-            PruneAttempt::Cancelled => return Err("Cancelled".to_string()),
-            PruneAttempt::Failed(msg) => return Err(format!("Prune failed for '{}': {}", repo.name, msg)),
-        }
+        let _ = app.emit("prune:progress", PruneProgress {
+            current: total,
+            total,
+            repo_id: String::new(),
+            repo_name: String::new(),
+        });
+
+        Ok(())
+    };
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
     }
-
-    let _ = app.emit("prune:progress", PruneProgress {
-        current: total,
-        total,
-        repo_id: String::new(),
-        repo_name: String::new(),
-    });
-
-    Ok(())
+    result
 }
 
 #[tauri::command]
 pub async fn prune_repo(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     prune_handle: State<'_, PruneHandle>,
@@ -604,49 +684,79 @@ pub async fn prune_repo(
 
     prune_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    let key = master_key.get()?;
-    let full = db.get_full_repo(&repo_id, &key)?;
-    let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Prune,
+        repo_id.clone(),
+        None,
+        TaskOrigin::Manual,
+        Some(prune_handle.current_task.clone()),
+    );
 
-    // `prune` takes restic's exclusive lock — wait for the repo to go idle first (see
-    // CLAUDE.md's Concurrency section / repo_locks.rs).
-    let _wg = repo_locks.write(&full.path).await;
+    let result: Result<(), String> = 'body: {
+        let key = match master_key.get() {
+            Ok(k) => k,
+            Err(e) => break 'body Err(e),
+        };
+        let full = match db.get_full_repo(&repo_id, &key) {
+            Ok(r) => r,
+            Err(e) => break 'body Err(e),
+        };
+        let restic_path = super::get_restic_path(&db);
 
-    // The wait above can take a while if the repo was genuinely busy. If Stop was clicked
-    // during that wait, prune_handle.child was still None at that moment, so cancel_prune's
-    // kill() was a no-op — bail out now, before spawning, so we never orphan an unkillable
-    // restic process. `_wg` and `_busy` both drop automatically on this early return,
-    // releasing the exclusive claim and the busy flag exactly like every other early-return
-    // path in this function already does.
-    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err("Cancelled".to_string());
-    }
+        // `prune` takes restic's exclusive lock — wait for the repo to go idle first (see
+        // CLAUDE.md's Concurrency section / repo_locks.rs).
+        let _wg = repo_locks.write(&full.path).await;
 
-    // Run the prune, retrying up to 2 additional times if it collides with a *different*
-    // process's or machine's genuine restic lock — RepoLocks above only coordinates this app's
-    // own operations, not an external restic/Backrest/other-computer process (see CLAUDE.md's
-    // Concurrency section). Matches apply_retention's retry pattern.
-    let mut outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
-    for _ in 0..2 {
-        match &outcome {
-            PruneAttempt::Failed(msg) if msg.contains("already locked") => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                // A cancel during the inter-retry sleep must stop us from spawning another
-                // attempt — same reasoning as the cancellation check above.
-                if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err("Cancelled".to_string());
-                }
-                outcome = run_one_prune_attempt(&restic_path, &full, &prune_handle).await?;
-            }
-            _ => break,
+        // The wait above can take a while if the repo was genuinely busy. If Stop was clicked
+        // during that wait, prune_handle.child was still None at that moment, so cancel_prune's
+        // kill() was a no-op — bail out now, before spawning, so we never orphan an unkillable
+        // restic process. `_wg` and `_busy` both drop automatically on this early return,
+        // releasing the exclusive claim and the busy flag exactly like every other early-return
+        // path in this function already does.
+        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            break 'body Err("Cancelled".to_string());
         }
-    }
 
-    match outcome {
-        PruneAttempt::Success => Ok(()),
-        PruneAttempt::Cancelled => Err("Cancelled".to_string()),
-        PruneAttempt::Failed(msg) => Err(msg),
+        // Run the prune, retrying up to 2 additional times if it collides with a *different*
+        // process's or machine's genuine restic lock — RepoLocks above only coordinates this app's
+        // own operations, not an external restic/Backrest/other-computer process (see CLAUDE.md's
+        // Concurrency section). Matches apply_retention's retry pattern.
+        let mut outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+            Ok(o) => o,
+            Err(e) => break 'body Err(e),
+        };
+        for _ in 0..2 {
+            match &outcome {
+                PruneAttempt::Failed(msg) if msg.contains("already locked") => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    // A cancel during the inter-retry sleep must stop us from spawning another
+                    // attempt — same reasoning as the cancellation check above.
+                    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        break 'body Err("Cancelled".to_string());
+                    }
+                    outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+                        Ok(o) => o,
+                        Err(e) => break 'body Err(e),
+                    };
+                }
+                _ => break,
+            }
+        }
+
+        match outcome {
+            PruneAttempt::Success => Ok(()),
+            PruneAttempt::Cancelled => Err("Cancelled".to_string()),
+            PruneAttempt::Failed(msg) => Err(msg),
+        }
+    };
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
     }
+    result
 }
 
 #[tauri::command]
@@ -688,7 +798,8 @@ pub fn set_auto_indexing(db: State<'_, AppDb>, value: bool) -> Result<(), String
 }
 
 #[tauri::command]
-pub async fn cancel_prune(prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
+pub async fn cancel_prune(app: tauri::AppHandle, prune_handle: State<'_, PruneHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &prune_handle.current_task);
     prune_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = prune_handle.child.lock() {
         if let Some(ref mut child) = *guard {

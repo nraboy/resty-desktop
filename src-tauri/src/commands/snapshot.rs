@@ -5,6 +5,7 @@ use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, M
 use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
+use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
 /// Sentinel `backup_history.error` value for a genuinely cancelled backup, distinguishing it
 /// from a real failure so Recent Logs / LogsPage can render it neutrally instead of as an
@@ -89,6 +90,7 @@ async fn run_restic_blocking_retrying_on_lock(
 
 #[tauri::command]
 pub async fn delete_snapshot(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -100,6 +102,14 @@ pub async fn delete_snapshot(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Forget,
+        repo_id.clone(),
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        None,
+    );
     let mut args = vec!["forget".to_string(), snapshot_id.clone()];
     if prune {
         args.push("--prune".to_string());
@@ -107,7 +117,12 @@ pub async fn delete_snapshot(
     // `forget` (with or without --prune) takes restic's exclusive lock — wait for the
     // repo to go idle first (see CLAUDE.md's Concurrency section / repo_locks.rs).
     let _wg = repo_locks.write(&repo.path).await;
-    run_restic_blocking_retrying_on_lock(repo, args, restic_path).await?;
+    let result = run_restic_blocking_retrying_on_lock(repo, args, restic_path).await;
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result?;
     let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
     let _ = db.evict_stats(&repo_id);
@@ -115,7 +130,9 @@ pub async fn delete_snapshot(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn tag_snapshot(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -128,28 +145,45 @@ pub async fn tag_snapshot(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Tag,
+        repo_id,
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        None,
+    );
     // `tag` modifies snapshot metadata — exclusive lock, same as forget/prune.
     let _wg = repo_locks.write(&repo.path).await;
 
-    if !add_tags.is_empty() {
-        let tag_str = add_tags.join(",");
-        run_restic_blocking_retrying_on_lock(
-            repo.clone(),
-            vec!["tag".into(), "--add".into(), tag_str, snapshot_id.clone()],
-            restic_path.clone(),
-        )
-        .await?;
+    let result: Result<(), String> = async {
+        if !add_tags.is_empty() {
+            let tag_str = add_tags.join(",");
+            run_restic_blocking_retrying_on_lock(
+                repo.clone(),
+                vec!["tag".into(), "--add".into(), tag_str, snapshot_id.clone()],
+                restic_path.clone(),
+            )
+            .await?;
+        }
+        if !remove_tags.is_empty() {
+            let tag_str = remove_tags.join(",");
+            run_restic_blocking_retrying_on_lock(
+                repo,
+                vec!["tag".into(), "--remove".into(), tag_str, snapshot_id.clone()],
+                restic_path,
+            )
+            .await?;
+        }
+        Ok(())
     }
-    if !remove_tags.is_empty() {
-        let tag_str = remove_tags.join(",");
-        run_restic_blocking_retrying_on_lock(
-            repo,
-            vec!["tag".into(), "--remove".into(), tag_str, snapshot_id.clone()],
-            restic_path,
-        )
-        .await?;
+    .await;
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
     }
-    Ok(())
+    result
 }
 
 pub(crate) fn validate_snapshot_id(id: &str) -> Result<(), String> {
@@ -223,6 +257,7 @@ fn parse_diff_output(stdout: &str) -> DiffResult {
 
 #[tauri::command]
 pub async fn diff_snapshots(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -235,19 +270,34 @@ pub async fn diff_snapshots(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Diff,
+        repo_id,
+        Some(format!("{snapshot_a}..{snapshot_b}")),
+        TaskOrigin::Manual,
+        None,
+    );
     let _rg = repo_locks.read(&repo.path);
-    let stdout = run_restic_blocking(
+    let result = run_restic_blocking(
         repo,
         vec!["diff".into(), snapshot_a.clone(), snapshot_b.clone()],
         restic_path,
     )
-    .await?;
+    .await;
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    let stdout = result?;
 
     Ok(parse_diff_output(&stdout))
 }
 
 #[tauri::command]
 pub async fn get_snapshot_stats(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -258,13 +308,26 @@ pub async fn get_snapshot_stats(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Stats,
+        repo_id,
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        None,
+    );
     let _rg = repo_locks.read(&repo.path);
-    let stdout = run_restic_blocking(
+    let result = run_restic_blocking(
         repo,
         vec!["stats".into(), "--json".into(), snapshot_id.clone()],
         restic_path,
     )
-    .await?;
+    .await;
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    let stdout = result?;
     let last_line = super::repo::last_nonblank_line(&stdout)
         .ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
@@ -288,6 +351,7 @@ pub async fn execute_backup(
     excludes: Vec<String>,
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
+    origin: TaskOrigin,
 ) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -315,6 +379,16 @@ pub async fn execute_backup(
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
     let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
+
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Backup,
+        repo_id,
+        plan_id.map(str::to_string),
+        origin,
+        Some(backup_handle.current_task.clone()),
+    );
+    let task_progress = task_ctx.progress_emitter();
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -364,6 +438,7 @@ pub async fn execute_backup(
     let compression_inner = compression.clone();
     let repo_id_inner = repo_id.to_string();
     let plan_id_inner = plan_id.map(|s| s.to_string());
+    let task_progress_inner = task_progress.clone();
 
     // `backup` takes restic's shared lock — register as a reader so an exclusive
     // op (forget/prune/tag) on this repo knows to wait for us. Held across the
@@ -434,6 +509,14 @@ pub async fn execute_backup(
                                 .unwrap_or_default(),
                         };
                         let _ = app_inner.emit("backup:progress", &progress);
+                        task_progress_inner.emit(TaskProgress {
+                            percent_done: Some(progress.percent_done),
+                            items_done: Some(progress.files_done),
+                            items_total: Some(progress.total_files),
+                            bytes_done: Some(progress.bytes_done),
+                            bytes_total: Some(progress.total_bytes),
+                            label: None,
+                        });
                     }
                     Some("summary") => summary_line = Some(line),
                     _ => {}
@@ -468,6 +551,14 @@ pub async fn execute_backup(
     })
     .await
     .map_err(|e| e.to_string())?;
+
+    // Mirrors the "successful exit always wins over a raced cancel" rule just
+    // below: report `Finished` even if `cancelled` got set in the same race.
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
 
     // Only unlock on a genuine cancel-kill: since a raced success now wins over the
     // cancelled flag (see the reordering above), `cancelled` can be true even when
@@ -581,11 +672,12 @@ pub async fn run_backup(
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download, TaskOrigin::Manual).await
 }
 
 #[tauri::command]
-pub async fn cancel_backup(backup_handle: State<'_, BackupHandle>) -> Result<(), String> {
+pub async fn cancel_backup(app: tauri::AppHandle, backup_handle: State<'_, BackupHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &backup_handle.current_task);
     backup_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = backup_handle.child.lock() {
         if let Some(ref mut child) = *guard {
@@ -596,7 +688,9 @@ pub async fn cancel_backup(backup_handle: State<'_, BackupHandle>) -> Result<(),
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn copy_snapshot(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     copy_handle: State<'_, CopyHandle>,
@@ -630,6 +724,17 @@ pub async fn copy_snapshot(
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+
+    // `repoId` is the destination (where data lands / cache is evicted below);
+    // the source repo isn't separately representable in the single-repoId envelope.
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Copy,
+        dest_repo_id.clone(),
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        Some(copy_handle.current_task.clone()),
+    );
 
     copy_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&copy_handle.child);
@@ -706,6 +811,12 @@ pub async fn copy_snapshot(
     .await
     .map_err(|e| e.to_string())?;
 
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if copy_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
         let _ = db.evict_stats(&dest_repo_id);
@@ -724,7 +835,8 @@ pub async fn copy_snapshot(
 }
 
 #[tauri::command]
-pub async fn cancel_copy(copy_handle: State<'_, CopyHandle>) -> Result<(), String> {
+pub async fn cancel_copy(app: tauri::AppHandle, copy_handle: State<'_, CopyHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &copy_handle.current_task);
     copy_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(ref mut child) = *copy_handle.child.lock().map_err(|e| e.to_string())? {
         child.kill().map_err(|e| e.to_string())?;
@@ -734,6 +846,7 @@ pub async fn cancel_copy(copy_handle: State<'_, CopyHandle>) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn mirror_repo(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     mirror_handle: State<'_, MirrorHandle>,
@@ -764,6 +877,17 @@ pub async fn mirror_repo(
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+
+    // `repoId` is the destination, same rationale as copy_snapshot; mirror has no
+    // single-snapshot targetId (it copies every snapshot).
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Mirror,
+        dest_repo_id.clone(),
+        None,
+        TaskOrigin::Manual,
+        Some(mirror_handle.current_task.clone()),
+    );
 
     mirror_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&mirror_handle.child);
@@ -837,6 +961,12 @@ pub async fn mirror_repo(
     .await
     .map_err(|e| e.to_string())?;
 
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if mirror_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
         let _ = db.evict_stats(&dest_repo_id);
@@ -855,7 +985,8 @@ pub async fn mirror_repo(
 }
 
 #[tauri::command]
-pub async fn cancel_mirror(mirror_handle: State<'_, MirrorHandle>) -> Result<(), String> {
+pub async fn cancel_mirror(app: tauri::AppHandle, mirror_handle: State<'_, MirrorHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &mirror_handle.current_task);
     mirror_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(ref mut child) = *mirror_handle.child.lock().map_err(|e| e.to_string())? {
         child.kill().map_err(|e| e.to_string())?;
@@ -865,6 +996,7 @@ pub async fn cancel_mirror(mirror_handle: State<'_, MirrorHandle>) -> Result<(),
 
 #[tauri::command]
 pub async fn unlock_repo(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_id: String,
@@ -872,7 +1004,13 @@ pub async fn unlock_repo(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
-    run_restic_blocking(repo, vec!["unlock".into()], restic_path).await?;
+    let task_ctx = OperationCtx::new(app, TaskKind::Unlock, repo_id, None, TaskOrigin::Manual, None);
+    let result = run_restic_blocking(repo, vec!["unlock".into()], restic_path).await;
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result?;
     Ok(())
 }
 
@@ -916,18 +1054,34 @@ fn build_retention_args(tags: &[String], paths: &[String], retention: &Retention
     args
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_retention(
+    app: &tauri::AppHandle,
     db: &AppDb,
     master_key: &MasterKey,
     repo_locks: &RepoLocks,
     repo_id: &str,
+    plan_id: Option<&str>,
     tags: &[String],
     paths: &[String],
     retention: &RetentionPolicy,
+    // apply_retention always runs as the tail of a backup — the caller passes
+    // through the same origin the triggering execute_backup call used (see
+    // execute_backup's `origin` param).
+    origin: TaskOrigin,
 ) -> Result<String, String> {
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
     let restic_path = super::get_restic_path(db);
+
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Forget,
+        repo_id,
+        plan_id.map(str::to_string),
+        origin,
+        None,
+    );
 
     let args = build_retention_args(tags, paths, retention);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -948,6 +1102,11 @@ pub fn apply_retention(
             }
             _ => break,
         }
+    }
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
     }
 
     if result.is_ok() {
@@ -1007,11 +1166,24 @@ pub async fn forget_by_plan(
 ) -> Result<String, String> {
     let app_for_blocking = app.clone();
     let repo_id_for_blocking = repo_id.clone();
+    let plan_id_for_blocking = plan_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let db = app_for_blocking.state::<AppDb>();
         let master_key = app_for_blocking.state::<MasterKey>();
         let repo_locks = app_for_blocking.state::<RepoLocks>();
-        apply_retention(db.inner(), master_key.inner(), repo_locks.inner(), &repo_id_for_blocking, &tags, &paths, &retention)
+        apply_retention(
+            &app_for_blocking,
+            db.inner(),
+            master_key.inner(),
+            repo_locks.inner(),
+            &repo_id_for_blocking,
+            plan_id_for_blocking.as_deref(),
+            &tags,
+            &paths,
+            &retention,
+            // forget_by_plan is the manual "Apply Retention" button (BackupPlansPage).
+            TaskOrigin::Manual,
+        )
     })
     .await
     .map_err(|e| e.to_string())?;

@@ -21,6 +21,7 @@ import RepoSearchPage from "./pages/RepoSearchPage";
 import AuthPage from "./pages/AuthPage";
 import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
+import type { TaskEvent } from "./lib/types";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -121,6 +122,19 @@ export default function App() {
   useEffect(() => {
     const unlisten = listen("menu:source-github", () => {
       openUrl("https://github.com/nraboy/resty-desktop");
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Dev-only visibility into the unified operation event bus (see tasks.rs /
+  // CLAUDE.md's "Operation Event Bus" section). Deliberately stateless — never
+  // calls setState — so it can never cause a re-render; nothing in the app
+  // reads this data yet. Safe to remove; devtools' own event inspector works
+  // just as well, this is just a convenience during development.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const unlisten = listen<TaskEvent>("task", (event) => {
+      console.debug("[task]", event.payload);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);

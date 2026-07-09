@@ -8,6 +8,7 @@ use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
+use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -58,6 +59,7 @@ fn is_direct_child(entry_path: &str, parent: Option<&str>) -> bool {
 
 #[tauri::command]
 pub async fn list_files(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -67,12 +69,21 @@ pub async fn list_files(
 ) -> Result<Vec<FileEntry>, String> {
     validate_snapshot_id(&snapshot_id)?;
     if let Some(cached) = db.get(&repo_id, &snapshot_id, path.as_deref())? {
+        // Cache hit — no restic call happens, so there's no operation to report.
         return Ok(cached);
     }
 
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::Browse,
+        repo_id,
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        None,
+    );
 
     let mut args = vec!["ls".to_string(), "--json".to_string(), snapshot_id.clone()];
     if let Some(ref p) = path {
@@ -80,7 +91,12 @@ pub async fn list_files(
     }
 
     let _rg = repo_locks.read(&repo.path);
-    let stdout = run_restic_blocking(repo, args, restic_path).await?;
+    let result = run_restic_blocking(repo, args, restic_path).await;
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    let stdout = result?;
 
     let mut entries: Vec<FileEntry> = Vec::new();
     for (i, line) in stdout.lines().enumerate() {
@@ -101,6 +117,7 @@ pub async fn list_files(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_path(
+    app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
@@ -114,6 +131,14 @@ pub async fn restore_path(
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
+    let task_ctx = OperationCtx::new(
+        app,
+        TaskKind::RestorePath,
+        repo_id,
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        None,
+    );
 
     // Nest under a short_id subfolder so restoring the same (or different) file across
     // multiple snapshots into the same target_dir doesn't merge their contents together —
@@ -165,34 +190,48 @@ pub async fn restore_path(
         if only_ea_errors { Ok(()) } else { Err(e) }
     });
 
-    if strip_leading_path {
-        let clean = include_path.trim_start_matches('/');
-        let restored_at = std::path::Path::new(&target_dir).join(clean);
-        let basename = std::path::Path::new(clean)
-            .file_name()
-            .ok_or("Cannot determine basename of restore path")?;
-        let dest = std::path::Path::new(&target_dir).join(basename);
+    // Isolated in a closure (rather than `?`-returning straight out of the command)
+    // so both this and restic_result's outcome can be combined into one `result`
+    // before reporting the task bus's terminal phase below — matches the original
+    // priority exactly: a strip error wins over restic_result either way.
+    let strip_result: Result<(), String> = if strip_leading_path {
+        (|| -> Result<(), String> {
+            let clean = include_path.trim_start_matches('/');
+            let restored_at = std::path::Path::new(&target_dir).join(clean);
+            let basename = std::path::Path::new(clean)
+                .file_name()
+                .ok_or("Cannot determine basename of restore path")?;
+            let dest = std::path::Path::new(&target_dir).join(basename);
 
-        if restored_at != dest && restored_at.exists() {
-            std::fs::rename(&restored_at, &dest)
-                .map_err(|e| format!("Failed to move restored item: {e}"))?;
+            if restored_at != dest && restored_at.exists() {
+                std::fs::rename(&restored_at, &dest)
+                    .map_err(|e| format!("Failed to move restored item: {e}"))?;
 
-            // Remove the now-empty ancestor directories up to (but not including) target_dir.
-            let target_path = std::path::PathBuf::from(&target_dir);
-            let mut cursor = restored_at.parent().map(|p| p.to_path_buf());
-            while let Some(p) = cursor {
-                if p == target_path {
-                    break;
+                // Remove the now-empty ancestor directories up to (but not including) target_dir.
+                let target_path = std::path::PathBuf::from(&target_dir);
+                let mut cursor = restored_at.parent().map(|p| p.to_path_buf());
+                while let Some(p) = cursor {
+                    if p == target_path {
+                        break;
+                    }
+                    if std::fs::remove_dir(&p).is_err() {
+                        break;
+                    }
+                    cursor = p.parent().map(|pp| pp.to_path_buf());
                 }
-                if std::fs::remove_dir(&p).is_err() {
-                    break;
-                }
-                cursor = p.parent().map(|pp| pp.to_path_buf());
             }
-        }
-    }
+            Ok(())
+        })()
+    } else {
+        Ok(())
+    };
 
-    restic_result
+    let result = strip_result.and(restic_result);
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result
 }
 
 #[derive(Clone, Serialize)]
@@ -252,6 +291,16 @@ pub async fn restore_snapshot(
     let repo_password = repo.password.clone();
     let repo_id_inner = repo_id.clone();
 
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Restore,
+        repo_id.clone(),
+        Some(snapshot_id.clone()),
+        TaskOrigin::Manual,
+        Some(restore_handle.current_task.clone()),
+    );
+    let task_progress_inner = task_ctx.progress_emitter();
+
     // Nest under a short_id subfolder so restoring multiple snapshots to the same
     // target_dir doesn't merge their contents together. validate_snapshot_id above
     // guarantees at least 8 hex chars, matching restic's own short_id convention.
@@ -268,7 +317,7 @@ pub async fn restore_snapshot(
     // spawn_blocking below for the whole child-process lifetime.
     let _rg = repo_locks.read(&repo_path);
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, BufReader, Read};
         use std::process::Stdio;
 
@@ -314,6 +363,14 @@ pub async fn restore_snapshot(
                         seconds_elapsed: v["seconds_elapsed"].as_u64().unwrap_or(0),
                     };
                     let _ = app.emit("restore:progress", &progress);
+                    task_progress_inner.emit(TaskProgress {
+                        percent_done: Some(progress.percent_done),
+                        items_done: Some(progress.files_restored),
+                        items_total: Some(progress.total_files),
+                        bytes_done: Some(progress.bytes_restored),
+                        bytes_total: Some(progress.total_bytes),
+                        label: None,
+                    });
                 }
             }
         }
@@ -360,11 +417,19 @@ pub async fn restore_snapshot(
         Err(if msg.is_empty() { "restic restore failed".to_string() } else { msg.to_string() })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    match &result {
+        Ok(_) => task_ctx.finished(),
+        Err(_) if restore_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result
 }
 
 #[tauri::command]
-pub async fn cancel_restore(restore_handle: State<'_, RestoreHandle>) -> Result<(), String> {
+pub async fn cancel_restore(app: tauri::AppHandle, restore_handle: State<'_, RestoreHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &restore_handle.current_task);
     restore_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(ref mut child) = *restore_handle.child.lock().map_err(|e| e.to_string())? {
         child.kill().map_err(|e| e.to_string())?;
@@ -449,6 +514,15 @@ pub async fn index_snapshot(
     tauri::async_runtime::spawn(async move {
         let _guard = ManualIndexGuard::new(manual_active);
 
+        let task_ctx = OperationCtx::new(
+            app.clone(),
+            TaskKind::Index,
+            repo_id.clone(),
+            Some(snapshot_id.clone()),
+            TaskOrigin::Manual,
+            None,
+        );
+
         let repo_path = repo.path.clone();
         let repo_pass = repo.password.clone();
         let snap_id = snapshot_id.clone();
@@ -469,6 +543,12 @@ pub async fn index_snapshot(
         .await
         .unwrap_or(false);
         drop(_permit);
+
+        if ok {
+            task_ctx.finished();
+        } else {
+            task_ctx.failed("Indexing failed");
+        }
 
         if !ok {
             let _ = app2
@@ -516,6 +596,7 @@ pub async fn index_snapshots_batch(
     let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
     let gate = std::sync::Arc::clone(&index_handle.gate);
     let cancel = std::sync::Arc::clone(&index_handle.cancel);
+    let current_task = std::sync::Arc::clone(&index_handle.current_task);
     cancel.store(false, std::sync::atomic::Ordering::SeqCst);
 
     tauri::async_runtime::spawn(async move {
@@ -544,6 +625,15 @@ pub async fn index_snapshots_batch(
                 continue;
             }
 
+            let task_ctx = OperationCtx::new(
+                app.clone(),
+                TaskKind::Index,
+                repo_id.clone(),
+                Some(snapshot_id.clone()),
+                TaskOrigin::Manual,
+                Some(current_task.clone()),
+            );
+
             let repo_path = repo.path.clone();
             let repo_pass = repo.password.clone();
             let snap_id = snapshot_id.clone();
@@ -565,6 +655,12 @@ pub async fn index_snapshots_batch(
             .unwrap_or(false);
             drop(_permit);
 
+            if ok {
+                task_ctx.finished();
+            } else {
+                task_ctx.failed("Indexing failed");
+            }
+
             if !ok {
                 let _ = app
                     .state::<AppDb>()
@@ -584,7 +680,8 @@ pub async fn index_snapshots_batch(
 /// Signals an in-progress `index_snapshots_batch` run to stop after the
 /// currently-indexing snapshot finishes. Has no effect if no batch is running.
 #[tauri::command]
-pub fn cancel_index_batch(index_handle: State<'_, super::cache::IndexHandle>) -> Result<(), String> {
+pub fn cancel_index_batch(app: tauri::AppHandle, index_handle: State<'_, super::cache::IndexHandle>) -> Result<(), String> {
+    emit_cancelling(&app, &index_handle.current_task);
     index_handle
         .cancel
         .store(true, std::sync::atomic::Ordering::SeqCst);

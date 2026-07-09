@@ -1,6 +1,7 @@
 mod cache_warmer;
 mod commands;
 mod scheduler;
+mod tasks;
 
 use commands::{auth, backup_plan, browse, cache, repo, repo_locks, schedule, snapshot, transfer};
 use rusqlite::Connection;

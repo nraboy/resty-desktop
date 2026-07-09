@@ -12,6 +12,7 @@ use crate::commands::browse::run_full_index;
 use crate::commands::cache::{AppDb, IndexHandle, MasterKey};
 use crate::commands::repo::run_restic_with_path;
 use crate::commands::repo_locks::RepoLocks;
+use crate::tasks::{OperationCtx, TaskKind, TaskOrigin};
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
 
@@ -219,6 +220,16 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let emit_repo_id = repo_id.clone();
     let emit_snapshot_id = snapshot_id.clone();
 
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Index,
+        repo_id.clone(),
+        Some(snapshot_id.clone()),
+        // Real background work — no user action triggered this tick.
+        TaskOrigin::Background,
+        None,
+    );
+
     // Held across the spawn_blocking call so this can never overlap with a
     // manual index — see IndexHandle::gate.
     let _permit = index_handle.gate.lock().await;
@@ -234,6 +245,12 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     .await
     .unwrap_or(false);
     drop(_permit);
+
+    if ok {
+        task_ctx.finished();
+    } else {
+        task_ctx.failed("Indexing failed");
+    }
 
     let _ = app.emit("index:done", serde_json::json!({
         "snapshotId": emit_snapshot_id,

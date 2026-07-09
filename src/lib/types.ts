@@ -102,6 +102,41 @@ export interface IndexProgress {
   total: number;
 }
 
+// Unified operation lifecycle event bus (Tauri event name "task") — see
+// tasks.rs and CLAUDE.md's "Operation Event Bus" section. Emitted by every
+// covered restic operation alongside — not instead of — its existing detailed
+// feed (BackupProgress, RestoreProgress, etc). No frontend code subscribes to
+// this yet by design; these types exist so a future consumer has a uniform,
+// operationId-correlatable contract to build on.
+export type TaskKind =
+  | "backup" | "restore" | "restorePath" | "copy" | "mirror" | "prune"
+  | "forget" | "tag" | "check" | "diff" | "index" | "unlock" | "stats"
+  | "testConnection" | "browse" | "init";
+export type TaskPhase =
+  | "started" | "progress" | "cancelling" | "cancelled" | "finished" | "failed";
+export type TaskOrigin = "manual" | "scheduler" | "background";
+
+export interface TaskProgress {
+  percentDone?: number;
+  itemsDone?: number;
+  itemsTotal?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  label?: string;
+}
+
+export interface TaskEvent {
+  operationId: string;
+  kind: TaskKind;
+  phase: TaskPhase;
+  repoId: string;
+  targetId?: string;
+  origin: TaskOrigin;
+  progress?: TaskProgress;
+  error?: string;
+  at: number;
+}
+
 export interface CheckResult {
   success: boolean;
   errors: string[];

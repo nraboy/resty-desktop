@@ -12,6 +12,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::browse::FileEntry;
 use super::crypto;
 use super::snapshot::Snapshot;
+use crate::tasks::{new_task_slot, TaskSlot};
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
 /// never drift — the Logs page never shows rows the trim would have deleted.
@@ -101,6 +102,9 @@ pub struct CopyHandle {
     /// `copy_snapshot` calls can't corrupt the shared `child`/`cancelled`
     /// state (matches the pattern already used by BackupHandle/RestoreHandle).
     pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `cancel_copy` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl CopyHandle {
@@ -109,6 +113,7 @@ impl CopyHandle {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
         }
     }
 }
@@ -119,6 +124,9 @@ pub struct MirrorHandle {
     /// Set while a mirror is executing. Serializes mirrors so two concurrent
     /// `mirror_repo` calls can't corrupt the shared `child`/`cancelled` state.
     pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `cancel_mirror` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl MirrorHandle {
@@ -127,6 +135,7 @@ impl MirrorHandle {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
         }
     }
 }
@@ -138,6 +147,9 @@ pub struct BackupHandle {
     /// `execute_backup` calls (e.g. a scheduler tick colliding with a manual
     /// backup) can't corrupt the shared `child`/`cancelled` state.
     pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `cancel_backup` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl BackupHandle {
@@ -146,6 +158,7 @@ impl BackupHandle {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
         }
     }
 }
@@ -158,6 +171,9 @@ pub struct PruneHandle {
     /// concurrent second run could clobber the first run's `child`/`cancelled`
     /// state (a second Stop could kill the wrong process, or vice versa).
     pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `cancel_prune` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl PruneHandle {
@@ -166,6 +182,7 @@ impl PruneHandle {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
         }
     }
 }
@@ -178,6 +195,9 @@ pub struct RestoreHandle {
     /// navigating away, then starting another) can't corrupt the shared
     /// `child`/`cancelled` state or let Stop kill the wrong process.
     pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `cancel_restore` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl RestoreHandle {
@@ -186,6 +206,7 @@ impl RestoreHandle {
             child: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
         }
     }
 }
@@ -206,6 +227,9 @@ pub struct IndexHandle {
     /// Set by `cancel_index_batch` to stop an in-progress "Index All" batch
     /// between snapshots (never mid-`restic`).
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Identity of the snapshot `index_snapshots_batch` is currently indexing, if
+    /// any — read by `cancel_index_batch` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
 }
 
 impl IndexHandle {
@@ -213,6 +237,7 @@ impl IndexHandle {
         Self {
             manual_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            current_task: new_task_slot(),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
