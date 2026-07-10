@@ -2,12 +2,13 @@ import { useEffect, useRef, useState, type MouseEvent, type FormEvent } from "re
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { useActivity } from "../lib/activity";
 import {
   addRepo,
   cancelMirror,
   cancelPrune,
   checkRepo,
-  getRemoteAutoRefresh,
   getRepoPassword,
   getRepoStats,
   initRepo,
@@ -22,9 +23,9 @@ import {
   updateRepoPath,
   testRepoConnection,
 } from "../lib/invoke";
-import type { CheckResult, Repository, ResticStats } from "../lib/types";
+import type { CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
-import { formatBytes } from "../lib/format";
+import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -38,8 +39,11 @@ export default function RepositoriesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [statsMap, setStatsMap] = useState<Record<string, ResticStats | null>>({});
-  const [statsErrorMap, setStatsErrorMap] = useState<Record<string, string>>({});
-  const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
+  // Per-row spinner (statsRefreshing) and failure marker (statsFailed) are both bus-driven
+  // rather than local state, so they reflect a refresh that's still running/failed even if
+  // the user navigated away and back. No error text is tracked — see activity.tsx's module
+  // doc comment for why a plain boolean marker is the deliberate choice.
+  const { statsRefreshing, statsFailed } = useActivity();
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [loading, setLoading] = useState(false);
@@ -79,8 +83,6 @@ export default function RepositoriesPage() {
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const pruneStartRef = useRef<number>(0);
 
-  const [remoteAutoRefresh, setRemoteAutoRefresh] = useState(false);
-
   const load = () =>
     listRepos()
       .then((r) => { setRepos(r); return r; })
@@ -90,15 +92,11 @@ export default function RepositoriesPage() {
     for (const repo of repoList) {
       getRepoStats(repo.id)
         .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-        .catch((err) => {
-          setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
-          setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
-        });
+        .catch(() => setStatsMap((prev) => ({ ...prev, [repo.id]: null })));
     }
   };
 
   useEffect(() => {
-    getRemoteAutoRefresh().then(setRemoteAutoRefresh).catch(() => {});
     load().then(fetchStatsForLocal);
   }, []);
 
@@ -111,17 +109,27 @@ export default function RepositoriesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
+  // Owns row-data updates (the numbers) for both the per-row and "Refresh All" buttons below.
+  // Only "finished" is handled here — the failure marker (statsFailed) and spinner
+  // (statsRefreshing) are both already derived by ActivityProvider from the same bus, so this
+  // page doesn't need its own "failed" branch. refreshRepoStats already writes repo_stats_cache
+  // before it emits "finished" (see repo.rs's fetch_and_cache_stats), so re-reading here is a
+  // guaranteed cache hit — it never re-triggers a restic call or another task event.
+  useEffect(() => {
+    const unlistenTask = listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "stats" || t.phase !== "finished") return;
+      getRepoStats(t.repoId)
+        .then((s) => setStatsMap((prev) => ({ ...prev, [t.repoId]: s })))
+        .catch(() => {});
+    });
+    return () => { unlistenTask.then((fn) => fn()); };
+  }, []);
+
+  // Fire-and-forget: display updates (spinner via statsRefreshing, data via the task listener
+  // above) are entirely event-driven now, not chained off this promise.
   const refreshRow = (repo: Repository) => {
-    setRefreshingRow(repo.id);
-    setStatsMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
-    setStatsErrorMap((prev) => { const next = { ...prev }; delete next[repo.id]; return next; });
-    refreshRepoStats(repo.id)
-      .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-      .catch((err) => {
-        setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
-        setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
-      })
-      .finally(() => setRefreshingRow(null));
+    refreshRepoStats(repo.id).catch(() => {});
   };
 
   const handleRefreshRow = (e: MouseEvent, repo: Repository) => {
@@ -131,28 +139,18 @@ export default function RepositoriesPage() {
 
   const handleRefreshAll = async () => {
     setRefreshingAll(true);
-    const reposToRefresh = repos.filter((repo) => !isRemoteRepo(repo.path) || remoteAutoRefresh);
-    setStatsMap((prev) => {
-      const next = { ...prev };
-      for (const repo of reposToRefresh) delete next[repo.id];
-      return next;
-    });
-    setStatsErrorMap((prev) => {
-      const next = { ...prev };
-      for (const repo of reposToRefresh) delete next[repo.id];
-      return next;
-    });
-    await Promise.allSettled(
-      reposToRefresh
-        .map((repo) =>
-          refreshRepoStats(repo.id)
-            .then((s) => setStatsMap((prev) => ({ ...prev, [repo.id]: s })))
-            .catch((err) => {
-              setStatsMap((prev) => ({ ...prev, [repo.id]: null }));
-              setStatsErrorMap((prev) => ({ ...prev, [repo.id]: String(err) }));
-            })
-        )
-    );
+    // Includes remote repos unconditionally — this is a manual, user-initiated action, and
+    // stats never refresh on their own anymore, so there's no surprise-bandwidth risk to guard
+    // against with remote_auto_refresh here (that setting still gates every *automatic* remote
+    // activity: the cache warmer's snapshot/index sweep, SnapshotsPage's background refresh,
+    // and Index All — see CLAUDE.md's Restic Integration section).
+    // Promise.allSettled never rejects, so no .catch needed — each row's outcome is picked up
+    // by the bus (finished → the page's own "task" listener refreshes statsMap; failed → sets
+    // statsFailed via ActivityProvider), same as a single row refresh. This call only tracks
+    // the brief window before the bus's own started/finished events land, so the button
+    // re-enables promptly rather than staying disabled forever if a "task" event were ever
+    // missed.
+    await Promise.allSettled(repos.map((repo) => refreshRepoStats(repo.id)));
     setRefreshingAll(false);
   };
 
@@ -410,16 +408,20 @@ export default function RepositoriesPage() {
                         <>
                           <p className="text-sm font-medium text-gray-300">{formatBytes(statsMap[repo.id]!.total_size)}</p>
                           <p className="text-xs text-gray-600">{statsMap[repo.id]!.snapshots_count} snapshot{statsMap[repo.id]!.snapshots_count !== 1 ? "s" : ""}</p>
+                          {statsMap[repo.id]!.cached_at != null && (
+                            <p
+                              className="text-xs text-gray-600"
+                              title={formatTimestamp(statsMap[repo.id]!.cached_at!)}
+                            >
+                              Refreshed {formatRelative(statsMap[repo.id]!.cached_at!)}
+                            </p>
+                          )}
+                          {statsFailed.includes(repo.id) && (
+                            <p className="text-xs text-red-400">refresh failed</p>
+                          )}
                         </>
                       ) : (
-                        <div className="relative group cursor-help">
-                          <p className="text-xs text-gray-600">unavailable</p>
-                          {statsErrorMap[repo.id] && (
-                            <div className="absolute bottom-full right-0 mb-1 px-2 py-1.5 w-72 bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 break-words">
-                              {statsErrorMap[repo.id]}
-                            </div>
-                          )}
-                        </div>
+                        <p className="text-xs text-gray-600">unavailable</p>
                       )
                     ) : isRemoteRepo(repo.path) ? (
                       <p className="text-xs text-gray-600">—</p>
@@ -430,12 +432,15 @@ export default function RepositoriesPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    disabled={refreshingAll || refreshingRow === repo.id}
+                    disabled={refreshingAll || statsRefreshing.includes(repo.id)}
                     onClick={(e) => handleRefreshRow(e, repo)}
                     className="text-gray-500 hover:text-blue-400"
                     title="Refresh stats"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg
+                      className={`w-4 h-4 ${statsRefreshing.includes(repo.id) ? "animate-spin" : ""}`}
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                    >
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                         d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
@@ -859,7 +864,7 @@ export default function RepositoriesPage() {
             { separator: true },
             {
               label: "Refresh Stats",
-              disabled: refreshingAll || refreshingRow === contextMenu.repo.id,
+              disabled: refreshingAll || statsRefreshing.includes(contextMenu.repo.id),
               onClick: () => refreshRow(contextMenu.repo),
             },
             {

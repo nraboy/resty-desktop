@@ -380,7 +380,9 @@ export default function SettingsPage() {
             <p className="text-xs text-gray-500 mb-3">
               When enabled, remote repositories are refreshed and cached automatically — on page load and
               in the background — the same as local repositories. Disabled by default to avoid
-              unnecessary bandwidth charges from your cloud provider.
+              unnecessary bandwidth charges from your cloud provider. Manual stats refresh (the Refresh
+              buttons on the Repositories page) always includes remote repositories regardless of this
+              setting, since that's an explicit, user-initiated request rather than an automatic one.
             </p>
             <label className="flex items-center gap-3 cursor-pointer select-none">
               <button

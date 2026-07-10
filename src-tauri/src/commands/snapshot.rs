@@ -125,7 +125,6 @@ pub async fn delete_snapshot(
     result?;
     let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
     let _ = db.evict_snapshots(&repo_id);
-    let _ = db.evict_stats(&repo_id);
     Ok(())
 }
 
@@ -591,8 +590,8 @@ pub async fn execute_backup(
 
     match result {
         Ok(ref stdout) => {
-            let _ = db.evict_stats(repo_id);
-
+            // Stats cache is intentionally left alone here — it only refreshes via the
+            // manual Refresh button/Refresh All now (see repo.rs's refresh_repo_stats).
             let summary = stdout
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -825,7 +824,6 @@ pub async fn copy_snapshot(
 
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
-        let _ = db.evict_stats(&dest_repo_id);
     } else if copy_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         // The process was killed via SIGKILL and left stale locks on both repos.
         // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
@@ -976,7 +974,6 @@ pub async fn mirror_repo(
 
     if result.is_ok() {
         let _ = db.evict_snapshots(&dest_repo_id);
-        let _ = db.evict_stats(&dest_repo_id);
     } else if mirror_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         // The process was killed via SIGKILL and left stale locks on both repos.
         // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
@@ -1117,7 +1114,6 @@ pub fn apply_retention(
     }
 
     if result.is_ok() {
-        let _ = db.evict_stats(repo_id);
         if let Ok(json) =
             run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
         {

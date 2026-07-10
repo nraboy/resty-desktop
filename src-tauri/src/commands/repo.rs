@@ -12,6 +12,11 @@ pub struct ResticStats {
     pub total_size: u64,
     pub total_file_count: u64,
     pub snapshots_count: u64,
+    /// Unix-seconds timestamp of when this value was cached. `None` only for the
+    /// pure `parse_stats_json` path (fresh restic output has no such field) —
+    /// callers that hand back a `ResticStats` to the frontend always fill it in
+    /// from `repo_stats_cache.cached_at` before returning.
+    pub cached_at: Option<i64>,
 }
 
 /// Finds the last non-blank line in restic `--json` stdout. restic sometimes emits
@@ -32,6 +37,7 @@ pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
         total_size: v["total_size"].as_u64().unwrap_or(0),
         total_file_count: v["total_file_count"].as_u64().unwrap_or(0),
         snapshots_count: v["snapshots_count"].as_u64().unwrap_or(0),
+        cached_at: None,
     })
 }
 
@@ -239,14 +245,19 @@ pub async fn get_repo_stats(
     repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
-    if let Ok(Some((total_size, total_file_count, snapshots_count))) = db.get_stats(&repo_id) {
+    if let Ok(Some((total_size, total_file_count, snapshots_count, cached_at))) = db.get_stats(&repo_id) {
         // Cache hit — no restic call happens, so there's no operation to report;
         // matches the "not a real restic operation" reasoning for list_snapshots.
-        return Ok(ResticStats { total_size, total_file_count, snapshots_count });
+        return Ok(ResticStats { total_size, total_file_count, snapshots_count, cached_at: Some(cached_at) });
     }
     fetch_and_cache_stats(&app, &db, &master_key, &repo_locks, &repo_id).await
 }
 
+/// Manual-only refresh: stats are never auto-evicted (see CLAUDE.md's Restic
+/// Integration section) — this is the sole way a repo's cached stats change,
+/// aside from the very first fetch. A failed refresh leaves the last-good
+/// cached value (and its `cached_at`) untouched, since `set_stats` only
+/// overwrites on a successful fetch below.
 #[tauri::command]
 pub async fn refresh_repo_stats(
     app: tauri::AppHandle,
@@ -255,10 +266,18 @@ pub async fn refresh_repo_stats(
     repo_locks: State<'_, RepoLocks>,
     repo_id: String,
 ) -> Result<ResticStats, String> {
-    let _ = db.evict_stats(&repo_id);
     fetch_and_cache_stats(&app, &db, &master_key, &repo_locks, &repo_id).await
 }
 
+/// `task_ctx` is created *first*, before any fallible step, and every step below reports
+/// through it explicitly (`task_ctx.failed(e)`) rather than via `?` — so every way this can
+/// fail (locked app, deleted repo, the restic call itself, a malformed response, the cache
+/// write) reliably emits a `task` "failed" event. This matters because the frontend now
+/// derives a boolean "last refresh failed" marker purely from the bus (see `activity.tsx`'s
+/// `reduceStatsOps`) with no fallback to the invoke promise's own rejection — relying on `?`
+/// here would let some failures fall through to `OperationCtx`'s `Drop` backstop (or, for the
+/// two steps before `task_ctx` used to exist, emit nothing at all), silently leaving that
+/// marker unset even though the refresh genuinely failed.
 async fn fetch_and_cache_stats(
     app: &tauri::AppHandle,
     db: &AppDb,
@@ -266,19 +285,51 @@ async fn fetch_and_cache_stats(
     repo_locks: &RepoLocks,
     repo_id: &str,
 ) -> Result<ResticStats, String> {
-    let key = master_key.get()?;
-    let repo = db.get_full_repo(repo_id, &key)?;
-    let restic_path = super::get_restic_path(db);
     let task_ctx = OperationCtx::new(app.clone(), TaskKind::Stats, repo_id, None, TaskOrigin::Manual, None);
+
+    let key = match master_key.get() {
+        Ok(k) => k,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    let repo = match db.get_full_repo(repo_id, &key) {
+        Ok(r) => r,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    let restic_path = super::get_restic_path(db);
     let _rg = repo_locks.read(&repo.path);
     let result = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await;
-    match &result {
-        Ok(_) => task_ctx.finished(),
-        Err(e) => task_ctx.failed(e.clone()),
-    }
-    let stdout = result?;
-    let stats = parse_stats_json(&stdout)?;
-    let _ = db.set_stats(repo_id, stats.total_size, stats.total_file_count, stats.snapshots_count);
+    let stdout = match result {
+        Ok(stdout) => stdout,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    let mut stats = match parse_stats_json(&stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    // Cache write happens before `finished()` is emitted, on purpose: a `task`-bus
+    // consumer that hears "finished" and re-reads `get_repo_stats` must never race
+    // ahead of this write. See CLAUDE.md's Operation Event Bus section.
+    let ts = match db.set_stats(repo_id, stats.total_size, stats.total_file_count, stats.snapshots_count) {
+        Ok(t) => t,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    stats.cached_at = Some(ts);
+    task_ctx.finished();
     Ok(stats)
 }
 

@@ -5,8 +5,22 @@
 // these listeners coexist peacefully with the page-local ones that already exist.
 //
 // Scope is deliberately narrow: only activity the user has no other visibility into —
-// background auto-indexing and scheduler-triggered backups. Restore/copy/mirror/manual
-// backup/prune already have their own progress modals and are intentionally excluded here.
+// background auto-indexing, scheduler-triggered backups, and (as of the `statsRefreshing`
+// field below) in-flight repo stats refreshes. Restore/copy/mirror/manual backup/prune already
+// have their own progress modals and are intentionally excluded here.
+//
+// `statsRefreshing`/`statsFailed` are this app's first stateful consumer of the unified `task`
+// event bus (see CLAUDE.md's Operation Event Bus section) rather than a per-operation legacy
+// feed — stats never had one (it always updated purely from the command's promise return), so
+// there's no legacy event to keep alongside. The bus is used here purely as a *lifecycle*
+// signal (an operationId started/finished/failed) — no error text is carried or stored;
+// `statsFailed` is a plain boolean-per-repo marker, not a message, since the intended reader is
+// "did my click work," not "why not" (deliberately simpler than restic's actual error text —
+// see repo.rs's fetch_and_cache_stats, where every failure path explicitly reports through
+// `task_ctx.failed(...)` specifically so this marker can rely on the bus alone). The actual
+// stats numbers are likewise never carried on the event; RepositoriesPage re-reads them from
+// the DB cache via getRepoStats, which the backend command already writes to before it emits
+// `finished`.
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -16,7 +30,7 @@ import {
   listBackupPlans,
   listSchedules,
 } from "./invoke";
-import type { BackupHistoryEntry, BackupProgress, Schedule } from "./types";
+import type { BackupHistoryEntry, BackupProgress, Schedule, TaskEvent } from "./types";
 
 export interface UpcomingBackup {
   scheduleId: string;
@@ -46,8 +60,53 @@ interface ActivityState {
   upcoming: UpcomingBackup[];
   /** Last three backup history entries, newest first. */
   recentLogs: BackupHistoryEntry[];
+  /** repoIds with an in-flight stats refresh (task bus kind "stats"), deduped. Populated from
+   *  `task` events, not a legacy feed — see the module doc comment above. */
+  statsRefreshing: string[];
+  /** repoIds whose most recent stats refresh attempt ended in "failed" — cleared the moment a
+   *  new attempt starts or a later attempt succeeds. No error text; see the module doc comment
+   *  above for why a plain marker is the deliberate choice here. */
+  statsFailed: string[];
   /** Bumped every 60s so relative-time labels ("in 3 hours") stay fresh without a refetch. */
   clockTick: number;
+}
+
+/** In-flight `stats` task operations (operationId -> repoId, so concurrent refreshes — e.g.
+ *  "Refresh All" — don't clobber each other) plus the set of repoIds whose latest attempt
+ *  failed. Both are derived purely from the `task` bus; see the module doc comment above. */
+export interface StatsOpsState {
+  inFlight: Map<string, string>;
+  failed: Set<string>;
+}
+
+export const initialStatsOpsState: StatsOpsState = { inFlight: new Map(), failed: new Set() };
+
+/** Pure reducer over `stats`-kind task events. Exported for a unit test (see
+ *  activity.test.ts) rather than only exercised through the provider's effect. */
+export function reduceStatsOps(state: StatsOpsState, event: TaskEvent): StatsOpsState {
+  if (event.kind !== "stats") return state;
+  const inFlight = new Map(state.inFlight);
+  const failed = new Set(state.failed);
+  switch (event.phase) {
+    case "started":
+      inFlight.set(event.operationId, event.repoId);
+      failed.delete(event.repoId); // a fresh attempt supersedes any prior failure marker
+      break;
+    case "finished":
+      inFlight.delete(event.operationId);
+      failed.delete(event.repoId);
+      break;
+    case "failed":
+      inFlight.delete(event.operationId);
+      failed.add(event.repoId);
+      break;
+    case "cancelled":
+      inFlight.delete(event.operationId);
+      break;
+    default:
+      break; // "progress" — stats is a single restic call, never emits this phase
+  }
+  return { inFlight, failed };
 }
 
 const ActivityContext = createContext<ActivityState | null>(null);
@@ -86,9 +145,14 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [activeBackup, setActiveBackup] = useState<ActiveScheduledBackup | null>(null);
   const [upcoming, setUpcoming] = useState<UpcomingBackup[]>([]);
   const [recentLogs, setRecentLogs] = useState<BackupHistoryEntry[]>([]);
+  const [statsRefreshing, setStatsRefreshing] = useState<string[]>([]);
+  const [statsFailed, setStatsFailed] = useState<string[]>([]);
   const [clockTick, setClockTick] = useState(0);
   // Holds name/plan between "started" and the first "backup:progress" payload.
   const pendingBackupRef = useRef<{ scheduleName: string; planName: string } | null>(null);
+  // statsRefreshing/statsFailed (both deduped repoId arrays) are derived from this on every
+  // "task" event via reduceStatsOps.
+  const statsOpsRef = useRef<StatsOpsState>(initialStatsOpsState);
 
   const refreshIndexing = () => { loadIndexing().then(setIndexing).catch(() => {}); };
   const refreshUpcoming = () => { loadUpcoming().then(setUpcoming).catch(() => {}); };
@@ -138,6 +202,15 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     // scheduled run happened to refresh it.
     const unlistenHistoryUpdated = listen("backup:history-updated", refreshLogs);
 
+    // First subscriber to the unified `task` bus — see module doc comment above. Only
+    // "stats" kind events are consumed; every other kind is ignored here (it's still
+    // observed by App.tsx's dev-only console.debug effect).
+    const unlistenTask = listen<TaskEvent>("task", (e) => {
+      statsOpsRef.current = reduceStatsOps(statsOpsRef.current, e.payload);
+      setStatsRefreshing([...new Set(statsOpsRef.current.inFlight.values())]);
+      setStatsFailed([...statsOpsRef.current.failed]);
+    });
+
     return () => {
       clearInterval(tickTimer);
       unlistenIndexDone.then((fn) => fn());
@@ -148,11 +221,14 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       unlistenRetentionStarted.then((fn) => fn());
       unlistenBackupFinished.then((fn) => fn());
       unlistenHistoryUpdated.then((fn) => fn());
+      unlistenTask.then((fn) => fn());
     };
   }, []);
 
   return (
-    <ActivityContext.Provider value={{ indexing, activeBackup, upcoming, recentLogs, clockTick }}>
+    <ActivityContext.Provider
+      value={{ indexing, activeBackup, upcoming, recentLogs, statsRefreshing, statsFailed, clockTick }}
+    >
       {children}
     </ActivityContext.Provider>
   );

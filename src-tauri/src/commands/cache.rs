@@ -1327,10 +1327,13 @@ impl AppDb {
 
     // ── repo stats cache ─────────────────────────────────────────────────────
 
-    pub fn get_stats(&self, repo_id: &str) -> Result<Option<(u64, u64, u64)>, String> {
+    /// Returns `(total_size, total_file_count, snapshots_count, cached_at)`. `cached_at`
+    /// is a Unix-seconds timestamp — surfaced to the frontend as a "Refreshed …" label
+    /// on RepositoriesPage now that stats are manual-refresh-only (see `set_stats`).
+    pub fn get_stats(&self, repo_id: &str) -> Result<Option<(u64, u64, u64, i64)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
-            "SELECT total_size, total_file_count, snapshots_count
+            "SELECT total_size, total_file_count, snapshots_count, cached_at
              FROM repo_stats_cache WHERE repo_id = ?1",
             params![repo_id],
             |row| {
@@ -1338,6 +1341,7 @@ impl AppDb {
                     row.get::<_, i64>(0)? as u64,
                     row.get::<_, i64>(1)? as u64,
                     row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         ) {
@@ -1347,13 +1351,16 @@ impl AppDb {
         }
     }
 
+    /// Writes fresh stats and returns the `cached_at` timestamp it wrote, so the caller
+    /// (`fetch_and_cache_stats` in repo.rs) can hand it straight back to the frontend
+    /// without a re-read.
     pub fn set_stats(
         &self,
         repo_id: &str,
         total_size: u64,
         total_file_count: u64,
         snapshots_count: u64,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let now = timestamp();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -1369,17 +1376,7 @@ impl AppDb {
             ],
         )
         .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn evict_stats(&self, repo_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM repo_stats_cache WHERE repo_id = ?1",
-            params![repo_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(now)
     }
 
     // ── backup history ────────────────────────────────────────────────────────
@@ -2030,6 +2027,27 @@ mod tests {
         // Verify repoB's status remains.
         let status_b = db.get_browse_status("repoB").unwrap();
         assert_eq!(status_b.get("snap123"), Some(&"complete".to_string()));
+    }
+
+    #[test]
+    fn set_stats_returns_and_persists_cached_at() {
+        let db = test_db();
+
+        let ts1 = db.set_stats("repoA", 100, 5, 2).unwrap();
+        let (total_size, total_file_count, snapshots_count, cached_at) =
+            db.get_stats("repoA").unwrap().unwrap();
+        assert_eq!((total_size, total_file_count, snapshots_count), (100, 5, 2));
+        assert_eq!(cached_at, ts1);
+
+        // A later set_stats overwrites the value and advances cached_at (or at least
+        // never goes backwards — timestamp() is second-resolution, so two calls in the
+        // same test can legitimately land on the same second).
+        let ts2 = db.set_stats("repoA", 200, 8, 3).unwrap();
+        assert!(ts2 >= ts1);
+        let (total_size, total_file_count, snapshots_count, cached_at) =
+            db.get_stats("repoA").unwrap().unwrap();
+        assert_eq!((total_size, total_file_count, snapshots_count), (200, 8, 3));
+        assert_eq!(cached_at, ts2);
     }
 
     #[test]

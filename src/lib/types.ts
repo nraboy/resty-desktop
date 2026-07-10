@@ -45,6 +45,9 @@ export interface ResticStats {
   total_size: number;
   total_file_count: number;
   snapshots_count: number;
+  /** Unix-seconds timestamp of when this value was cached. Stats are manual-refresh-only
+   *  (no background eviction) — this powers the "Refreshed …" label on RepositoriesPage. */
+  cached_at?: number | null;
 }
 
 export interface SnapshotStats {

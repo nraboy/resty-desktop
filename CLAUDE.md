@@ -47,8 +47,10 @@ src/
                    #   in BackupHandle.child regardless of manual/scheduler origin; shown only during the
                    #   "backup" phase, hidden during "retention" since apply_retention has no cancel path —
                    #   subtitle swaps to "Applying retention rules…" so the ~10-20s forget isn't mistaken for
-                   #   a frozen bar), next few due schedules (Upcoming Tasks — rows truncate with a hover
-                   #   tooltip for long plan lists), and last few backup runs (Recent Logs — neutral
+                   #   a frozen bar), in-flight repo stats refreshes (also in Active Tasks — lifecycle-only,
+                   #   no progress bar; this app's first stateful consumer of the unified `task` event bus,
+                   #   see Operation Event Bus), next few due schedules (Upcoming Tasks — rows truncate with
+                   #   a hover tooltip for long plan lists), and last few backup runs (Recent Logs — neutral
                    #   "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries).
                    #   Restore/copy/mirror/manual backup/prune have their own progress modals and are
                    #   intentionally excluded — see lib/activity.tsx.
@@ -65,7 +67,18 @@ src/
                    #   scheduler:retention-started, upcoming due schedules (refreshed on schedules:changed,
                    #   which the scheduler emits after record_schedule_run advances next_run_at — NOT on
                    #   scheduler:backup-finished, which fires per-plan before the advance and would read a
-                   #   stale past timestamp), recentLogs. Powers ActivityPanel.tsx
+                   #   stale past timestamp), recentLogs, and statsRefreshing/statsFailed — repoId sets
+                   #   derived (via the pure, unit-tested reduceStatsOps reducer, StatsOpsState) from the
+                   #   unified `task` event bus filtered to kind "stats" rather than from a per-operation
+                   #   feed (stats never had one). Lifecycle-only, no error text: the reducer tracks
+                   #   operationId→repoId across started (also clears any prior failure marker for that
+                   #   repo)/finished/failed/cancelled to drive a spinner (statsRefreshing) and a plain
+                   #   boolean "last attempt failed" marker (statsFailed, no message — see repo.rs's
+                   #   fetch_and_cache_stats, where every failure path reports through task_ctx.failed(...)
+                   #   explicitly so this marker never depends on the invoke promise's own rejection). The
+                   #   actual numbers are re-read from the DB cache by RepositoriesPage's own `task`
+                   #   listener (only on "finished"), not carried on the event. Powers ActivityPanel.tsx and
+                   #   (for statsRefreshing/statsFailed) RepositoriesPage.tsx directly.
     format.ts      # formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration
     config.ts      # MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
     utils.ts       # needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
@@ -73,8 +86,18 @@ src/
   pages/
     AuthPage.tsx            # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx    # Add/open/delete repos; restic init for new repos; remote URL support;
-                            #   per-row and bulk stats refresh; mirror, edit, check, prune via right-click context menu;
-                            #   edit modal: name/path/password with Test Connection; prune: confirmation→progress→done
+                            #   per-row and bulk stats refresh (manual-only — no auto-eviction; see Restic
+                            #   Integration; "Refresh All" always includes remote repos, unlike every
+                            #   automatic remote activity); spinner (statsRefreshing) and failure marker
+                            #   (statsFailed, a plain boolean — no error text, see activity.tsx) both come
+                            #   from ActivityProvider's `task`-bus subscription and survive navigating away
+                            #   mid-refresh; row data comes from a page-local `task` listener re-reading
+                            #   get_repo_stats on "finished" (a guaranteed cache hit); each row shows a
+                            #   "Refreshed …" label from cached_at, and a failed refresh keeps the last-good
+                            #   value visible with a plain "refresh failed" marker rather than blanking to
+                            #   "unavailable"; mirror, edit, check, prune via right-click context menu;
+                            #   edit modal: name/path/password with Test
+                            #   Connection; prune: confirmation→progress→done
     SnapshotsPage.tsx       # Snapshot table; stale-while-revalidate cache; inline tag editor; delete with prune option;
                             #   full-snapshot restore with streaming progress; per-snapshot copy with cancellation;
                             #   pagination (PAGE_SIZE=10); filter with × clear; right-click context menu;
@@ -307,7 +330,7 @@ src-tauri/
 - `check_repo` runs `restic check --json`; duration measured via `Instant` (no timing in summary). Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore --json`; emits `restore:progress` events. Stderr drained on background thread. Serialized via a `busy` flag on `RestoreHandle` (same pattern as `BackupHandle`) — a concurrent attempt returns `"A restore is already in progress"`. Cancellable via `cancel_restore`; on cancel, a successful exit still wins over the cancelled flag (handles the race where Stop is clicked right as the restore finishes).
 - `unlock_app` runs `restic unlock` on all repos in background after password verified.
-- Stats cache evicted after backup/forget for remote repos; not auto-repopulated (restic stats reads full pack indexes).
+- Stats cache (`repo_stats_cache`) is **never auto-evicted** — not after backup, forget/retention, copy, mirror, or snapshot delete. It only changes via the Refresh row/Refresh All buttons on RepositoriesPage (`refresh_repo_stats`), which is a deliberate, user-driven-only model (the previous event-driven eviction made the page feel like it "refreshed at random" — same page, different states, for reasons the user never triggered). A failed refresh leaves the last-good cached value in place. Each row shows the cached value's `cached_at` as a "Refreshed …" label (see `ResticStats.cached_at`, `repo_stats_cache.cached_at`).
 
 ## Concurrency: Per-Repository Lock Registry
 
@@ -450,17 +473,41 @@ outer commands, so a cache hit that never shells out correctly emits nothing —
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — emit now, subscribe later, by design.** `src/lib/types.ts` mirrors the envelope
-(`TaskEvent`, `TaskKind`, `TaskPhase`, `TaskOrigin`, `TaskProgress`) so a future consumer has a
-ready-made contract, but **no stateful frontend code subscribes to `task`** — not
-`ActivityProvider`, not any page. This is deliberate, not an oversight: a live consumer wired
-before there's an actual feature needing it risks the same fate as an earlier, scrapped attempt at
-this pattern (over-eager re-renders, a shape that rots before it's ever exercised). The only
-frontend listener is `App.tsx`'s dev-only `console.debug("[task]", ...)` effect — stateless (never
-calls `setState`), gated on `import.meta.env.DEV`, safe to delete. The floor against "emitting into
-the void" without a live consumer is `tasks.rs`'s own test suite (a recording `TaskSink` asserting
-lifecycle ordering and the exact camelCase JSON shape) plus the shared TypeScript types keeping the
-two sides in sync.
+**Frontend scope — the first stateful consumer is `stats`, everything else still emits into the
+void.** `src/lib/types.ts` mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
+`TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
+(`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
+never had a legacy per-operation feed (the page always updated straight from the command's
+promise return), so this was the first case with no existing detail feed to duplicate or
+choreograph around. The subscription is deliberately **lifecycle-only, and text-free**: it tracks
+`operationId → repoId` across `started`/`finished`/`failed`/`cancelled` to drive both an
+in-flight spinner (`statsRefreshing`) and a plain boolean "last attempt failed" marker
+(`statsFailed`, cleared the moment a new attempt starts or a later one succeeds) — both
+surfaced in `ActivityPanel` and read directly by `RepositoriesPage`. No error *message* is ever
+carried, stored, or shown; a manual refresh only needs to tell the user "that didn't work," not
+restic's specific reason, so the marker is a `Set<repoId>`, never a `Map<repoId, string>`. This
+is also why `fetch_and_cache_stats` (`repo.rs`) creates its `OperationCtx` **before** validating
+the master key or resolving the repo, with every fallible step explicitly calling
+`task_ctx.failed(e)` rather than relying on `?` — the frontend marker has no fallback to the
+invoke promise's own rejection, so every failure path must reliably reach the bus (previously,
+auth/repo-lookup failures emitted no task event at all, and a `parse_stats_json` failure fell
+through to `OperationCtx`'s `Drop` backstop instead of an explicit call).
+
+The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
+`finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`
+writes `repo_stats_cache` before it calls `task_ctx.finished()`), rather than widening the
+envelope with a result payload. That ordering (cache write before `finished`) is intentional —
+it makes "task says finished" provably imply "cache read will see the new value," not just
+usually true.
+
+For every other kind (`backup`, `restore`, `copy`, …) **no stateful frontend code subscribes to
+`task`** yet — that remains deliberate, not an oversight: a live consumer wired before there's an
+actual feature needing it risks the same fate as an earlier, scrapped attempt at this pattern
+(over-eager re-renders, a shape that rots before it's ever exercised). `App.tsx`'s dev-only
+`console.debug("[task]", ...)` effect still covers those — stateless (never calls `setState`),
+gated on `import.meta.env.DEV`, safe to delete. The floor against "emitting into the void" for
+the rest is `tasks.rs`'s own test suite (a recording `TaskSink` asserting lifecycle ordering and
+the exact camelCase JSON shape) plus the shared TypeScript types keeping the two sides in sync.
 
 ## Security Architecture
 
@@ -510,7 +557,11 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   requests them for every repo on mount — on purpose.** It returns the cached value immediately
   when present and only shells out to `restic stats` on a cache miss; the `—` placeholder in the
   UI is specifically for remotes that have no cache yet. Do not skip remote repos in that fetch —
-  it would hide cached remote stats that are otherwise perfectly valid to show.
+  it would hide cached remote stats that are otherwise perfectly valid to show. RepositoriesPage's
+  manual "Refresh All"/per-row Refresh buttons likewise always include remote repos — unlike
+  every *automatic* remote activity (cache warmer's snapshot/index sweep, SnapshotsPage's
+  background refresh, Index All), which stay gated behind `remote_auto_refresh`, a manual refresh
+  is an explicit user request with no surprise-bandwidth concern to guard against.
 - **`browse_cache_files.parent_path` duplicates a prefix of `path` on every row, on purpose.** It
   backs the `(snap, parent_path)` directory-listing index — a deliberate storage-for-speed
   trade-off, and the single largest contributor to that table's size. Acceptable.
@@ -520,10 +571,12 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `tauri::async_runtime::spawn_blocking` + guarded by `searchSeqRef` on the frontend. An FTS5 or
   trigram index would fix the underlying scan but needs a schema migration — a deliberately
   deferred future improvement.
-- **`cached_at` columns (`snapshots_cache`, `browse_cache_status`, `repo_stats_cache`) are written
-  on every update but not currently read by any query.** They're kept for a possible future
-  staleness/TTL feature; today, staleness is handled entirely by explicit refresh/evict calls.
-  Not dead weight to be dropped without that feature landing.
+- **`cached_at` columns (`snapshots_cache`, `browse_cache_status`) are written on every update but
+  not currently read by any query.** They're kept for a possible future staleness/TTL feature;
+  today, staleness is handled entirely by explicit refresh/evict calls. Not dead weight to be
+  dropped without that feature landing. `repo_stats_cache.cached_at` is the exception — it now has
+  a reader: `get_stats`/`set_stats` (`cache.rs`) return it, and `ResticStats.cached_at` surfaces it
+  as RepositoriesPage's "Refreshed …" label (see Restic Integration).
 - **`panic = "abort"` is deliberately not set** in `src-tauri/Cargo.toml`'s release profile (see
   Build Profile). The code is written to survive worker-thread panics — `spawn_blocking` results
   are handled via `.unwrap_or(false)` patterns, and `AppDb`'s `Mutex<Connection>` poison errors are

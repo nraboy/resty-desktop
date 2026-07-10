@@ -1,8 +1,12 @@
 // Right-side activity overlay surfacing background activity the user has no other
-// visibility into: auto-indexing progress and scheduler-triggered backups (ACTIVE TASKS),
-// the next couple of due schedules (UPCOMING TASKS), and the last couple of backup runs
-// (RECENT LOGS). Restore/copy/mirror/manual backup/prune already have their own progress
-// modals and are intentionally excluded — see src/lib/activity.tsx.
+// visibility into: auto-indexing progress, scheduler-triggered backups, and in-flight repo
+// stats refreshes (ACTIVE TASKS), the next couple of due schedules (UPCOMING TASKS), and the
+// last couple of backup runs (RECENT LOGS). Restore/copy/mirror/manual backup/prune already
+// have their own progress modals and are intentionally excluded — see src/lib/activity.tsx.
+// The stats row is this app's first consumer of the unified `task` event bus rather than a
+// per-operation legacy feed (stats never had one) — it's lifecycle-only (no progress bar,
+// since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
+// actual per-row numbers via its own `task` listener re-reading the DB cache.
 //
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
@@ -18,6 +22,7 @@ import { useActivity } from "../lib/activity";
 import { cancelBackup } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
+import Spinner from "./Spinner";
 
 function ProgressBar({ percent, colorClass = "bg-blue-500" }: { percent: number; colorClass?: string }) {
   return (
@@ -71,11 +76,11 @@ function StopIcon() {
 }
 
 export default function ActivityPanel() {
-  const { indexing, activeBackup, upcoming, recentLogs } = useActivity();
+  const { indexing, activeBackup, upcoming, recentLogs, statsRefreshing } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
 
-  const hasActive = indexing != null || activeBackup != null;
+  const hasActive = indexing != null || activeBackup != null || statsRefreshing.length > 0;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -175,6 +180,14 @@ export default function ActivityPanel() {
                       : activeBackup.progress
                       ? `${activeBackup.progress.filesDone.toLocaleString()} / ${activeBackup.progress.totalFiles.toLocaleString()} files`
                       : "Starting…"}
+                  </p>
+                </div>
+              )}
+              {statsRefreshing.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Spinner className="w-3.5 h-3.5 flex-shrink-0" />
+                  <p className="text-sm text-gray-200">
+                    Refreshing stats — {statsRefreshing.length} {statsRefreshing.length === 1 ? "repository" : "repositories"}
                   </p>
                 </div>
               )}
