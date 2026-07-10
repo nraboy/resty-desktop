@@ -217,9 +217,6 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let restic_path = crate::commands::get_restic_path(&db);
     let app2 = app.clone();
 
-    let emit_repo_id = repo_id.clone();
-    let emit_snapshot_id = snapshot_id.clone();
-
     let task_ctx = OperationCtx::new(
         app.clone(),
         TaskKind::Index,
@@ -251,12 +248,6 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     } else {
         task_ctx.failed("Indexing failed");
     }
-
-    let _ = app.emit("index:done", serde_json::json!({
-        "snapshotId": emit_snapshot_id,
-        "repoId": emit_repo_id,
-        "success": ok,
-    }));
 
     if ok { SweepResult::Indexed } else { SweepResult::NothingLeft }
 }

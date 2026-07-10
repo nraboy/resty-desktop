@@ -1,12 +1,21 @@
 // Right-side activity overlay surfacing background activity the user has no other
-// visibility into: auto-indexing progress, scheduler-triggered backups, and in-flight repo
-// stats refreshes (ACTIVE TASKS), the next couple of due schedules (UPCOMING TASKS), and the
-// last couple of backup runs (RECENT LOGS). Restore/copy/mirror/manual backup/prune already
-// have their own progress modals and are intentionally excluded — see src/lib/activity.tsx.
+// visibility into: auto-indexing progress, scheduler-triggered backups, in-flight repo
+// stats refreshes, and the manual "Index All" batch (ACTIVE TASKS), the next couple of due
+// schedules (UPCOMING TASKS), and the last couple of backup runs (RECENT LOGS).
+// Restore/copy/mirror/manual backup/prune already have their own progress modals and are
+// intentionally excluded — see src/lib/activity.tsx. "Index All" is the one exception: its
+// modal (RepoSearchPage) is explicitly dismissible while the batch keeps running in the
+// background, so — unlike those other modals — it needs a way to stay visible and cancellable
+// after the modal closes.
 // The stats row is this app's first consumer of the unified `task` event bus rather than a
 // per-operation legacy feed (stats never had one) — it's lifecycle-only (no progress bar,
 // since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
-// actual per-row numbers via its own `task` listener re-reading the DB cache.
+// actual per-row numbers via its own `task` listener re-reading the DB cache. The "Index All"
+// rows are a later consumer of the same bus, and the first to read `progress` (itemsDone/
+// itemsTotal) rather than treat the bus purely as a lifecycle signal — see activity.tsx's
+// reduceIndexBatches. There can be more than one such row at once: each batch gets its own
+// cancel flag on the backend (IndexHandle::batches, cache.rs), so concurrent "Index All" runs
+// (e.g. for different repos) are tracked and stoppable independently rather than colliding.
 //
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
@@ -19,7 +28,7 @@
 // this once in App.tsx doesn't require every page to grow a toolbar toggle button.
 import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
-import { cancelBackup } from "../lib/invoke";
+import { cancelBackup, cancelIndexBatch } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
 import Spinner from "./Spinner";
@@ -76,11 +85,11 @@ function StopIcon() {
 }
 
 export default function ActivityPanel() {
-  const { indexing, activeBackup, upcoming, recentLogs, statsRefreshing } = useActivity();
+  const { indexing, activeBackup, upcoming, recentLogs, statsRefreshing, activeIndexBatches, indexBatchRepoNames } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
 
-  const hasActive = indexing != null || activeBackup != null || statsRefreshing.length > 0;
+  const hasActive = indexing != null || activeBackup != null || statsRefreshing.length > 0 || activeIndexBatches.length > 0;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -92,6 +101,21 @@ export default function ActivityPanel() {
   useEffect(() => {
     if (!activeBackup) setStoppingScheduled(false);
   }, [activeBackup]);
+
+  // Same pattern as stoppingScheduled above, generalized to a set since multiple "Index All"
+  // batches can be stopping independently at once. cancel_index_batch(operationId) takes effect
+  // between snapshots (see browse.rs), so an id stays in this set for however long that batch's
+  // in-flight snapshot takes to finish; it's pruned once that batch's terminal task event lands
+  // (finished/failed/cancelled — see reduceIndexBatches) and the entry disappears from
+  // activeIndexBatches.
+  const [stoppingBatchIds, setStoppingBatchIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const liveIds = new Set(activeIndexBatches.map((b) => b.operationId));
+    setStoppingBatchIds((prev) => {
+      const next = new Set([...prev].filter((id) => liveIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [activeIndexBatches]);
 
   useEffect(() => {
     if (!open) return;
@@ -150,6 +174,47 @@ export default function ActivityPanel() {
                   <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
                 </div>
               )}
+              {activeIndexBatches.map((batch) => {
+                const repoName = indexBatchRepoNames[batch.repoId];
+                const stopping = stoppingBatchIds.has(batch.operationId);
+                return (
+                  <div key={batch.operationId} className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
+                        Indexing snapshots{repoName ? ` — ${repoName}` : ""}
+                      </p>
+                      <button
+                        onClick={async () => {
+                          setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
+                          try {
+                            await cancelIndexBatch(batch.operationId);
+                          } catch {
+                            // The cancel call itself failed (e.g. a transient IPC error) — the
+                            // batch is still running untouched, so roll back the optimistic
+                            // "Stopping…" state rather than leaving Stop stuck disabled with no
+                            // way to retry.
+                            setStoppingBatchIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(batch.operationId);
+                              return next;
+                            });
+                          }
+                        }}
+                        disabled={stopping}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                      >
+                        <StopIcon />
+                      </button>
+                    </div>
+                    <ProgressBar percent={(batch.itemsDone / Math.max(1, batch.itemsTotal)) * 100} />
+                    <p className="text-xs text-gray-500">
+                      {stopping ? "Stopping…" : `${batch.itemsDone} / ${batch.itemsTotal} snapshots`}
+                    </p>
+                  </div>
+                );
+              })}
               {activeBackup && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">

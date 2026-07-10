@@ -48,7 +48,7 @@ src/
                    #   "backup" phase, hidden during "retention" since apply_retention has no cancel path —
                    #   subtitle swaps to "Applying retention rules…" so the ~10-20s forget isn't mistaken for
                    #   a frozen bar), in-flight repo stats refreshes (also in Active Tasks — lifecycle-only,
-                   #   no progress bar; this app's first stateful consumer of the unified `task` event bus,
+                   #   no progress bar; one of two stateful consumers of the unified `task` event bus,
                    #   see Operation Event Bus), next few due schedules (Upcoming Tasks — rows truncate with
                    #   a hover tooltip for long plan lists), and last few backup runs (Recent Logs — neutral
                    #   "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries).
@@ -105,8 +105,9 @@ src/
                             #   per-row "Index Snapshot" / "Remove Index" context-menu item toggles based on index status:
                             #   shows "Index Snapshot" (disabled while in_progress) or "Remove Index" (active when complete);
                             #   "Remove Index" calls clear_snapshot_index and removes the snapshot from the local status map;
-                            #   "Index Snapshot" shows a progress modal; listens for index:done to update per-row status map live;
-                            #   listens for snapshots:refreshed to reload list when warmer updates cache;
+                            #   "Index Snapshot" shows a progress modal; listens for `task` events (kind "index") to
+                            #   update per-row status map live; listens for snapshots:refreshed to reload list when
+                            #   warmer updates cache;
                             #   per-row and context-menu "Search Files" button → SearchPage
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
                             #   restore modal with strip_leading_path option; inline tag management;
@@ -118,7 +119,7 @@ src/
     SearchPage.tsx          # Full-text file search within a single snapshot at /snapshots/:repoId/:snapshotId/search;
                             #   requires snapshot to be indexed (browse_cache_files); shows index state machine
                             #   (loading→not_indexed→indexing→ready); "Index Now" triggers index_snapshot;
-                            #   listens for index:done to transition to ready; debounced 300ms search via
+                            #   listens for `task` events (kind "index") to transition to ready; debounced 300ms search via
                             #   search_snapshot_files (SQLite LIKE, capped at 200 results); clicking a result
                             #   writes restoredQuery+restoredResults into current history entry via
                             #   window.history.replaceState before navigating to BrowsePage (so navigate(-1)
@@ -135,9 +136,10 @@ src/
                             #   All" action when the repo is only partially indexed; "Index All" calls
                             #   index_snapshots_batch once (backend indexes sequentially, one snapshot at a time,
                             #   pausing the auto-indexer for the run — see browse.rs); a modal with a real
-                            #   progress bar (derived from index:done events matched against the batch's target
-                            #   snapshot ids) tracks the run, with a Stop button (cancel_index_batch; takes effect
-                            #   between snapshots) shown while in progress
+                            #   progress bar (derived from `task` events, kind "index", matched against the batch's
+                            #   target snapshot ids via targetId) tracks the run, with a Stop button (cancel_index_batch; takes effect
+                            #   between snapshots) shown while in progress; the batch also survives the modal being
+                            #   dismissed — see ActivityPanel.tsx
     DiffPage.tsx            # Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB;
                             #   client-side tree from flat entries; summary bar; restore from diff; truncation warning
     BackupPlansPage.tsx     # List/run/delete plans; backup modal with streaming progress + cancellation
@@ -217,12 +219,22 @@ src-tauri/
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
-                     #   index_snapshot (fire-and-forget manual indexing, emits index:done when complete);
+                     #   index_snapshot (fire-and-forget manual indexing; reports completion solely via a `task`
+                     #   event, kind "index" — no legacy per-operation event, see Operation Event Bus);
                      #   index_snapshots_batch ("Index All": fire-and-forget, indexes snapshot_ids sequentially
                      #   one at a time in a single spawned task — bounds memory to one snapshot's file list;
-                     #   emits index:done per snapshot, same payload as index_snapshot; a failed snapshot doesn't
-                     #   abort the batch); cancel_index_batch (sets IndexHandle::cancel; batch checks it between
-                     #   snapshots, never mid-restic); both index_snapshot and index_snapshots_batch set
+                     #   emits one `task` event per snapshot, same targetId/repoId shape as index_snapshot, *plus*
+                     #   a batch-level `task` op (no targetId — that's the discriminator from the per-snapshot
+                     #   events) that reports `progress` with itemsDone/itemsTotal as the batch advances, with its
+                     #   own fresh cancel flag + task slot registered in IndexHandle::batches under its own
+                     #   operationId (not shared across batches — lets concurrent "Index All" runs, e.g. for
+                     #   different repos, proceed and cancel fully independently) so cancel_index_batch(operation_id)
+                     #   targets exactly one batch, and is what lets ActivityPanel show each batch's progress as
+                     #   its own row, independent of RepoSearchPage's own modal — see activity.tsx's
+                     #   reduceIndexBatches; a failed snapshot doesn't abort the batch, and the loop checks its own
+                     #   cancel flag between snapshots, never mid-restic); cancel_index_batch (looks up the (cancel,
+                     #   task slot) pair for the given operation_id in IndexHandle::batches and, if found, sets
+                     #   cancel — a no-op if that batch already finished); both index_snapshot and index_snapshots_batch set
                      #   IndexHandle::manual_active for their duration (cleared via a ManualIndexGuard Drop impl
                      #   so it stays set for the whole run) so cache_warmer's auto-indexer pauses during manual
                      #   indexing, and take IndexHandle::gate (tokio::sync::Mutex<()>, held across run_full_index's
@@ -268,7 +280,8 @@ src-tauri/
                      #   Each tick: (1) refresh_all_snapshots — always runs, calls restic snapshots --json for every
                      #   eligible repo and updates snapshots_cache, emits snapshots:refreshed per repo;
                      #   (2) trigger_sweep — only runs if auto_indexing=true, continuously indexes one uncached
-                     #   snapshot at a time via run_full_index until nothing remains, emits index:done per snapshot.
+                     #   snapshot at a time via run_full_index until nothing remains, reporting each snapshot
+                     #   solely via a `task` event (kind "index", origin "background").
                      #   Both phases respect remote_auto_refresh (skip remote repos when disabled).
                      #   AtomicBool running prevents overlapping file-index sweeps. trigger_sweep/index_next also
                      #   check IndexHandle::manual_active and yield (sweep stops cleanly, retries next tick) while
@@ -397,7 +410,7 @@ collision this registry exists to prevent.
 
 `src-tauri/src/tasks.rs` defines a second, **uniform** event layer on top of the ad-hoc
 per-operation events described above (`backup:progress`, `restore:progress`, `prune:progress`,
-`index:done`, `scheduler:*`). Those events grew one at a time, so their payloads are
+`scheduler:*`). Those events grew one at a time, so their payloads are
 inconsistent — some carry no id at all, some only a display name, and roughly half the restic
 operations (`copy`, `mirror`, single-repo `prune`, `forget`/retention, `check`, `diff`,
 `restore_path`, `unlock`) emit nothing. The `task` event bus exists so every operation reports a
@@ -445,18 +458,27 @@ used specifically so every one of their several early-return points still report
 `OperationCtx` instead of falling through to the Drop backstop). `TaskSink` is a trait (implemented
 for `AppHandle`) purely so `tasks.rs`'s tests can record emitted events without a real app.
 
-Cancellable operations (backup, restore, copy, mirror, prune, and the `index_snapshots_batch`
-"Index All" batch) carry a `current_task: TaskSlot` (`Arc<Mutex<Option<TaskRef>>>`) on their
-existing handle (`BackupHandle`, `RestoreHandle`, ..., `IndexHandle`) — `OperationCtx::new`
-publishes its `TaskRef` (including the operation's `origin`, so `emit_cancelling` reports the
-operation's real origin rather than assuming every cancel is user-initiated) there on start and
-clears it on terminal; the matching `cancel_*` command calls
+Cancellable operations (backup, restore, copy, mirror, prune) carry a `current_task: TaskSlot`
+(`Arc<Mutex<Option<TaskRef>>>`) on their existing handle (`BackupHandle`, `RestoreHandle`, ...) —
+`OperationCtx::new` publishes its `TaskRef` (including the operation's `origin`, so
+`emit_cancelling` reports the operation's real origin rather than assuming every cancel is
+user-initiated) there on start and clears it on terminal; the matching `cancel_*` command calls
 `emit_cancelling(&app, &handle.current_task)` right before its existing kill/stop logic, so
 `cancelling` always precedes the `cancelled`/`finished` the operation itself emits once it actually
-stops. For the index batch specifically, `cancelling` only means "no further snapshots will start" —
-the snapshot already in flight still finishes normally (`finished`/`failed`), since cancellation is
-checked only between snapshots, never mid-`restic`. Operations with no cancel path (check, diff,
-tag, unlock, forget, single-snapshot `index_snapshot`) pass `None` for the slot.
+stops. Operations with no cancel path (check, diff, tag, unlock, forget, single-snapshot
+`index_snapshot`) pass `None` for the slot.
+
+The `index_snapshots_batch` ("Index All") batch is a deliberate exception to the shared-handle
+`current_task` pattern above: since multiple batches (e.g. for different repos) can run
+concurrently, a single `TaskSlot` on `IndexHandle` would let a second batch silently steal the
+first's cancel target (a real bug this design replaced — see `IndexHandle::batches`' doc comment
+in `cache.rs`). Instead, each batch creates its **own** fresh cancel flag + `TaskSlot` and
+registers the pair in `IndexHandle::batches: Arc<Mutex<HashMap<operationId, BatchCancel>>>` for
+its duration (deregistered on any exit via `BatchDeregisterGuard`, mirroring `ManualIndexGuard`'s
+Drop pattern). `cancel_index_batch(operation_id)` looks up that specific batch's entry and calls
+`emit_cancelling`/sets its cancel flag — a no-op if the batch already finished. `cancelling` only
+means "no further snapshots will start" — the snapshot already in flight still finishes normally
+(`finished`/`failed`), since cancellation is checked only between snapshots, never mid-`restic`.
 
 **Coverage:** every restic-shelling operation is wired, including the click-bounded metadata reads
 (`get_repo_stats`/`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the
@@ -473,8 +495,9 @@ outer commands, so a cache hit that never shells out correctly emits nothing —
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — the first stateful consumer is `stats`, everything else still emits into the
-void.** `src/lib/types.ts` mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
+**Frontend scope — three stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle, and
+`index`'s batch-level progress); everything else still emits into the void.** `src/lib/types.ts`
+mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
 (`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
 never had a legacy per-operation feed (the page always updated straight from the command's
@@ -492,6 +515,46 @@ the master key or resolving the repo, with every fallible step explicitly callin
 invoke promise's own rejection, so every failure path must reliably reach the bus (previously,
 auth/repo-lookup failures emitted no task event at all, and a `parse_stats_json` failure fell
 through to `OperationCtx`'s `Drop` backstop instead of an explicit call).
+
+`index` is the second consumer, and the first case of a **legacy event fully retired** rather than
+added alongside — the old `index:done` event (emitted by `index_snapshot`, `index_snapshots_batch`,
+and `cache_warmer`'s auto-indexer) was removed outright once its four listeners
+(`activity.tsx`, `SnapshotsPage`, `SearchPage`, `RepoSearchPage`) were ported to `task`, since the
+envelope already carried a strict superset of its payload (`snapshotId`→`targetId`, `repoId`,
+`success`→`phase`). Each listener filters to `kind === "index"` and a terminal phase
+(`"finished"`/`"failed"`); `activity.tsx` uses it as a pure lifecycle trigger for `refreshIndexing`
+(same as its unmigrated `snapshots:refreshed` listener), while the three page-level listeners read
+`targetId`/`phase` directly to drive per-row index-status maps and the "Index All" batch progress
+UI — a case where, unlike `stats`, the event payload itself (not just its lifecycle) is consumed.
+`snapshots:refreshed` remains on the legacy path deliberately: it's `cache_warmer`'s
+`refresh_all_snapshots` tick, which is excluded from the `task` bus entirely (see the coverage
+exclusions above).
+
+`index_snapshots_batch` ("Index All") additionally emits a **batch-level** `task` op alongside its
+per-snapshot ones — `kind: "index"`, `origin: "manual"`, but with **no `targetId`**, which is the
+only thing that distinguishes it from the per-snapshot events on the wire (see `browse.rs`'s
+`index_snapshots_batch` doc comment). It reports `phase: "progress"` with `itemsDone`/`itemsTotal`
+as the batch advances. Each batch owns its own cancel flag + task slot rather than sharing one
+across every batch (see `IndexHandle::batches`, `cache.rs`), so `cancel_index_batch(operation_id)`
+targets exactly one running batch. `ActivityProvider` (`activity.tsx`) tracks these ops via
+`reduceIndexBatches` — its first case of reading `progress` off the bus rather than treating it
+purely as a lifecycle signal — as a `Map<operationId, ActiveIndexBatch>` (the same shape
+`StatsOpsState` already uses for concurrent stats refreshes), exposed as `activeIndexBatches: []`;
+`ActivityPanel` renders **one row per active batch**, each a determinate "X / N snapshots" bar with
+its own Stop button in Active Tasks. Each event only carries `repoId`, so `ActivityProvider`
+separately resolves display names via a single `listRepos()` call covering the whole set of
+currently-active batches' repoIds (`indexBatchRepoNames`, re-fetched whenever that set changes) —
+the same by-id lookup `loadUpcoming` does for plan names, just async since a batch can start at any
+time; falls back to a repo-less label per batch if the lookup fails or that repo was deleted
+mid-batch. This is deliberately the one exception to "restore/copy/mirror/manual backup/prune
+already have their own progress modals and are intentionally excluded" (see `ActivityPanel.tsx`'s
+header comment): "Index All"'s modal (`RepoSearchPage`) is explicitly dismissible while its batch
+keeps running, so unlike those other modals it needs a way to stay visible and cancellable after
+the modal closes — `RepoSearchPage`'s own Stop button captures its batch's `operationId` from the
+same `started` task event (see the page's `task` listener) so it targets only its own batch,
+independent of any other batch running elsewhere. The existing per-snapshot listeners
+(`SnapshotsPage`/`SearchPage`/`RepoSearchPage`) already guard on `targetId` being set, so they
+transparently ignore every batch-level op with no changes required.
 
 The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
 `finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`
@@ -585,7 +648,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 - **Known, deferred (not novel) frontend duplication:** the search/index/debounce pattern, the
   `FileIcon` component, and the `browseTarget` helper are each duplicated across
   `SearchPage.tsx`, `RepoSearchPage.tsx`, and (partially) `BrowsePage.tsx`/`DiffPage.tsx`;
-  `RepoSearchPage` re-subscribes its `index:done` listener on every keystroke; every page
+  `RepoSearchPage` re-subscribes its `task` (index) listener on every keystroke; every page
   independently calls `listRepos()` on mount instead of sharing a cache; `BrowsePage` renders a
   directory's full entry list with no pagination or virtualization. All are known and intentionally
   deferred (structural refactor / new dependency required) — revisit deliberately, don't
@@ -602,6 +665,22 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   UX than the self-correcting fluctuation (it always lands at 100%); the indeterminate variant needs
   a new `ProgressBar` + a scan-stabilization heuristic. Don't re-investigate without revisiting that
   trade-off.
+- **`IndexHandle::gate` must stay a single, app-wide `tokio::sync::Mutex<()>` — never split it
+  per-batch, per-repo, or otherwise widen indexing concurrency.** Pre-v0.2.1, "Index All" fanned
+  out one concurrent `index_snapshot` call per snapshot (each spawning its own `restic ls`
+  process, each materializing a full file list in memory) — reported to use 33GB RAM and crash
+  the app on large repos (see commit `31b7240`). `gate`, held across every `run_full_index` call
+  from every caller (`index_snapshot`, `index_snapshots_batch`'s per-snapshot loop, and
+  `cache_warmer`'s auto-indexer), is what guarantees strictly one indexing process runs app-wide,
+  ever — this is the actual fix, not batching or sequencing by itself. `IndexHandle::batches`
+  (the per-batch cancel-flag/task-slot registry that lets multiple "Index All" runs, e.g. for
+  different repos, be tracked and cancelled independently in the Activity panel) is a *bookkeeping*
+  change layered on top and does not affect this: every batch still calls `gate.lock().await`
+  before each `run_full_index`, so N concurrently-running batches still only ever have one
+  `restic ls` in flight at a time, taking turns snapshot-by-snapshot through the same mutex — the
+  memory ceiling is unchanged from post-v0.2.1. Do not "simplify" by giving `gate` per-batch scope
+  to let batches truly run in parallel; that reopens the exact incident this mutex exists to
+  prevent.
 
 ## Import / Export
 

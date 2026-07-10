@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::str::FromStr;
 
@@ -223,13 +224,27 @@ pub struct IndexHandle {
     /// auto-indexer paths, held across the `spawn_blocking(...).await`. Closes
     /// the race where the auto sweep is already mid-index when manual
     /// indexing starts — guarantees strictly one indexing process at a time.
+    /// Legitimately global (unlike `batches` below): this bounds how many
+    /// `restic` processes run concurrently, not which logical batch owns them.
     pub gate: Arc<tokio::sync::Mutex<()>>,
-    /// Set by `cancel_index_batch` to stop an in-progress "Index All" batch
-    /// between snapshots (never mid-`restic`).
+    /// Per-batch cancel flag + task slot, keyed by operationId, so concurrent
+    /// "Index All" batches (e.g. different repos running at once) can be
+    /// cancelled independently instead of sharing one flag/slot across every
+    /// batch — a prior single-shared-field design meant starting a second
+    /// batch could silently steal the first's cancel target, and clicking Stop
+    /// on one batch could kill both. Populated by `index_snapshots_batch` when
+    /// a batch starts, removed when it reaches a terminal state (see
+    /// `BatchDeregisterGuard` in browse.rs).
+    pub batches: Arc<Mutex<HashMap<String, BatchCancel>>>,
+}
+
+/// One batch's cancel flag + task slot, registered in `IndexHandle::batches` for the
+/// duration of an `index_snapshots_batch` run. `cancel_index_batch` looks this up by
+/// operationId so it can target exactly one running batch.
+#[derive(Clone)]
+pub struct BatchCancel {
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// Identity of the snapshot `index_snapshots_batch` is currently indexing, if
-    /// any — read by `cancel_index_batch` to emit a `Cancelling` event. See tasks.rs.
-    pub current_task: TaskSlot,
+    pub task_slot: TaskSlot,
 }
 
 impl IndexHandle {
@@ -237,8 +252,7 @@ impl IndexHandle {
         Self {
             manual_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gate: Arc::new(tokio::sync::Mutex::new(())),
-            current_task: new_task_slot(),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            batches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

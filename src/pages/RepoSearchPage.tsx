@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { cancelIndexBatch, getSnapshotIndexStatus, indexSnapshotsBatch, listSnapshots, searchRepoFiles } from "../lib/invoke";
-import type { RepoFileHit, Snapshot } from "../lib/types";
+import type { RepoFileHit, Snapshot, TaskEvent } from "../lib/types";
 import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -54,6 +54,14 @@ export default function RepoSearchPage() {
   const [indexAllCompleted, setIndexAllCompleted] = useState<Set<string>>(new Set());
   const [indexAllStopped, setIndexAllStopped] = useState(false);
   const indexAllTargetsRef = useRef<string[]>([]);
+  // Captured from the batch-level task event's "started" phase (see the task listener below) so
+  // handleStopIndexAll can target this page's own batch specifically — cancel_index_batch now
+  // takes an operationId (see IndexHandle::batches, cache.rs) since multiple "Index All" batches
+  // can run concurrently and each needs to be cancellable independently. State (not a ref) so the
+  // Stop button below can disable itself reactively while this is still null — the modal opens
+  // (and Stop becomes visible) immediately, but the "started" event carrying the id is an async
+  // round-trip behind it; without this, a Stop click in that window would silently no-op.
+  const [batchOperationId, setBatchOperationId] = useState<string | null>(null);
 
   const [query, setQuery] = useState(locationState?.restoredQuery ?? "");
   const [results, setResults] = useState<RepoFileHit[]>(locationState?.restoredResults ?? []);
@@ -110,7 +118,7 @@ export default function RepoSearchPage() {
   }, [repoId]);
 
   // Guards against out-of-order responses: the backend query can take a second
-  // or more, so a burst of keystrokes (or an index:done-triggered re-search) can
+  // or more, so a burst of keystrokes (or a task-event-triggered re-search) can
   // have several searches in flight at once. Only the response matching the
   // latest call is allowed to update state.
   const searchSeqRef = useRef(0);
@@ -144,18 +152,30 @@ export default function RepoSearchPage() {
     if (!repoId) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen<{ snapshotId: string; repoId: string; success: boolean }>("index:done", (e) => {
-      if (e.payload.repoId !== repoId) return;
-      setIndexStatus((prev) => ({ ...prev, [e.payload.snapshotId]: e.payload.success ? "complete" : "pending" }));
-      if (indexAllTargetsRef.current.includes(e.payload.snapshotId)) {
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "index" || t.repoId !== repoId) return;
+      // The batch-level op (no targetId) — capture its operationId so Stop can target this
+      // page's own batch specifically, independent of any other batch running elsewhere.
+      if (!t.targetId) {
+        if (t.origin === "manual" && t.phase === "started") {
+          setBatchOperationId(t.operationId);
+        }
+        return;
+      }
+      if (t.phase !== "finished" && t.phase !== "failed") return;
+      const snapshotId = t.targetId;
+      const success = t.phase === "finished";
+      setIndexStatus((prev) => ({ ...prev, [snapshotId]: success ? "complete" : "pending" }));
+      if (indexAllTargetsRef.current.includes(snapshotId)) {
         setIndexAllCompleted((prev) => {
-          if (prev.has(e.payload.snapshotId)) return prev;
+          if (prev.has(snapshotId)) return prev;
           const next = new Set(prev);
-          next.add(e.payload.snapshotId);
+          next.add(snapshotId);
           return next;
         });
       }
-      if (e.payload.success) {
+      if (success) {
         setIndexState("ready");
         if (query.trim()) runSearch(query);
       }
@@ -178,10 +198,14 @@ export default function RepoSearchPage() {
     setIndexAllStopped(false);
     setIndexAllTargets(targets);
     setIndexAllOpen(true);
+    // Cleared so a stale id from a prior run can't be used by a Stop click landing before this
+    // run's own "started" task event arrives and repopulates it (see the task listener above) —
+    // and so the Stop button (disabled while this is null) correctly starts disabled again.
+    setBatchOperationId(null);
     try {
       // Indexed sequentially, one snapshot at a time, by the backend — bounds
       // memory to a single snapshot's file list and pauses the background
-      // auto-indexer for the duration. Progress arrives via index:done below.
+      // auto-indexer for the duration. Progress arrives via the task listener below.
       await indexSnapshotsBatch(repoId, targets);
     } catch {
       setIndexAllError("Failed to start indexing.");
@@ -189,8 +213,11 @@ export default function RepoSearchPage() {
   };
 
   const handleStopIndexAll = async () => {
+    // Guarded by the Stop button's own `disabled` prop below, but re-checked here too since
+    // this is also reachable while disabled=true briefly re-renders (belt and suspenders).
+    if (!batchOperationId) return;
     try {
-      await cancelIndexBatch();
+      await cancelIndexBatch(batchOperationId);
       setIndexAllStopped(true);
     } catch {
       // best-effort; batch will keep running if this fails
@@ -402,7 +429,14 @@ export default function RepoSearchPage() {
               indexing continues in the background.
             </p>
             <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={handleStopIndexAll}>Stop</Button>
+              <Button
+                variant="secondary"
+                onClick={handleStopIndexAll}
+                disabled={!batchOperationId}
+                title={batchOperationId ? undefined : "Starting…"}
+              >
+                Stop
+              </Button>
               <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
             </div>
           </div>

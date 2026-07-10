@@ -21,6 +21,32 @@
 // stats numbers are likewise never carried on the event; RepositoriesPage re-reads them from
 // the DB cache via getRepoStats, which the backend command already writes to before it emits
 // `finished`.
+//
+// The same `task` listener also drives `refreshIndexing` on a terminal `kind: "index"` event —
+// the second stateful consumer of the bus, replacing the legacy `index:done` event (removed).
+// Index terminal events carry no data this effect needs (indexing progress is re-derived via
+// `loadIndexing`/`getIndexProgress`, not from the event payload), so, like stats, this is a pure
+// lifecycle trigger.
+//
+// `activeIndexBatches` is a third consumer, and the first to read the event's `progress` payload
+// rather than treat the bus purely as a lifecycle signal. The manual "Index All" batch
+// (index_snapshots_batch, browse.rs) emits one `task` op per snapshot (kind "index", targetId =
+// snapshot id — same shape refreshIndexing reacts to above) *plus* a single batch-level op with
+// no targetId, carrying `progress.itemsDone`/`itemsTotal`. The absence of `targetId` is what
+// tells the two apart on the wire — see reduceIndexBatches. This is what lets a batch stay
+// visible (with a Stop affordance) after its owning modal (RepoSearchPage) is dismissed or the
+// user navigates away, matching activeBackup's scheduler-visibility model above.
+//
+// Tracked as a `Map<operationId, ActiveIndexBatch>` (mirrored into `activeIndexBatches: []` for
+// consumers), the same shape `StatsOpsState` already uses for concurrent stats refreshes, rather
+// than a single `ActiveIndexBatch | null` — multiple "Index All" batches (e.g. for different
+// repos) can genuinely run at once; the backend gives each its own cancel flag and task slot
+// (see IndexHandle::batches, cache.rs) specifically so they don't clobber each other, so the
+// frontend needs to track them independently too rather than collapsing to one slot. Each
+// batch's `task` events only carry `repoId`, not a display name, so `indexBatchRepoNames`
+// resolves the *set* of repoIds among active batches to names via listRepos() — the same by-id
+// lookup loadUpcoming already does for plan names, just async instead of inline since a batch
+// can start at any time rather than only on mount/refetch.
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -28,6 +54,7 @@ import {
   getIndexProgress,
   listBackupHistory,
   listBackupPlans,
+  listRepos,
   listSchedules,
 } from "./invoke";
 import type { BackupHistoryEntry, BackupProgress, Schedule, TaskEvent } from "./types";
@@ -67,8 +94,25 @@ interface ActivityState {
    *  new attempt starts or a later attempt succeeds. No error text; see the module doc comment
    *  above for why a plain marker is the deliberate choice here. */
   statsFailed: string[];
+  /** Every in-progress "Index All" batch (RepoSearchPage), across all repos — empty when none
+   *  are running. Populated from each batch-level `task` op (kind "index", no targetId); see the
+   *  module doc comment above and reduceIndexBatches. */
+  activeIndexBatches: ActiveIndexBatch[];
+  /** Display names for the repoIds among `activeIndexBatches`, resolved via listRepos() (the
+   *  event only carries the id — see the module doc comment above), keyed by repoId. A missing
+   *  or null entry means still resolving or the repo can no longer be found (e.g. deleted
+   *  mid-batch); the panel falls back to a generic label in that case rather than a raw id. */
+  indexBatchRepoNames: Record<string, string | null>;
   /** Bumped every 60s so relative-time labels ("in 3 hours") stay fresh without a refetch. */
   clockTick: number;
+}
+
+/** The manual "Index All" batch currently in flight, derived from its batch-level `task` op. */
+export interface ActiveIndexBatch {
+  operationId: string;
+  repoId: string;
+  itemsDone: number;
+  itemsTotal: number;
 }
 
 /** In-flight `stats` task operations (operationId -> repoId, so concurrent refreshes — e.g.
@@ -109,6 +153,46 @@ export function reduceStatsOps(state: StatsOpsState, event: TaskEvent): StatsOps
   return { inFlight, failed };
 }
 
+/** Pure reducer over `index`-kind task events, isolating batch-level "Index All" ops (one entry
+ *  per concurrently-running batch, keyed by operationId — see the module doc comment above) from
+ *  the per-snapshot ones that share the same kind. A per-snapshot op (targetId set) is ignored.
+ *  Returns the same `state` reference whenever nothing changes so the caller can skip a
+ *  re-render. Exported for a unit test (see activity.test.ts). */
+export function reduceIndexBatches(
+  state: Map<string, ActiveIndexBatch>,
+  event: TaskEvent
+): Map<string, ActiveIndexBatch> {
+  if (event.kind !== "index" || event.origin !== "manual" || event.targetId) return state;
+  switch (event.phase) {
+    case "started": {
+      const next = new Map(state);
+      next.set(event.operationId, { operationId: event.operationId, repoId: event.repoId, itemsDone: 0, itemsTotal: 0 });
+      return next;
+    }
+    case "progress": {
+      const existing = state.get(event.operationId);
+      if (!existing) return state;
+      const next = new Map(state);
+      next.set(event.operationId, {
+        ...existing,
+        itemsDone: event.progress?.itemsDone ?? existing.itemsDone,
+        itemsTotal: event.progress?.itemsTotal ?? existing.itemsTotal,
+      });
+      return next;
+    }
+    case "finished":
+    case "failed":
+    case "cancelled": {
+      if (!state.has(event.operationId)) return state;
+      const next = new Map(state);
+      next.delete(event.operationId);
+      return next;
+    }
+    default:
+      return state; // "cancelling" — no state change, Stop's disabled/"Stopping…" is local UI state
+  }
+}
+
 const ActivityContext = createContext<ActivityState | null>(null);
 
 export function useActivity(): ActivityState {
@@ -147,12 +231,18 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [recentLogs, setRecentLogs] = useState<BackupHistoryEntry[]>([]);
   const [statsRefreshing, setStatsRefreshing] = useState<string[]>([]);
   const [statsFailed, setStatsFailed] = useState<string[]>([]);
+  const [activeIndexBatches, setActiveIndexBatches] = useState<ActiveIndexBatch[]>([]);
+  const [indexBatchRepoNames, setIndexBatchRepoNames] = useState<Record<string, string | null>>({});
   const [clockTick, setClockTick] = useState(0);
   // Holds name/plan between "started" and the first "backup:progress" payload.
   const pendingBackupRef = useRef<{ scheduleName: string; planName: string } | null>(null);
   // statsRefreshing/statsFailed (both deduped repoId arrays) are derived from this on every
   // "task" event via reduceStatsOps.
   const statsOpsRef = useRef<StatsOpsState>(initialStatsOpsState);
+  // activeIndexBatches is derived from this on every "task" event via reduceIndexBatches;
+  // mirrored into a ref (like statsOpsRef) so the listener can compare by reference and only
+  // call setActiveIndexBatches when the set of batches actually changed.
+  const indexBatchesRef = useRef<Map<string, ActiveIndexBatch>>(new Map());
 
   const refreshIndexing = () => { loadIndexing().then(setIndexing).catch(() => {}); };
   const refreshUpcoming = () => { loadUpcoming().then(setUpcoming).catch(() => {}); };
@@ -165,7 +255,6 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
 
     const tickTimer = setInterval(() => setClockTick((t) => t + 1), 60_000);
 
-    const unlistenIndexDone = listen("index:done", refreshIndexing);
     const unlistenSnapshotsRefreshed = listen("snapshots:refreshed", refreshIndexing);
     const unlistenSchedulesChanged = listen("schedules:changed", refreshUpcoming);
 
@@ -202,18 +291,30 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     // scheduled run happened to refresh it.
     const unlistenHistoryUpdated = listen("backup:history-updated", refreshLogs);
 
-    // First subscriber to the unified `task` bus — see module doc comment above. Only
-    // "stats" kind events are consumed; every other kind is ignored here (it's still
+    // Subscriber to the unified `task` bus — see module doc comment above. "stats" kind
+    // events drive statsRefreshing/statsFailed; "index" kind events (replacing the legacy
+    // index:done) trigger a plain refetch, and each batch-level "index" op (no targetId)
+    // additionally drives activeIndexBatches. Every other kind is ignored here (it's still
     // observed by App.tsx's dev-only console.debug effect).
     const unlistenTask = listen<TaskEvent>("task", (e) => {
       statsOpsRef.current = reduceStatsOps(statsOpsRef.current, e.payload);
       setStatsRefreshing([...new Set(statsOpsRef.current.inFlight.values())]);
       setStatsFailed([...statsOpsRef.current.failed]);
+      if (
+        e.payload.kind === "index" &&
+        (e.payload.phase === "finished" || e.payload.phase === "failed")
+      ) {
+        refreshIndexing();
+      }
+      const nextBatches = reduceIndexBatches(indexBatchesRef.current, e.payload);
+      if (nextBatches !== indexBatchesRef.current) {
+        indexBatchesRef.current = nextBatches;
+        setActiveIndexBatches([...nextBatches.values()]);
+      }
     });
 
     return () => {
       clearInterval(tickTimer);
-      unlistenIndexDone.then((fn) => fn());
       unlistenSnapshotsRefreshed.then((fn) => fn());
       unlistenSchedulesChanged.then((fn) => fn());
       unlistenBackupStarted.then((fn) => fn());
@@ -225,9 +326,36 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // The task event only carries repoId, not a display name — resolve the whole set of
+  // currently-active batches' repoIds in one listRepos() call (same by-id lookup loadUpcoming
+  // does for plan names above) whenever that set changes. Joined into a stable string key so the
+  // effect only re-runs when the actual set of repos changes, not on every progress tick. Falls
+  // back to null per id (panel shows a generic label) if a repo can't be found or the lookup
+  // fails, including the rare case of a repo being deleted mid-batch.
+  const batchRepoIdsKey = [...new Set(activeIndexBatches.map((b) => b.repoId))].sort().join(",");
+  useEffect(() => {
+    const repoIds = batchRepoIdsKey ? batchRepoIdsKey.split(",") : [];
+    if (repoIds.length === 0) { setIndexBatchRepoNames({}); return; }
+    let cancelled = false;
+    listRepos()
+      .then((repos) => {
+        if (cancelled) return;
+        const names: Record<string, string | null> = {};
+        for (const id of repoIds) names[id] = repos.find((r) => r.id === id)?.name ?? null;
+        setIndexBatchRepoNames(names);
+      })
+      .catch(() => {
+        if (!cancelled) setIndexBatchRepoNames(Object.fromEntries(repoIds.map((id) => [id, null])));
+      });
+    return () => { cancelled = true; };
+  }, [batchRepoIdsKey]);
+
   return (
     <ActivityContext.Provider
-      value={{ indexing, activeBackup, upcoming, recentLogs, statsRefreshing, statsFailed, clockTick }}
+      value={{
+        indexing, activeBackup, upcoming, recentLogs, statsRefreshing, statsFailed,
+        activeIndexBatches, indexBatchRepoNames, clockTick,
+      }}
     >
       {children}
     </ActivityContext.Provider>

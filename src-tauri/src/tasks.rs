@@ -289,9 +289,10 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         }
     }
 
-    /// Exposed for tests/future callers that need to correlate the started event's
-    /// id with the operation still in flight; not read by any wired call site today.
-    #[allow(dead_code)]
+    /// Exposed for callers that need to correlate the started event's id with the
+    /// operation still in flight. Wired: `index_snapshots_batch` (browse.rs) reads this
+    /// to register its batch-level cancel flag/task slot in `IndexHandle::batches` under
+    /// the same id the `started` event already carries.
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }

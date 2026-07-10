@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
-import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats } from "../lib/types";
+import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
 import Button from "../components/Button";
@@ -103,9 +103,13 @@ export default function SnapshotsPage() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen<{ snapshotId: string; repoId: string; success: boolean }>("index:done", (e) => {
-      if (e.payload.repoId !== repoId) return;
-      const { snapshotId, success } = e.payload;
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "index") return;
+      if (t.phase !== "finished" && t.phase !== "failed") return;
+      if (t.repoId !== repoId || !t.targetId) return;
+      const snapshotId = t.targetId;
+      const success = t.phase === "finished";
       setIndexStatus((prev) => ({
         ...prev,
         [snapshotId]: success ? "complete" : "pending",

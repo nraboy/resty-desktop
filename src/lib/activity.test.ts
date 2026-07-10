@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, type StatsOpsState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -88,5 +88,92 @@ describe("reduceStatsOps", () => {
 
     state = reduceStatsOps(state, taskEvent({ operationId: "op1", repoId: "repoA", phase: "finished" }));
     expect([...state.inFlight.values()]).toEqual(["repoB"]);
+  });
+});
+
+describe("reduceIndexBatches", () => {
+  const empty = new Map();
+
+  it("starts a batch with zeroed progress", () => {
+    const state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 0, itemsTotal: 0 });
+  });
+
+  it("updates itemsDone/itemsTotal from a matching progress event", () => {
+    let state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
+    state = reduceIndexBatches(state, taskEvent({
+      kind: "index", operationId: "batch1", repoId: "repoA", phase: "progress",
+      progress: { itemsDone: 3, itemsTotal: 10 },
+    }));
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 3, itemsTotal: 10 });
+  });
+
+  it("clears the matching operationId on finished/failed/cancelled", () => {
+    for (const phase of ["finished", "failed", "cancelled"] as const) {
+      const started = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
+      const cleared = reduceIndexBatches(started, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase }));
+      expect(cleared.has("batch1")).toBe(false);
+    }
+  });
+
+  it("ignores a per-snapshot index event (targetId set)", () => {
+    const state = reduceIndexBatches(empty, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", phase: "finished", targetId: "snap1",
+    }));
+    expect(state.size).toBe(0);
+  });
+
+  it("a running batch is untouched by a concurrent per-snapshot event", () => {
+    const started = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
+    const result = reduceIndexBatches(started, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", phase: "finished", targetId: "snap1",
+    }));
+    expect(result).toBe(started);
+  });
+
+  it("ignores the background auto-indexer's index events", () => {
+    const state = reduceIndexBatches(empty, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", phase: "started", origin: "background", targetId: "snap1",
+    }));
+    expect(state.size).toBe(0);
+  });
+
+  it("ignores non-index task kinds", () => {
+    const state = reduceIndexBatches(empty, taskEvent({ kind: "stats", phase: "started" }));
+    expect(state.size).toBe(0);
+  });
+
+  it("a terminal event for an unknown operationId is a no-op", () => {
+    const started = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch2", repoId: "repoA", phase: "started" }));
+    const result = reduceIndexBatches(started, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "finished" }));
+    expect(result).toBe(started);
+  });
+
+  it("a progress event for an unknown operationId is a no-op", () => {
+    const started = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch2", repoId: "repoA", phase: "started" }));
+    const result = reduceIndexBatches(started, taskEvent({
+      kind: "index", operationId: "batch1", repoId: "repoA", phase: "progress",
+      progress: { itemsDone: 5, itemsTotal: 10 },
+    }));
+    expect(result).toBe(started);
+  });
+
+  it("tracks two concurrent batches (different repos) independently", () => {
+    let state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batchA", repoId: "repoA", phase: "started" }));
+    state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batchB", repoId: "repoB", phase: "started" }));
+    expect(state.size).toBe(2);
+
+    state = reduceIndexBatches(state, taskEvent({
+      kind: "index", operationId: "batchA", repoId: "repoA", phase: "progress",
+      progress: { itemsDone: 4, itemsTotal: 9 },
+    }));
+    // Updating batchA's progress must not touch batchB's entry.
+    expect(state.get("batchA")).toEqual({ operationId: "batchA", repoId: "repoA", itemsDone: 4, itemsTotal: 9 });
+    expect(state.get("batchB")).toEqual({ operationId: "batchB", repoId: "repoB", itemsDone: 0, itemsTotal: 0 });
+
+    // Finishing batchA alone must not remove batchB.
+    state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batchA", repoId: "repoA", phase: "finished" }));
+    expect(state.has("batchA")).toBe(false);
+    expect(state.has("batchB")).toBe(true);
   });
 });

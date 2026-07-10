@@ -8,7 +8,7 @@ use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
-use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
+use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -483,6 +483,21 @@ impl Drop for ManualIndexGuard {
     }
 }
 
+/// Deregisters a batch's entry from `IndexHandle::batches` on every exit path (mirrors
+/// `ManualIndexGuard`'s Drop pattern) so `cancel_index_batch` can never target a batch
+/// that has already finished — see `IndexHandle::batches`' doc comment (cache.rs).
+struct BatchDeregisterGuard {
+    registry: std::sync::Arc<std::sync::Mutex<HashMap<String, super::cache::BatchCancel>>>,
+    operation_id: String,
+}
+impl Drop for BatchDeregisterGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.registry.lock() {
+            map.remove(&self.operation_id);
+        }
+    }
+}
+
 /// Manually trigger full indexing for a snapshot. Fire-and-forget: returns
 /// immediately and runs the index in the background. Safe to call on remote
 /// repos since the user explicitly requested it. Pauses the auto-indexer
@@ -560,11 +575,6 @@ pub async fn index_snapshot(
                 .state::<AppDb>()
                 .set_browse_status(&repo_id, &snapshot_id, "pending");
         }
-
-        let _ = app2.emit(
-            "index:done",
-            serde_json::json!({ "snapshotId": snapshot_id, "repoId": repo_id, "success": ok }),
-        );
     });
 
     Ok(true)
@@ -576,11 +586,20 @@ pub async fn index_snapshot(
 /// this replaces), pauses the auto-indexer for the duration via
 /// `IndexHandle::manual_active`, and takes `IndexHandle::gate` around each
 /// snapshot so it can never overlap with an auto-indexed one. Fire-and-forget:
-/// returns immediately; progress is reported per-snapshot via `index:done`
-/// (same payload shape as `index_snapshot`), matching what the frontend
-/// "Index All" progress UI already listens for. A snapshot that fails to
-/// index does not abort the batch — the loop continues to the next one.
-/// Cancellable between snapshots via `cancel_index_batch`.
+/// returns immediately; progress is reported two ways on the `task` bus — a
+/// per-snapshot event (`kind: index`, `targetId` = snapshot id, no slot) for
+/// the frontend's per-row status UI, and a single batch-level op (`kind:
+/// index`, no `targetId`) that emits `progress` with `itemsDone`/`itemsTotal`
+/// as snapshots complete, so the Activity panel can show batch progress
+/// independent of any page being mounted. The batch-level op's cancel flag and
+/// task slot are freshly created per call and registered in
+/// `IndexHandle::batches` under its own operationId (not shared across
+/// batches — see that field's doc comment), so multiple "Index All" runs
+/// (e.g. for different repos) proceed and cancel fully independently; the
+/// actual `restic` calls still only ever run one at a time app-wide via the
+/// shared `IndexHandle::gate`. A snapshot that fails to index does not abort
+/// the batch — the loop continues to the next one. Cancellable between
+/// snapshots via `cancel_index_batch(operation_id)`.
 #[tauri::command]
 pub async fn index_snapshots_batch(
     app: tauri::AppHandle,
@@ -600,96 +619,157 @@ pub async fn index_snapshots_batch(
 
     let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
     let gate = std::sync::Arc::clone(&index_handle.gate);
-    let cancel = std::sync::Arc::clone(&index_handle.cancel);
-    let current_task = std::sync::Arc::clone(&index_handle.current_task);
-    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    let batches_registry = std::sync::Arc::clone(&index_handle.batches);
+
+    let batch_total = snapshot_ids.len() as u64;
 
     tauri::async_runtime::spawn(async move {
         let _guard = ManualIndexGuard::new(manual_active);
 
-        for snapshot_id in snapshot_ids {
-            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        // Fresh per-batch cancel flag + task slot (not IndexHandle-shared — see
+        // IndexHandle::batches' doc comment). No targetId on the batch op itself
+        // (that's what lets per-snapshot events and this one be told apart on the
+        // bus). Registered under this batch's own operationId so cancel_index_batch
+        // can target exactly this run, independent of any other concurrent batch.
+        let batch_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let batch_slot = new_task_slot();
+        let batch_ctx = OperationCtx::new(
+            app.clone(),
+            TaskKind::Index,
+            repo_id.clone(),
+            None,
+            TaskOrigin::Manual,
+            Some(batch_slot.clone()),
+        );
+        let operation_id = batch_ctx.operation_id().to_string();
+        // Graceful on a poisoned lock, matching BatchDeregisterGuard/cancel_index_batch below —
+        // if registration is skipped, cancel_index_batch simply won't find this batch (a no-op,
+        // not a panic), so the batch still runs to completion, just uncancellable.
+        if let Ok(mut map) = batches_registry.lock() {
+            map.insert(
+                operation_id.clone(),
+                super::cache::BatchCancel { cancel: batch_cancel.clone(), task_slot: batch_slot },
+            );
+        }
+        let _dereg = BatchDeregisterGuard { registry: batches_registry.clone(), operation_id };
+
+        let batch_progress = batch_ctx.progress_emitter();
+
+        for (i, snapshot_id) in snapshot_ids.into_iter().enumerate() {
+            if batch_cancel.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
 
-            let db_outer = app.state::<AppDb>();
-            let status_map = match db_outer.get_browse_status(&repo_id) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if matches!(
-                status_map.get(&snapshot_id).map(|s| s.as_str()),
-                Some("complete") | Some("in_progress")
-            ) {
-                continue;
-            }
-            if db_outer
-                .set_browse_status(&repo_id, &snapshot_id, "in_progress")
-                .is_err()
-            {
-                continue;
-            }
-
-            let task_ctx = OperationCtx::new(
-                app.clone(),
-                TaskKind::Index,
-                repo_id.clone(),
-                Some(snapshot_id.clone()),
-                TaskOrigin::Manual,
-                Some(current_task.clone()),
-            );
-
-            let repo_path = repo.path.clone();
-            let repo_pass = repo.password.clone();
-            let snap_id = snapshot_id.clone();
-            let repo_id2 = repo_id.clone();
-            let rp = restic_path.clone();
-            let app2 = app.clone();
-
-            let _permit = gate.lock().await;
-            let ok = tauri::async_runtime::spawn_blocking(move || {
-                let tmp_repo = super::cache::FullRepository {
-                    path: repo_path,
-                    password: repo_pass,
+            // Labeled block (same idiom as prune_all_repos/prune_repo — see CLAUDE.md's
+            // Operation Event Bus section) so every exit path — each early `break 'work`
+            // below, or falling off the end after real indexing work — reaches the single
+            // progress emit after it, with no separate "final bump" needed: the last
+            // iteration's emit always reports `i + 1 == batch_total` by construction,
+            // whether that snapshot was actually indexed or skipped as already-complete.
+            'work: {
+                let db_outer = app.state::<AppDb>();
+                let status_map = match db_outer.get_browse_status(&repo_id) {
+                    Ok(m) => m,
+                    Err(_) => break 'work,
                 };
-                let db_inner = app2.state::<AppDb>();
-                let repo_locks_inner = app2.state::<RepoLocks>();
-                run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
-            })
-            .await
-            .unwrap_or(false);
-            drop(_permit);
+                if matches!(
+                    status_map.get(&snapshot_id).map(|s| s.as_str()),
+                    Some("complete") | Some("in_progress")
+                ) {
+                    break 'work;
+                }
+                if db_outer
+                    .set_browse_status(&repo_id, &snapshot_id, "in_progress")
+                    .is_err()
+                {
+                    break 'work;
+                }
 
-            if ok {
-                task_ctx.finished();
-            } else {
-                task_ctx.failed("Indexing failed");
+                // Slot is None here — the batch op above owns current_task, so a cancel
+                // during this snapshot's indexing emits `cancelling` on the batch, not this
+                // per-snapshot op (which has no cancel affordance of its own).
+                let task_ctx = OperationCtx::new(
+                    app.clone(),
+                    TaskKind::Index,
+                    repo_id.clone(),
+                    Some(snapshot_id.clone()),
+                    TaskOrigin::Manual,
+                    None,
+                );
+
+                let repo_path = repo.path.clone();
+                let repo_pass = repo.password.clone();
+                let snap_id = snapshot_id.clone();
+                let repo_id2 = repo_id.clone();
+                let rp = restic_path.clone();
+                let app2 = app.clone();
+
+                let _permit = gate.lock().await;
+                let ok = tauri::async_runtime::spawn_blocking(move || {
+                    let tmp_repo = super::cache::FullRepository {
+                        path: repo_path,
+                        password: repo_pass,
+                    };
+                    let db_inner = app2.state::<AppDb>();
+                    let repo_locks_inner = app2.state::<RepoLocks>();
+                    run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
+                })
+                .await
+                .unwrap_or(false);
+                drop(_permit);
+
+                if ok {
+                    task_ctx.finished();
+                } else {
+                    task_ctx.failed("Indexing failed");
+                }
+
+                if !ok {
+                    let _ = app
+                        .state::<AppDb>()
+                        .set_browse_status(&repo_id, &snapshot_id, "pending");
+                }
             }
 
-            if !ok {
-                let _ = app
-                    .state::<AppDb>()
-                    .set_browse_status(&repo_id, &snapshot_id, "pending");
-            }
+            batch_progress.emit(TaskProgress {
+                items_done: Some((i + 1) as u64),
+                items_total: Some(batch_total),
+                ..Default::default()
+            });
+        }
 
-            let _ = app.emit(
-                "index:done",
-                serde_json::json!({ "snapshotId": snapshot_id, "repoId": repo_id.clone(), "success": ok }),
-            );
+        if batch_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            batch_ctx.cancelled();
+        } else {
+            batch_ctx.finished();
         }
     });
 
     Ok(())
 }
 
-/// Signals an in-progress `index_snapshots_batch` run to stop after the
-/// currently-indexing snapshot finishes. Has no effect if no batch is running.
+/// Signals a specific in-progress `index_snapshots_batch` run (identified by its
+/// batch-level operationId — see that function's doc comment) to stop after the
+/// currently-indexing snapshot finishes. A no-op, not an error, if that batch has
+/// already finished (or `operation_id` doesn't match any running batch) — mirrors
+/// the old "has no effect if no batch is running" behavior, now scoped per-batch
+/// instead of app-wide.
 #[tauri::command]
-pub fn cancel_index_batch(app: tauri::AppHandle, index_handle: State<'_, super::cache::IndexHandle>) -> Result<(), String> {
-    emit_cancelling(&app, &index_handle.current_task);
-    index_handle
-        .cancel
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+pub fn cancel_index_batch(
+    app: tauri::AppHandle,
+    index_handle: State<'_, super::cache::IndexHandle>,
+    operation_id: String,
+) -> Result<(), String> {
+    let entry = index_handle
+        .batches
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&operation_id)
+        .cloned();
+    if let Some(entry) = entry {
+        emit_cancelling(&app, &entry.task_slot);
+        entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -863,4 +943,101 @@ mod tests {
         assert!(is_direct_child("parent/child", Some("parent")));
     }
 
+    // ── IndexHandle::batches registry / BatchDeregisterGuard ──────────────────
+    // Covers the concurrency bookkeeping index_snapshots_batch/cancel_index_batch rely on:
+    // per-operationId isolation (the bug this registry replaced — see IndexHandle::batches'
+    // doc comment, cache.rs) and deregistration on drop (so cancel_index_batch can never find
+    // a batch that has already finished).
+
+    fn make_batch_cancel() -> crate::commands::cache::BatchCancel {
+        crate::commands::cache::BatchCancel {
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_slot: new_task_slot(),
+        }
+    }
+
+    /// Mirrors `cancel_index_batch`'s exact lookup-then-store pattern (`.get(&operation_id)
+    /// .cloned()`, then set the flag on the *fetched* clone) rather than acting on a
+    /// pre-insertion reference — so these tests exercise the same path a regression at the
+    /// real call site would break, instead of just exercising HashMap/AtomicBool semantics.
+    /// Returns whether a matching batch was found (mirrors the real command's no-op-on-miss).
+    fn simulate_cancel(
+        registry: &std::sync::Arc<std::sync::Mutex<HashMap<String, crate::commands::cache::BatchCancel>>>,
+        operation_id: &str,
+    ) -> bool {
+        let entry = registry.lock().unwrap().get(operation_id).cloned();
+        match entry {
+            Some(entry) => {
+                entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[test]
+    fn cancel_targets_only_the_matching_operation_id() {
+        let index_handle = crate::commands::cache::IndexHandle::new();
+        index_handle.batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel());
+        index_handle.batches.lock().unwrap().insert("batchB".to_string(), make_batch_cancel());
+
+        // Cancel batchA the same way cancel_index_batch does: look it up by id, act on the
+        // fetched clone. If a regression reused one shared BatchCancel across every insert
+        // (the historical bug), or `.get` returned the wrong entry, batchB's flag re-fetched
+        // fresh from the map below would incorrectly read `true` too.
+        assert!(simulate_cancel(&index_handle.batches, "batchA"));
+
+        let map = index_handle.batches.lock().unwrap();
+        assert!(map.get("batchA").unwrap().cancel.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!map.get("batchB").unwrap().cancel.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn batch_deregister_guard_removes_entry_on_drop() {
+        let index_handle = crate::commands::cache::IndexHandle::new();
+        let registry = std::sync::Arc::clone(&index_handle.batches);
+        registry.lock().unwrap().insert("batchA".to_string(), make_batch_cancel());
+        assert!(registry.lock().unwrap().contains_key("batchA"));
+
+        {
+            let _guard = BatchDeregisterGuard {
+                registry: registry.clone(),
+                operation_id: "batchA".to_string(),
+            };
+        } // guard dropped here
+
+        assert!(!registry.lock().unwrap().contains_key("batchA"));
+    }
+
+    #[test]
+    fn batch_deregister_guard_leaves_other_entries_untouched() {
+        let index_handle = crate::commands::cache::IndexHandle::new();
+        let registry = std::sync::Arc::clone(&index_handle.batches);
+        registry.lock().unwrap().insert("batchA".to_string(), make_batch_cancel());
+        registry.lock().unwrap().insert("batchB".to_string(), make_batch_cancel());
+
+        {
+            let _guard = BatchDeregisterGuard {
+                registry: registry.clone(),
+                operation_id: "batchA".to_string(),
+            };
+        }
+
+        let map = registry.lock().unwrap();
+        assert!(!map.contains_key("batchA"));
+        assert!(map.contains_key("batchB"));
+    }
+
+    #[test]
+    fn cancel_for_unknown_operation_id_is_a_noop() {
+        // A miss (e.g. the batch already finished and deregistered, or a stale/garbage id)
+        // must be a clean no-op, not a panic — and must not disturb any other running batch.
+        let index_handle = crate::commands::cache::IndexHandle::new();
+        index_handle.batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel());
+
+        assert!(!simulate_cancel(&index_handle.batches, "unknown-id"));
+
+        let map = index_handle.batches.lock().unwrap();
+        assert!(!map.get("batchA").unwrap().cancel.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }

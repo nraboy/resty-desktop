@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getSnapshotIndexStatus, indexSnapshot, searchSnapshotFiles } from "../lib/invoke";
-import type { FileEntry, Snapshot } from "../lib/types";
+import type { FileEntry, Snapshot, TaskEvent } from "../lib/types";
 import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -84,9 +84,12 @@ export default function SearchPage() {
     if (!repoId || !snapshotId) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen<{ snapshotId: string; success: boolean }>("index:done", (e) => {
-      if (e.payload.snapshotId !== snapshotId) return;
-      if (e.payload.success) {
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "index") return;
+      if (t.phase !== "finished" && t.phase !== "failed") return;
+      if (t.targetId !== snapshotId) return;
+      if (t.phase === "finished") {
         setIndexState("ready");
         setTimeout(() => inputRef.current?.focus(), 50);
       } else {
@@ -96,9 +99,9 @@ export default function SearchPage() {
     }).then((u) => {
       if (cancelled) { u(); return; }
       unlisten = u;
-      // Re-check after the listener is active: if index:done fired in the gap between
-      // the initial status check and listen() resolving, we'd be permanently stuck on
-      // "indexing". This catches that race.
+      // Re-check after the listener is active: if the terminal task event fired in the
+      // gap between the initial status check and listen() resolving, we'd be permanently
+      // stuck on "indexing". This catches that race.
       getSnapshotIndexStatus(repoId).then((statusMap) => {
         if (!cancelled && statusMap[snapshotId] === "complete") {
           setIndexState("ready");
@@ -117,10 +120,10 @@ export default function SearchPage() {
       const started = await indexSnapshot(repoId, snapshotId);
       if (!started) {
         // Warmer completed between mount and click — re-check rather than wait
-        // for an index:done that will never arrive.
+        // for a terminal task event that will never arrive.
         const statusMap = await getSnapshotIndexStatus(repoId);
         if (statusMap[snapshotId] === "complete") setIndexState("ready");
-        // If in_progress, the index:done listener above will transition us.
+        // If in_progress, the task listener above will transition us.
       }
     } catch {
       setIndexError("Failed to start indexing.");
