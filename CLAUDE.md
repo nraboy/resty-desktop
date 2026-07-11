@@ -185,8 +185,10 @@ src-tauri/
                      #   run_restic_blocking() (pub(crate) async helper): runs a one-shot restic command on a
                      #   spawn_blocking thread, owning its args so they can cross that boundary — used by every
                      #   async command that shells out once (see Restic Integration for the full policy);
-                     #   check_repo/get_repo_stats/refresh_repo_stats each acquire a RepoLocks read guard (see
-                     #   Concurrency section); prune_repo/prune_all_repos share a run_one_prune_attempt helper
+                     #   check_repo/refresh_repo_stats each acquire a RepoLocks read guard (see Concurrency
+                     #   section — get_repo_stats is a plain sync, cache-only DB read with no restic call and
+                     #   so no lock of its own; see its doc comment in repo.rs for why a cache miss returns Err
+                     #   rather than falling through to a live fetch); prune_repo/prune_all_repos share a run_one_prune_attempt helper
                      #   (spawns the child, polls via try_wait, captures stderr, retries twice on restic's own
                      #   "already locked"); they take a RepoLocks write guard first and re-check
                      #   PruneHandle::cancelled right after acquiring it (closes a Stop-during-the-lock-wait
@@ -351,9 +353,9 @@ Restic distinguishes **shared** locks (most commands — `backup`, `restore`, `c
 `copy`, `check`, `snapshots`, `stats`, `ls`) from **exclusive** locks (`forget`, `prune`, `tag` —
 nothing else may touch the repo while one runs). The app had no cross-operation awareness of
 this, so an exclusive op could fire mid-shared-op and fail with restic's own "repository is
-already locked by PID …" — reproduced by starting a manual backup, navigating to Repositories
-(`get_repo_stats`) while it runs, and watching the backup's post-run retention collide with that
-still-in-flight `stats` call.
+already locked by PID …" — reproduced by starting a manual backup, clicking Refresh on
+Repositories (`refresh_repo_stats`) while it runs, and watching the backup's post-run retention
+collide with that still-in-flight `stats` call.
 
 `RepoLocks` (`src-tauri/src/commands/repo_locks.rs`, managed state) is an in-memory
 `HashMap<repo_path, {readers, exclusive}>` — keyed by **repository path** (restic's true lock
@@ -373,7 +375,7 @@ RAII guards, both releasing on `Drop`:
 
 Wired into every shared-lock op (`execute_backup`, `restore_snapshot`, `restore_path`,
 `copy_snapshot`/`mirror_repo` — both src **and** dest — `refresh_snapshots`,
-`get_snapshot_stats`, `diff_snapshots`, `refresh_repo_stats`/`get_repo_stats`, `check_repo`,
+`get_snapshot_stats`, `diff_snapshots`, `refresh_repo_stats`, `check_repo`,
 `list_files`, `run_full_index` — shared by `index_snapshot`/`index_snapshots_batch` **and** the
 `cache_warmer` auto-sweep) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
 `prune_repo`/`prune_all_repos`, `apply_retention` — covering all three callers: `forget_by_plan`,
@@ -481,11 +483,16 @@ means "no further snapshots will start" — the snapshot already in flight still
 (`finished`/`failed`), since cancellation is checked only between snapshots, never mid-`restic`.
 
 **Coverage:** every restic-shelling operation is wired, including the click-bounded metadata reads
-(`get_repo_stats`/`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the
-outer commands, so a cache hit that never shells out correctly emits nothing — `get_snapshot_stats`,
-`test_repo_connection`, `list_files`). Two categories are excluded, deliberately:
+(`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the outer command —
+`get_snapshot_stats`, `test_repo_connection`, `list_files`). Two categories are excluded, deliberately:
 - **Not real restic operations at all** — `list_snapshots` (`AppDb::get_snapshots_vec`, pure cached
-  DB read) and `get_snapshot_index_status` (sync DB read). Nothing runs that a task could represent.
+  DB read), `get_snapshot_index_status` (sync DB read), and `get_repo_stats` (sync, cache-only DB
+  read — no restic call, ever, not even a fallback on a miss; see its doc comment in repo.rs for
+  why removing that fallback was itself a fix, not just a simplification: `RepositoriesPage`
+  requests this for every repo on mount, and it used to fall through to a live `restic stats` call
+  on a cache miss — harmless normally, but "Clear All Cache" wipes every repo's cached stats at
+  once, so the very next mount silently refreshed all of them, contradicting stats' manual-only
+  design). Nothing runs that a task could represent in any of the three.
 - **Continuous background work, not user-bounded** — `cache_warmer`'s `refresh_all_snapshots` tick
   (runs automatically every 60s, forever, per eligible repo, for as long as the app is open). Unlike
   every other wired operation this isn't bounded by a user action, so it was kept off the bus to
@@ -608,23 +615,34 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `tauri::async_runtime::spawn`ed tasks (not foreground commands), immediately after
   `execute_backup` (which already does its heavy work via `spawn_blocking`). Only the foreground
   `forget_by_plan` command wraps `apply_retention` in `spawn_blocking`.
-- **`list_snapshots` and `get_snapshot_index_status` don't emit on the `task` event bus (see
-  Operation Event Bus)** because neither shells out to restic — nothing runs that a task could
-  represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**, despite calling restic,
-  because it fires automatically every 60s forever rather than being bounded by a user action —
-  wiring it would mean unbounded event volume over a long session. Every other restic-shelling
-  command, including click-bounded metadata reads like `get_repo_stats`/`get_snapshot_stats`/
-  `test_repo_connection`/`list_files`, is wired. Don't add the excluded three without revisiting
-  that tradeoff.
-- **`get_repo_stats` fetches stats for *all* repos including remote ones, and RepositoriesPage
-  requests them for every repo on mount — on purpose.** It returns the cached value immediately
-  when present and only shells out to `restic stats` on a cache miss; the `—` placeholder in the
-  UI is specifically for remotes that have no cache yet. Do not skip remote repos in that fetch —
-  it would hide cached remote stats that are otherwise perfectly valid to show. RepositoriesPage's
-  manual "Refresh All"/per-row Refresh buttons likewise always include remote repos — unlike
-  every *automatic* remote activity (cache warmer's snapshot/index sweep, SnapshotsPage's
-  background refresh, Index All), which stay gated behind `remote_auto_refresh`, a manual refresh
-  is an explicit user request with no surprise-bandwidth concern to guard against.
+- **`list_snapshots`, `get_snapshot_index_status`, and `get_repo_stats` don't emit on the `task`
+  event bus (see Operation Event Bus)** because none of the three shells out to restic — nothing
+  runs that a task could represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**,
+  despite calling restic, because it fires automatically every 60s forever rather than being
+  bounded by a user action — wiring it would mean unbounded event volume over a long session.
+  Every other restic-shelling command, including click-bounded metadata reads like
+  `refresh_repo_stats`/`get_snapshot_stats`/`test_repo_connection`/`list_files`, is wired. Don't add
+  the excluded four without revisiting that tradeoff.
+- **`get_repo_stats` fetches from `repo_stats_cache` for *all* repos including remote ones, and
+  RepositoriesPage requests it for every repo on mount — on purpose — but it is a pure cache read
+  and must never fall through to a live `restic stats` call on a miss.** It used to (returning
+  freshly-fetched stats on a cache miss, matching `refresh_repo_stats`'s behavior), which seemed
+  harmless — a miss should only ever happen for a repo that had genuinely never been fetched — until
+  "Clear All Cache" (`AppDb::clear_cache`, SettingsPage) started wiping `repo_stats_cache` for every
+  repo at once: the very next RepositoriesPage mount then silently kicked off a real `restic stats`
+  subprocess for every single repo, auto-refreshing a feature that's supposed to be manual-only the
+  moment its cache was cleared (a confirmed regression, not hypothetical — see repo.rs's doc comment
+  on `get_repo_stats`). It now returns `Err` on a miss instead (the frontend's existing "couldn't
+  load" `—` placeholder covers this, same as any other failed fetch) — populating a repo's stats,
+  including right after a first add or a cache clear, is exclusively `refresh_repo_stats`'s job now.
+  The `—` placeholder in the UI is for exactly this: a remote (or any repo) that has no cache yet.
+  Do not skip remote repos in the mount-time fetch, and do not reintroduce a fetch-on-miss fallback
+  here — it would hide cached remote stats that are otherwise perfectly valid to show, and it would
+  reopen the auto-refresh-after-Clear-Cache regression respectively. RepositoriesPage's manual
+  "Refresh All"/per-row Refresh buttons (`refresh_repo_stats`) likewise always include remote
+  repos — unlike every *automatic* remote activity (cache warmer's snapshot/index sweep,
+  SnapshotsPage's background refresh, Index All), which stay gated behind `remote_auto_refresh`, a
+  manual refresh is an explicit user request with no surprise-bandwidth concern to guard against.
 - **`browse_cache_files.parent_path` duplicates a prefix of `path` on every row, on purpose.** It
   backs the `(snap, parent_path)` directory-listing index — a deliberate storage-for-speed
   trade-off, and the single largest contributor to that table's size. Acceptable.

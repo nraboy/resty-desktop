@@ -94,9 +94,9 @@ describe("reduceStatsOps", () => {
 describe("reduceIndexBatches", () => {
   const empty = new Map();
 
-  it("starts a batch with zeroed progress", () => {
+  it("starts a batch with zeroed progress and status running", () => {
     const state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
-    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 0, itemsTotal: 0 });
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "running" });
   });
 
   it("updates itemsDone/itemsTotal from a matching progress event", () => {
@@ -105,7 +105,24 @@ describe("reduceIndexBatches", () => {
       kind: "index", operationId: "batch1", repoId: "repoA", phase: "progress",
       progress: { itemsDone: 3, itemsTotal: 10 },
     }));
-    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 3, itemsTotal: 10 });
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 3, itemsTotal: 10, status: "running" });
+  });
+
+  it("queues a batch with status queued on a pending event", () => {
+    const state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "pending" }));
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "queued" });
+  });
+
+  it("promotes a queued batch to running on started", () => {
+    let state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "pending" }));
+    state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "started" }));
+    expect(state.get("batch1")).toEqual({ operationId: "batch1", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "running" });
+  });
+
+  it("cancelling a still-queued batch removes it without ever seeing started", () => {
+    let state = reduceIndexBatches(empty, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "pending" }));
+    state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batch1", repoId: "repoA", phase: "cancelled" }));
+    expect(state.has("batch1")).toBe(false);
   });
 
   it("clears the matching operationId on finished/failed/cancelled", () => {
@@ -168,8 +185,8 @@ describe("reduceIndexBatches", () => {
       progress: { itemsDone: 4, itemsTotal: 9 },
     }));
     // Updating batchA's progress must not touch batchB's entry.
-    expect(state.get("batchA")).toEqual({ operationId: "batchA", repoId: "repoA", itemsDone: 4, itemsTotal: 9 });
-    expect(state.get("batchB")).toEqual({ operationId: "batchB", repoId: "repoB", itemsDone: 0, itemsTotal: 0 });
+    expect(state.get("batchA")).toEqual({ operationId: "batchA", repoId: "repoA", itemsDone: 4, itemsTotal: 9, status: "running" });
+    expect(state.get("batchB")).toEqual({ operationId: "batchB", repoId: "repoB", itemsDone: 0, itemsTotal: 0, status: "running" });
 
     // Finishing batchA alone must not remove batchB.
     state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batchA", repoId: "repoA", phase: "finished" }));

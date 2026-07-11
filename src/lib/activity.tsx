@@ -105,14 +105,37 @@ interface ActivityState {
   indexBatchRepoNames: Record<string, string | null>;
   /** Bumped every 60s so relative-time labels ("in 3 hours") stay fresh without a refetch. */
   clockTick: number;
+  /** Progress of RepositoriesPage's "Refresh Stats" (all-repos) button, or null when it isn't
+   *  running. `current` is 0-indexed — the completed-so-far count, set to the loop index
+   *  *before* that repo's call starts — matching SnapshotsPage's `multiDeleteProgress`/
+   *  `multiCopyProgress` convention exactly rather than inventing a third one. Renderers add
+   *  `+ 1` for an in-progress "working on repo N of total" label (SnapshotsPage does the same);
+   *  the raw value is what a progress bar's percent should use (0% at start, 100% only once
+   *  every repo has actually finished). Unlike `statsRefreshing` (derived from the `task` bus —
+   *  always length 1 during this operation, since it refreshes repos one at a time, not in
+   *  parallel; see RepositoriesPage's `handleRefreshAll` doc comment), this is a plain counter
+   *  the page pushes here directly — there's no backend batch command to emit `task` events for
+   *  the whole run the way `index_snapshots_batch` does for "Index All", since this operation is
+   *  just a JS loop calling the single-repo `refresh_repo_stats` command repeatedly. Hoisted to
+   *  the provider (rather than page-local state) so the panel reflects it even if the user
+   *  navigates away from RepositoriesPage mid-refresh, matching `activeIndexBatches`'
+   *  survive-navigation behavior. */
+  statsRefreshAllProgress: { current: number; total: number } | null;
+  setStatsRefreshAllProgress: (
+    progress: { current: number; total: number } | null | ((prev: { current: number; total: number } | null) => { current: number; total: number } | null)
+  ) => void;
 }
 
-/** The manual "Index All" batch currently in flight, derived from its batch-level `task` op. */
+/** A manual "Index All" batch — either actively indexing or still queued waiting its turn on
+ *  the backend's batch_turn mutex — derived from its batch-level `task` op. `status` starts
+ *  "queued" on a "pending" event and flips to "running" once "started" arrives (see
+ *  reduceIndexBatches). */
 export interface ActiveIndexBatch {
   operationId: string;
   repoId: string;
   itemsDone: number;
   itemsTotal: number;
+  status: "queued" | "running";
 }
 
 /** In-flight `stats` task operations (operationId -> repoId, so concurrent refreshes — e.g.
@@ -164,9 +187,27 @@ export function reduceIndexBatches(
 ): Map<string, ActiveIndexBatch> {
   if (event.kind !== "index" || event.origin !== "manual" || event.targetId) return state;
   switch (event.phase) {
+    case "pending": {
+      const next = new Map(state);
+      next.set(event.operationId, {
+        operationId: event.operationId,
+        repoId: event.repoId,
+        itemsDone: 0,
+        itemsTotal: 0,
+        status: "queued",
+      });
+      return next;
+    }
     case "started": {
       const next = new Map(state);
-      next.set(event.operationId, { operationId: event.operationId, repoId: event.repoId, itemsDone: 0, itemsTotal: 0 });
+      const existing = state.get(event.operationId);
+      next.set(event.operationId, {
+        operationId: event.operationId,
+        repoId: event.repoId,
+        itemsDone: existing?.itemsDone ?? 0,
+        itemsTotal: existing?.itemsTotal ?? 0,
+        status: "running",
+      });
       return next;
     }
     case "progress": {
@@ -234,6 +275,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [activeIndexBatches, setActiveIndexBatches] = useState<ActiveIndexBatch[]>([]);
   const [indexBatchRepoNames, setIndexBatchRepoNames] = useState<Record<string, string | null>>({});
   const [clockTick, setClockTick] = useState(0);
+  const [statsRefreshAllProgress, setStatsRefreshAllProgress] = useState<{ current: number; total: number } | null>(null);
   // Holds name/plan between "started" and the first "backup:progress" payload.
   const pendingBackupRef = useRef<{ scheduleName: string; planName: string } | null>(null);
   // statsRefreshing/statsFailed (both deduped repoId arrays) are derived from this on every
@@ -355,6 +397,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       value={{
         indexing, activeBackup, upcoming, recentLogs, statsRefreshing, statsFailed,
         activeIndexBatches, indexBatchRepoNames, clockTick,
+        statsRefreshAllProgress, setStatsRefreshAllProgress,
       }}
     >
       {children}

@@ -10,12 +10,22 @@
 // The stats row is this app's first consumer of the unified `task` event bus rather than a
 // per-operation legacy feed (stats never had one) — it's lifecycle-only (no progress bar,
 // since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
-// actual per-row numbers via its own `task` listener re-reading the DB cache. The "Index All"
+// actual per-row numbers via its own `task` listener re-reading the DB cache. When
+// RepositoriesPage's "Refresh Stats" button is running, its batch progress (statsRefreshAllProgress,
+// a plain done/total counter the page pushes into ActivityProvider directly — there's no
+// backend batch command for this the way index_snapshots_batch is for "Index All", it's just
+// a JS loop over the single-repo command) takes over this row instead of the generic
+// statsRefreshing count, which would otherwise always read "1 repository" the whole run since
+// repos are refreshed one at a time, not in parallel. The "Index All"
 // rows are a later consumer of the same bus, and the first to read `progress` (itemsDone/
 // itemsTotal) rather than treat the bus purely as a lifecycle signal — see activity.tsx's
 // reduceIndexBatches. There can be more than one such row at once: each batch gets its own
 // cancel flag on the backend (IndexHandle::batches, cache.rs), so concurrent "Index All" runs
 // (e.g. for different repos) are tracked and stoppable independently rather than colliding.
+// Only one batch actually runs at a time (IndexHandle::batch_turn) — the rest sit in the
+// "Up Next" section below Active Tasks with status "queued" until they're promoted to
+// "running" (a "started" task event); Stop works immediately on a queued batch too, it
+// doesn't wait for its turn.
 //
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
@@ -85,11 +95,23 @@ function StopIcon() {
 }
 
 export default function ActivityPanel() {
-  const { indexing, activeBackup, upcoming, recentLogs, statsRefreshing, activeIndexBatches, indexBatchRepoNames } = useActivity();
+  const {
+    indexing, activeBackup, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
+    indexBatchRepoNames, statsRefreshAllProgress,
+  } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
 
-  const hasActive = indexing != null || activeBackup != null || statsRefreshing.length > 0 || activeIndexBatches.length > 0;
+  // A batch is "queued" (waiting its turn on the backend's batch_turn mutex — see
+  // IndexHandle::batch_turn) until it wins the turn and its task event flips to "started",
+  // at which point reduceIndexBatches promotes it to "running" and it moves from the "Up
+  // Next" section below into this Active Tasks row set.
+  const runningIndexBatches = activeIndexBatches.filter((b) => b.status === "running");
+  const queuedIndexBatches = activeIndexBatches.filter((b) => b.status === "queued");
+
+  const hasActive =
+    indexing != null || activeBackup != null || statsRefreshing.length > 0 ||
+    activeIndexBatches.length > 0 || statsRefreshAllProgress != null;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -174,7 +196,7 @@ export default function ActivityPanel() {
                   <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
                 </div>
               )}
-              {activeIndexBatches.map((batch) => {
+              {runningIndexBatches.map((batch) => {
                 const repoName = indexBatchRepoNames[batch.repoId];
                 const stopping = stoppingBatchIds.has(batch.operationId);
                 return (
@@ -248,7 +270,26 @@ export default function ActivityPanel() {
                   </p>
                 </div>
               )}
-              {statsRefreshing.length > 0 && (
+              {statsRefreshAllProgress ? (
+                // RepositoriesPage's "Refresh Stats" button — shows real batch progress
+                // (current/total, 0-indexed completed-so-far — see statsRefreshAllProgress's
+                // doc comment in activity.tsx, same convention as SnapshotsPage's
+                // multiDeleteProgress/multiCopyProgress) rather than the generic
+                // statsRefreshing row below, which would otherwise always read
+                // "1 repository" throughout the whole run (it refreshes repos one at a
+                // time, not in parallel — see handleRefreshAll's doc comment). Text shows
+                // `current + 1` ("working on repo N") matching SnapshotsPage's own
+                // in-progress phrasing; the bar uses raw `current` (0% at start, 100% only
+                // once every repo has actually finished).
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-200">
+                    Refreshing stats — {statsRefreshAllProgress.current + 1} of {statsRefreshAllProgress.total} repositories
+                  </p>
+                  <ProgressBar
+                    percent={(statsRefreshAllProgress.current / Math.max(1, statsRefreshAllProgress.total)) * 100}
+                  />
+                </div>
+              ) : statsRefreshing.length > 0 && (
                 <div className="flex items-center gap-2">
                   <Spinner className="w-3.5 h-3.5 flex-shrink-0" />
                   <p className="text-sm text-gray-200">
@@ -258,6 +299,47 @@ export default function ActivityPanel() {
               )}
             </div>
           </div>
+
+          {queuedIndexBatches.length > 0 && (
+            <div className="border-b border-gray-800 pb-1">
+              <SectionHeading>Up Next</SectionHeading>
+              <div className="space-y-2 px-4 pb-3">
+                {queuedIndexBatches.map((batch) => {
+                  const repoName = indexBatchRepoNames[batch.repoId];
+                  const stopping = stoppingBatchIds.has(batch.operationId);
+                  return (
+                    <div key={batch.operationId} className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
+                        Indexing snapshots{repoName ? ` — ${repoName}` : ""}{" "}
+                        <span className="text-xs text-gray-600">· {stopping ? "Stopping…" : "Queued"}</span>
+                      </p>
+                      <button
+                        onClick={async () => {
+                          setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
+                          try {
+                            await cancelIndexBatch(batch.operationId);
+                          } catch {
+                            // Same rollback rationale as the Active Tasks Stop button above.
+                            setStoppingBatchIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(batch.operationId);
+                              return next;
+                            });
+                          }
+                        }}
+                        disabled={stopping}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                      >
+                        <StopIcon />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="border-b border-gray-800 pb-1">
             <SectionHeading>Upcoming Tasks</SectionHeading>

@@ -43,8 +43,21 @@ export default function RepositoriesPage() {
   // rather than local state, so they reflect a refresh that's still running/failed even if
   // the user navigated away and back. No error text is tracked — see activity.tsx's module
   // doc comment for why a plain boolean marker is the deliberate choice.
-  const { statsRefreshing, statsFailed } = useActivity();
-  const [refreshingAll, setRefreshingAll] = useState(false);
+  // statsRefreshAllProgress/setStatsRefreshAllProgress live in ActivityProvider (not local
+  // state) so the Activity panel can show this button's batch progress too, and so it survives
+  // navigating away from this page mid-refresh — see activity.tsx's doc comment on that field
+  // for why it's tracked separately from statsRefreshing (which is always 1 throughout this
+  // operation, since it refreshes repos one at a time, not in parallel — see handleRefreshAll).
+  const { statsRefreshing, statsFailed, statsRefreshAllProgress, setStatsRefreshAllProgress } = useActivity();
+  // Deliberately no local `refreshingAll` state — an earlier version had one, gating the
+  // buttons below via `disabled={refreshingAll}`. It reset to `false` on every remount
+  // (plain useState), while `statsRefreshAllProgress` lives in ActivityProvider specifically
+  // so the batch survives navigating away and back — so after a remount mid-refresh, the
+  // button correctly showed live progress but was clickable again, letting a second
+  // concurrent `handleRefreshAll` loop start. `statsRefreshAllProgress != null` is the same
+  // "is a refresh-all running" fact, sourced from state that's actually accurate no matter
+  // when this component (re)mounted.
+  const refreshingAll = statsRefreshAllProgress != null;
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -138,20 +151,36 @@ export default function RepositoriesPage() {
   };
 
   const handleRefreshAll = async () => {
-    setRefreshingAll(true);
     // Includes remote repos unconditionally — this is a manual, user-initiated action, and
     // stats never refresh on their own anymore, so there's no surprise-bandwidth risk to guard
     // against with remote_auto_refresh here (that setting still gates every *automatic* remote
     // activity: the cache warmer's snapshot/index sweep, SnapshotsPage's background refresh,
     // and Index All — see CLAUDE.md's Restic Integration section).
-    // Promise.allSettled never rejects, so no .catch needed — each row's outcome is picked up
-    // by the bus (finished → the page's own "task" listener refreshes statsMap; failed → sets
-    // statsFailed via ActivityProvider), same as a single row refresh. This call only tracks
-    // the brief window before the bus's own started/finished events land, so the button
-    // re-enables promptly rather than staying disabled forever if a "task" event were ever
-    // missed.
-    await Promise.allSettled(repos.map((repo) => refreshRepoStats(repo.id)));
-    setRefreshingAll(false);
+    // One repo at a time, not Promise.allSettled/parallel (as this was originally, and stayed,
+    // since 67e48f4) — each `restic stats` call is a real subprocess with no cap, unlike
+    // indexing (IndexHandle::gate limits that to one process app-wide after a prior RAM
+    // incident — see CLAUDE.md's Intentional Designs). Firing one per repo simultaneously could
+    // spike CPU/disk/network noticeably with several repos, especially alongside an "Index All"
+    // batch also running. Each call's outcome is still picked up by the bus regardless of
+    // ordering (finished → the page's own "task" listener refreshes statsMap; failed → sets
+    // statsFailed via ActivityProvider), same as a single row refresh — the `.catch` here only
+    // keeps the loop moving to the next repo if one call rejects, it doesn't drive any UI state.
+    //
+    // `current` is 0-indexed (the completed-so-far count, matching SnapshotsPage's
+    // multiDeleteProgress/multiCopyProgress convention exactly — set to the loop index
+    // *before* that item starts, with the render adding +1 to show "working on item N").
+    // Wrapped in try/finally so this is guaranteed to clear even if something in the loop
+    // throws unexpectedly (every awaited call already has its own `.catch`, so this is a
+    // backstop, not the primary path) — the Activity panel has no other way to notice a
+    // stuck batch the way a backend task would via OperationCtx's Drop.
+    try {
+      for (let i = 0; i < repos.length; i++) {
+        setStatsRefreshAllProgress({ current: i, total: repos.length });
+        await refreshRepoStats(repos[i].id).catch(() => {});
+      }
+    } finally {
+      setStatsRefreshAllProgress(null);
+    }
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -357,7 +386,9 @@ export default function RepositoriesPage() {
               disabled={refreshingAll}
               onClick={handleRefreshAll}
             >
-              Refresh Stats
+              {statsRefreshAllProgress
+                ? `Refreshing… (${statsRefreshAllProgress.current + 1}/${statsRefreshAllProgress.total})`
+                : "Refresh Stats"}
             </Button>
           )}
           <Button variant="secondary" onClick={() => openModal("add")}>

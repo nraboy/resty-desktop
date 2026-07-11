@@ -324,6 +324,7 @@ pub fn run() {
             browse::index_snapshot,
             browse::index_snapshots_batch,
             browse::cancel_index_batch,
+            browse::get_active_index_batch,
             browse::search_snapshot_files,
             browse::search_repo_files,
             browse::get_snapshot_index_status,

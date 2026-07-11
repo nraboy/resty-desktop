@@ -105,6 +105,25 @@ export interface IndexProgress {
   total: number;
 }
 
+/** Returned by `get_active_index_batch` — whether a repo already has an "Index All" batch
+ *  queued or running, so a page that just (re)mounted can restore state it may have missed
+ *  live `task` events for. See browse.rs's ActiveIndexBatchStatus. */
+export interface ActiveIndexBatchStatus {
+  operationId: string;
+  started: boolean;
+  /** The exact snapshot ids this batch covers — lets a page that just (re)mounted
+   *  cross-reference against its own already-fetched index-status map to restore accurate
+   *  local progress instead of only knowing "a batch exists." See browse.rs's
+   *  ActiveIndexBatchStatus/BatchCancel::target_ids. */
+  targetIds: string[];
+}
+
+/** Sentinel error returned by `index_snapshots_batch` when the repo already has a batch
+ *  queued or running — matches browse.rs's `INDEX_BATCH_ALREADY_ACTIVE_ERROR` exactly, same
+ *  pattern as `CANCELLED_BACKUP_ERROR` below. Lets a caller resync (re-adopt the real batch's
+ *  state) instead of treating this as a genuine failure. */
+export const INDEX_BATCH_ALREADY_ACTIVE_ERROR = "IndexBatchAlreadyActive";
+
 // Unified operation lifecycle event bus (Tauri event name "task") — see
 // tasks.rs and CLAUDE.md's "Operation Event Bus" section. Emitted by every
 // covered restic operation alongside — not instead of — its existing detailed
@@ -116,7 +135,11 @@ export type TaskKind =
   | "forget" | "tag" | "check" | "diff" | "index" | "unlock" | "stats"
   | "testConnection" | "browse" | "init";
 export type TaskPhase =
-  | "started" | "progress" | "cancelling" | "cancelled" | "finished" | "failed";
+  | "pending" | "started" | "progress" | "cancelling" | "cancelled" | "finished" | "failed";
+// "pending" (queued, not yet running) is currently only emitted by "Index All"
+// batches waiting their turn on the backend's batch_turn mutex — see
+// tasks.rs's TaskPhase::Pending doc comment. Followed by "started" once the
+// batch actually begins.
 export type TaskOrigin = "manual" | "scheduler" | "background";
 
 export interface TaskProgress {

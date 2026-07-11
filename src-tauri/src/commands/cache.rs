@@ -216,10 +216,16 @@ impl RestoreHandle {
 /// cache_warmer auto-indexer so at most one `run_full_index` ever runs at a
 /// time, bounding memory to a single snapshot's file list.
 pub struct IndexHandle {
-    /// Set for the entire duration of any manual indexing run (single-snapshot
-    /// or batch). The cache_warmer sweep checks this to avoid starting new
-    /// auto-indexing work while manual indexing is active.
-    pub manual_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Reference count of manual indexing runs currently active (single-snapshot
+    /// or batch, including a batch that's merely *queued* on `batch_turn` — see
+    /// its doc comment below). The cache_warmer sweep checks `!= 0` to avoid
+    /// starting new auto-indexing work while any manual indexing is active or
+    /// pending. A plain bool doesn't work here: a queued batch and the batch
+    /// ahead of it in `batch_turn` both hold a `ManualIndexGuard` at once, and a
+    /// bool would let the front batch's `Drop` clear the flag out from under the
+    /// still-waiting one, letting the warmer slip an auto-index in between
+    /// batches. Incremented/decremented by `ManualIndexGuard`.
+    pub manual_active: Arc<std::sync::atomic::AtomicUsize>,
     /// Acquired around every `run_full_index` call, in both the manual and
     /// auto-indexer paths, held across the `spawn_blocking(...).await`. Closes
     /// the race where the auto sweep is already mid-index when manual
@@ -227,6 +233,19 @@ pub struct IndexHandle {
     /// Legitimately global (unlike `batches` below): this bounds how many
     /// `restic` processes run concurrently, not which logical batch owns them.
     pub gate: Arc<tokio::sync::Mutex<()>>,
+    /// Acquired once per "Index All" batch, held for the *entire* batch (all its
+    /// snapshots), so concurrent batches (e.g. for different repos) complete in
+    /// start order instead of round-robin-interleaving their snapshots against
+    /// each other. Distinct from `gate`: `gate` bounds how many `restic`
+    /// processes run at once (still taken/released per-snapshot inside the
+    /// running batch, so a single `index_snapshot` or the auto-indexer can still
+    /// slip in between that batch's snapshots); `batch_turn` only orders whole
+    /// batches against each other. tokio's `Mutex` is FIFO among waiters, so
+    /// batches complete in (approximately, since each is an independently
+    /// spawned task) the order they started — sufficient for human-paced
+    /// clicks. A batch waiting on this is "queued"; see `BatchCancel::cancel_notify`
+    /// for how a queued batch still cancels promptly instead of waiting its turn.
+    pub batch_turn: Arc<tokio::sync::Mutex<()>>,
     /// Per-batch cancel flag + task slot, keyed by operationId, so concurrent
     /// "Index All" batches (e.g. different repos running at once) can be
     /// cancelled independently instead of sharing one flag/slot across every
@@ -245,13 +264,35 @@ pub struct IndexHandle {
 pub struct BatchCancel {
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
     pub task_slot: TaskSlot,
+    /// Wakes a batch that's parked waiting for its turn on `IndexHandle::batch_turn`
+    /// so it can cancel immediately instead of waiting for the batch ahead of it to
+    /// finish. `cancel_index_batch` calls `notify_one()` right after setting `cancel`;
+    /// the batch's `tokio::select!` between this and `batch_turn.lock()` picks up
+    /// whichever fires first. `notify_one`'s stored-permit semantics mean this is
+    /// race-free even if the notify arrives before the batch starts waiting.
+    pub cancel_notify: Arc<tokio::sync::Notify>,
+    /// False while the batch is still queued waiting for `IndexHandle::batch_turn`
+    /// (registered but not yet `activate()`d); flipped true the moment it wins its
+    /// turn and starts actually indexing. Lets `get_active_index_batch` (browse.rs)
+    /// report queued-vs-running to a frontend that just (re)mounted and missed the
+    /// live `pending`/`started` task events, without needing to inspect `task_slot`
+    /// (which only carries identity, not lifecycle phase).
+    pub started: Arc<std::sync::atomic::AtomicBool>,
+    /// The batch's full snapshot-id target list, fixed at creation and never mutated.
+    /// Lets `get_active_index_batch` (browse.rs) hand a page that just (re)mounted the
+    /// *exact* set of snapshots this batch is indexing, so it can restore accurate local
+    /// progress state (which of these are already done, per the index-status cache it
+    /// already has) instead of only knowing "a batch exists" with no way to know what
+    /// it's actually working on.
+    pub target_ids: Arc<Vec<String>>,
 }
 
 impl IndexHandle {
     pub fn new() -> Self {
         Self {
-            manual_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            batch_turn: Arc::new(tokio::sync::Mutex::new(())),
             batches: Arc::new(Mutex::new(HashMap::new())),
         }
     }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { ActiveIndexBatchStatus, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -205,6 +205,9 @@ export const indexSnapshotsBatch = (repoId: string, snapshotIds: string[]): Prom
 
 export const cancelIndexBatch = (operationId: string): Promise<void> =>
   invoke("cancel_index_batch", { operationId });
+
+export const getActiveIndexBatch = (repoId: string): Promise<ActiveIndexBatchStatus | null> =>
+  invoke("get_active_index_batch", { repoId });
 
 export const searchSnapshotFiles = (repoId: string, snapshotId: string, query: string): Promise<FileEntry[]> =>
   invoke("search_snapshot_files", { repoId, snapshotId, query });

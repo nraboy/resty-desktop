@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { cancelIndexBatch, getSnapshotIndexStatus, indexSnapshotsBatch, listSnapshots, searchRepoFiles } from "../lib/invoke";
-import type { RepoFileHit, Snapshot, TaskEvent } from "../lib/types";
+import { cancelIndexBatch, getActiveIndexBatch, getSnapshotIndexStatus, indexSnapshotsBatch, listSnapshots, searchRepoFiles } from "../lib/invoke";
+import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, type ActiveIndexBatchStatus, type RepoFileHit, type Snapshot, type TaskEvent } from "../lib/types";
 import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -54,14 +54,36 @@ export default function RepoSearchPage() {
   const [indexAllCompleted, setIndexAllCompleted] = useState<Set<string>>(new Set());
   const [indexAllStopped, setIndexAllStopped] = useState(false);
   const indexAllTargetsRef = useRef<string[]>([]);
-  // Captured from the batch-level task event's "started" phase (see the task listener below) so
-  // handleStopIndexAll can target this page's own batch specifically — cancel_index_batch now
-  // takes an operationId (see IndexHandle::batches, cache.rs) since multiple "Index All" batches
-  // can run concurrently and each needs to be cancellable independently. State (not a ref) so the
-  // Stop button below can disable itself reactively while this is still null — the modal opens
-  // (and Stop becomes visible) immediately, but the "started" event carrying the id is an async
-  // round-trip behind it; without this, a Stop click in that window would silently no-op.
-  const [batchOperationId, setBatchOperationId] = useState<string | null>(null);
+  // The one piece of state for this repo's "Index All" batch — deliberately a single
+  // discriminated union rather than three separately-managed booleans/strings (an earlier
+  // version had `batchOperationId`/`batchQueued`/`indexAllBatchActive` as independent
+  // `useState`s, always updated together across three code paths — mount restore, the task
+  // listener, and handleIndexAll — with no guarantee they stayed consistent). The four kinds
+  // are the only ones that are ever real:
+  //   - "idle": no batch for this repo, right of way to start a fresh one.
+  //   - "starting": handleIndexAll just called indexSnapshotsBatch; no operationId yet (the
+  //     "pending" task event carrying it is an async round-trip behind it), so Stop has
+  //     nothing to target — same window the old `batchOperationId === null` covered.
+  //   - "queued": registered and cancellable (via operationId), but hasn't won its turn on
+  //     the backend's batch_turn mutex yet — see IndexHandle::batch_turn, cache.rs.
+  //   - "running": won its turn, actually indexing.
+  // Deliberately independent of `indexAllOpen` — the modal can be dismissed while a batch
+  // keeps running/queued in the background (see the module doc comment above). The actual
+  // duplicate-request guard lives in the backend (index_snapshots_batch rejects a second call
+  // for a repo that already has one queued/running, browse.rs) — this state isn't what
+  // prevents that. It's what lets handleIndexAll tell "start a fresh batch" apart from "one
+  // already exists, just show its current status" so clicking "Index All" again doesn't reset
+  // the progress bar to 0 or lose track of the real batch's operationId (breaking Stop) for a
+  // click the backend was always going to reject anyway.
+  type BatchState =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    | { kind: "queued"; operationId: string }
+    | { kind: "running"; operationId: string };
+  const [batchState, setBatchState] = useState<BatchState>({ kind: "idle" });
+  const indexAllBatchActive = batchState.kind !== "idle";
+  const batchQueued = batchState.kind === "queued";
+  const batchOperationId = batchState.kind === "queued" || batchState.kind === "running" ? batchState.operationId : null;
 
   const [query, setQuery] = useState(locationState?.restoredQuery ?? "");
   const [results, setResults] = useState<RepoFileHit[]>(locationState?.restoredResults ?? []);
@@ -85,7 +107,6 @@ export default function RepoSearchPage() {
 
   const indexAllTotal = indexAllTargets.length;
   const indexAllDoneCount = indexAllCompleted.size;
-  const indexAllInProgress = indexAllOpen && indexAllTotal > 0 && indexAllDoneCount < indexAllTotal;
   const indexAllFailedCount = useMemo(
     () => indexAllTargets.filter((id) => indexAllCompleted.has(id) && indexStatus[id] !== "complete").length,
     [indexAllTargets, indexAllCompleted, indexStatus]
@@ -94,6 +115,18 @@ export default function RepoSearchPage() {
   useEffect(() => {
     indexAllTargetsRef.current = indexAllTargets;
   }, [indexAllTargets]);
+
+  // Adopts a batch reported by getActiveIndexBatch as this page's own tracked state — shared
+  // by the mount-restore effect below and handleIndexAll's error path (a request rejected
+  // because the backend already has a batch for this repo). `statusMap` is passed in rather
+  // than read from `indexStatus` state so the mount-restore call site can use the just-fetched
+  // local value instead of racing the `indexStatus` state update.
+  const adoptActiveBatchStatus = (status: ActiveIndexBatchStatus, statusMap: Record<string, string>) => {
+    const completed = new Set(status.targetIds.filter((id) => statusMap[id] === "complete"));
+    setIndexAllTargets(status.targetIds);
+    setIndexAllCompleted(completed);
+    setBatchState({ kind: status.started ? "running" : "queued", operationId: status.operationId });
+  };
 
   useEffect(() => {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
@@ -110,6 +143,29 @@ export default function RepoSearchPage() {
         const anyComplete = snaps.some((s) => statusMap[s.id] === "complete");
         setIndexState(anyComplete ? "ready" : "not_indexed");
         if (anyComplete) setTimeout(() => inputRef.current?.focus(), 50);
+
+        // Restores queued/running batch state for this repo by asking the backend directly,
+        // rather than relying solely on live `task` events observed since this component
+        // mounted — those alone would miss a batch that was already queued or running before
+        // the user navigated here (e.g. started from this same page, then Back/Forward, or
+        // started via a different repo's page while this one has a batch outstanding). The
+        // backend (browse.rs's index_snapshots_batch) is the actual source of truth and
+        // rejects a duplicate request regardless of what this component believes; this query
+        // just lets the UI reflect that truth immediately instead of only learning about it
+        // from the next live task event.
+        //
+        // Chained here (using `snaps`/`statusMap` directly) rather than as a second,
+        // independent effect: a restored batch's `targetIds` need to be cross-referenced
+        // against index status to seed indexAllTargets/indexAllCompleted accurately, and
+        // reading that from this closure's local variables avoids racing against the `snaps`/
+        // `statusMap` *state* (set just above, but not necessarily flushed by the time a
+        // separate effect's own async call resolved) — a real bug an earlier version had:
+        // indexAllTargets was never populated on restore at all, so a recovered batch's modal
+        // rendered "Indexing complete — 0 of 0 snapshots" instead of its real progress.
+        return getActiveIndexBatch(repoId).then((status) => {
+          if (cancelled || !status) return;
+          adoptActiveBatchStatus(status, statusMap);
+        }).catch(() => {});
       })
       .catch(() => {
         if (!cancelled) setIndexState("not_indexed");
@@ -157,9 +213,21 @@ export default function RepoSearchPage() {
       if (t.kind !== "index" || t.repoId !== repoId) return;
       // The batch-level op (no targetId) — capture its operationId so Stop can target this
       // page's own batch specifically, independent of any other batch running elsewhere.
+      // Captured on "pending" (not just "started") so Stop works while the batch is still
+      // queued waiting its turn, not only once it's actually running.
       if (!t.targetId) {
-        if (t.origin === "manual" && t.phase === "started") {
-          setBatchOperationId(t.operationId);
+        if (t.origin !== "manual") return;
+        if (t.phase === "pending") {
+          setBatchState({ kind: "queued", operationId: t.operationId });
+        } else if (t.phase === "started") {
+          setBatchState({ kind: "running", operationId: t.operationId });
+        } else if (t.phase === "finished" || t.phase === "failed" || t.phase === "cancelled") {
+          // Lets handleIndexAll treat the next click as a fresh start again — see
+          // BatchState's doc comment. Not gated on matching operationId: the backend only
+          // ever allows one batch per repo at a time (index_snapshots_batch rejects a
+          // duplicate, browse.rs), so any terminal batch-level event for this repo is
+          // necessarily this page's own batch finishing.
+          setBatchState({ kind: "idle" });
         }
         return;
       }
@@ -189,6 +257,15 @@ export default function RepoSearchPage() {
 
   const handleIndexAll = async () => {
     if (!repoId) return;
+    // A batch is already queued or running for this repo (see BatchState's doc comment) —
+    // don't reset local progress state or call the backend again (it would just be rejected
+    // per index_snapshots_batch's dedup guard, browse.rs). Instead, just show the modal
+    // reflecting whatever's already tracked, so Stop keeps targeting the real batch and the
+    // progress bar doesn't jump back to 0.
+    if (indexAllBatchActive) {
+      setIndexAllOpen(true);
+      return;
+    }
     const targets = snapshots
       .filter((s) => indexStatus[s.id] !== "complete" && indexStatus[s.id] !== "in_progress")
       .map((s) => s.id);
@@ -198,17 +275,34 @@ export default function RepoSearchPage() {
     setIndexAllStopped(false);
     setIndexAllTargets(targets);
     setIndexAllOpen(true);
-    // Cleared so a stale id from a prior run can't be used by a Stop click landing before this
-    // run's own "started" task event arrives and repopulates it (see the task listener above) —
-    // and so the Stop button (disabled while this is null) correctly starts disabled again.
-    setBatchOperationId(null);
+    // No operationId yet — the "pending" task event carrying it is an async round-trip
+    // behind this call (see BatchState's doc comment on the "starting" kind).
+    setBatchState({ kind: "starting" });
     try {
       // Indexed sequentially, one snapshot at a time, by the backend — bounds
       // memory to a single snapshot's file list and pauses the background
       // auto-indexer for the duration. Progress arrives via the task listener below.
       await indexSnapshotsBatch(repoId, targets);
-    } catch {
+    } catch (err) {
+      if (String(err) === INDEX_BATCH_ALREADY_ACTIVE_ERROR) {
+        // The backend rejected because it already has a batch for this repo — this
+        // component believed otherwise (a narrow race; see index_snapshots_batch's doc
+        // comment, browse.rs). Resync to the real batch's state instead of showing a
+        // scary "failed to start" for a request that was never actually attempted.
+        try {
+          const status = await getActiveIndexBatch(repoId);
+          if (status) {
+            adoptActiveBatchStatus(status, indexStatus);
+          } else {
+            setBatchState({ kind: "idle" });
+          }
+        } catch {
+          setBatchState({ kind: "idle" });
+        }
+        return;
+      }
       setIndexAllError("Failed to start indexing.");
+      setBatchState({ kind: "idle" });
     }
   };
 
@@ -285,8 +379,8 @@ export default function RepoSearchPage() {
           {indexAllError && (
             <p className="text-sm text-red-300">{indexAllError}</p>
           )}
-          <Button onClick={handleIndexAll} disabled={indexAllInProgress || snapshots.length === 0}>
-            {indexAllInProgress ? "Indexing…" : "Index All Snapshots"}
+          <Button onClick={handleIndexAll} disabled={snapshots.length === 0}>
+            Index All Snapshots
           </Button>
         </div>
       )}
@@ -297,10 +391,10 @@ export default function RepoSearchPage() {
             <div className="flex items-center justify-between gap-3 mb-4 px-4 py-2.5 rounded-lg bg-gray-900/60 border border-gray-800 text-sm">
               <span className="text-gray-400">
                 Searching {indexedCount} of {snapshots.length} snapshots
-                {indexAllInProgress && " · indexing…"}
+                {indexAllBatchActive && ` · ${batchQueued ? "queued" : "indexing"}…`}
               </span>
-              <Button variant="ghost" size="sm" onClick={handleIndexAll} disabled={indexAllInProgress}>
-                {indexAllInProgress ? "Indexing…" : "Index All"}
+              <Button variant="ghost" size="sm" onClick={handleIndexAll}>
+                Index All
               </Button>
             </div>
           )}
@@ -415,19 +509,33 @@ export default function RepoSearchPage() {
           </div>
         ) : indexAllDoneCount < indexAllTotal ? (
           <div className="py-2">
-            <p className="text-sm text-gray-300 mb-3">
-              Indexing {indexAllDoneCount} of {indexAllTotal} snapshots…
-            </p>
-            <div className="w-full bg-gray-800 rounded-full h-1.5 mb-4">
-              <div
-                className="bg-blue-500 h-1.5 rounded-full transition-all"
-                style={{ width: `${(indexAllDoneCount / indexAllTotal) * 100}%` }}
-              />
-            </div>
-            <p className="text-xs text-gray-600 mb-4">
-              Snapshots are indexed one at a time. You can close this and keep browsing —
-              indexing continues in the background.
-            </p>
+            {batchQueued ? (
+              <>
+                <p className="text-sm text-gray-300 mb-3">
+                  Queued — waiting for other indexing to finish…
+                </p>
+                <p className="text-xs text-gray-600 mb-4">
+                  Only one repository is indexed at a time. This batch will start automatically
+                  as soon as the one ahead of it finishes.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-300 mb-3">
+                  Indexing {indexAllDoneCount} of {indexAllTotal} snapshots…
+                </p>
+                <div className="w-full bg-gray-800 rounded-full h-1.5 mb-4">
+                  <div
+                    className="bg-blue-500 h-1.5 rounded-full transition-all"
+                    style={{ width: `${(indexAllDoneCount / indexAllTotal) * 100}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-600 mb-4">
+                  Snapshots are indexed one at a time. You can close this and keep browsing —
+                  indexing continues in the background.
+                </p>
+              </>
+            )}
             <div className="flex justify-end gap-2">
               <Button
                 variant="secondary"

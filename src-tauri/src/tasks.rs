@@ -46,6 +46,14 @@ pub enum TaskKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskPhase {
+    /// An operation that's been created and registered (so it's already visible
+    /// and cancellable) but hasn't started its real work yet — currently only
+    /// emitted by "Index All" batches waiting their turn on `IndexHandle::batch_turn`
+    /// (see browse.rs's `index_snapshots_batch`). Followed by `Started` once the
+    /// operation actually begins, or a cancel-path phase if it's stopped while
+    /// still pending. Not emitted by any reject-on-busy operation (backup, restore,
+    /// prune, copy, mirror) — those have no queued state to represent.
+    Pending,
     Started,
     Progress,
     Cancelling,
@@ -250,6 +258,35 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         origin: TaskOrigin,
         slot: Option<TaskSlot>,
     ) -> Self {
+        Self::new_with_initial_phase(sink, kind, repo_id, target_id, origin, slot, TaskPhase::Started)
+    }
+
+    /// Like `new`, but the operation isn't doing its real work yet — it's queued,
+    /// waiting for some internal turn (currently only "Index All" batches waiting
+    /// on `IndexHandle::batch_turn`). Emits `Pending` instead of `Started`, and
+    /// still registers `slot` so it's cancellable while queued. Call `.activate()`
+    /// once the operation actually begins.
+    pub fn new_pending(
+        sink: S,
+        kind: TaskKind,
+        repo_id: impl Into<String>,
+        target_id: Option<String>,
+        origin: TaskOrigin,
+        slot: Option<TaskSlot>,
+    ) -> Self {
+        Self::new_with_initial_phase(sink, kind, repo_id, target_id, origin, slot, TaskPhase::Pending)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_initial_phase(
+        sink: S,
+        kind: TaskKind,
+        repo_id: impl Into<String>,
+        target_id: Option<String>,
+        origin: TaskOrigin,
+        slot: Option<TaskSlot>,
+        initial_phase: TaskPhase,
+    ) -> Self {
         let operation_id = new_operation_id();
         let repo_id = repo_id.into();
 
@@ -268,7 +305,7 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         let ev = build_event(
             &operation_id,
             kind,
-            TaskPhase::Started,
+            initial_phase,
             &repo_id,
             target_id.clone(),
             origin,
@@ -287,6 +324,26 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
             slot,
             terminal: AtomicBool::new(false),
         }
+    }
+
+    /// Transitions a `new_pending` operation from queued to actually running by
+    /// emitting `Started`. Does not touch the `terminal` flag — `.finished()` /
+    /// `.failed()` / `.cancelled()` still work normally afterward. Calling this on
+    /// an operation created via `new` (already `Started`) would just emit a
+    /// redundant `Started` — harmless, but there's no call site that does that
+    /// today.
+    pub fn activate(&self) {
+        let ev = build_event(
+            &self.operation_id,
+            self.kind,
+            TaskPhase::Started,
+            &self.repo_id,
+            self.target_id.clone(),
+            self.origin,
+            None,
+            None,
+        );
+        self.sink.send(&ev);
     }
 
     /// Exposed for callers that need to correlate the started event's id with the
@@ -440,6 +497,55 @@ mod tests {
             assert_eq!(ev.target_id.as_deref(), Some("plan-1"));
             assert_eq!(ev.origin, TaskOrigin::Manual);
         }
+    }
+
+    #[test]
+    fn pending_activate_finished_sequence() {
+        let sink = RecordingSink::new();
+        let ctx = OperationCtx::new_pending(
+            sink.clone(),
+            TaskKind::Index,
+            "repo-1",
+            None,
+            TaskOrigin::Manual,
+            None,
+        );
+        let op_id = ctx.operation_id().to_string();
+        ctx.activate();
+        ctx.progress_emitter().emit(TaskProgress {
+            items_done: Some(1),
+            ..Default::default()
+        });
+        ctx.finished();
+
+        let events = sink.events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].phase, TaskPhase::Pending);
+        assert_eq!(events[1].phase, TaskPhase::Started);
+        assert_eq!(events[2].phase, TaskPhase::Progress);
+        assert_eq!(events[3].phase, TaskPhase::Finished);
+        for ev in &events {
+            assert_eq!(ev.operation_id, op_id);
+        }
+    }
+
+    #[test]
+    fn pending_cancelled_while_still_queued_never_emits_started() {
+        let sink = RecordingSink::new();
+        let ctx = OperationCtx::new_pending(
+            sink.clone(),
+            TaskKind::Index,
+            "repo-1",
+            None,
+            TaskOrigin::Manual,
+            None,
+        );
+        ctx.cancelled();
+
+        let events = sink.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].phase, TaskPhase::Pending);
+        assert_eq!(events[1].phase, TaskPhase::Cancelled);
     }
 
     #[test]

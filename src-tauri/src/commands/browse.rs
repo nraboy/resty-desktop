@@ -10,6 +10,15 @@ use super::snapshot::validate_snapshot_id;
 use super::NoConsole;
 use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
+/// Sentinel error returned by `index_snapshots_batch` when `repo_id` already has a batch
+/// queued or running (see that function's doc comment) — matched exactly by the frontend's
+/// `INDEX_BATCH_ALREADY_ACTIVE_ERROR` (lib/types.ts), same pattern as
+/// `CANCELLED_BACKUP_ERROR` (snapshot.rs). Distinguishable from a real failure so the
+/// frontend can resync (re-adopt the real batch's state via `get_active_index_batch`)
+/// instead of showing "Failed to start indexing" for a request that was never actually
+/// attempted.
+pub(crate) const INDEX_BATCH_ALREADY_ACTIVE_ERROR: &str = "IndexBatchAlreadyActive";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
@@ -466,20 +475,24 @@ pub(crate) fn run_full_index(
     db.set_browse_status(repo_id, snapshot_id, "complete")
 }
 
-/// Marks `manual_active` for the lifetime of a manual indexing run (single or
-/// batch) so the cache_warmer auto-indexer knows to pause. Cleared on drop —
-/// created inside the spawned task so it stays set for the whole run and
-/// clears on every exit path, including per-snapshot errors.
-struct ManualIndexGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// Marks `manual_active` for the lifetime of a manual indexing run (single,
+/// or batch — including time spent merely queued on `IndexHandle::batch_turn`)
+/// so the cache_warmer auto-indexer knows to pause. Reference-counted rather
+/// than a plain flag: a queued batch and the batch ahead of it in `batch_turn`
+/// each hold their own guard concurrently, and a plain bool would let the
+/// front batch's `Drop` clear it while the queued one is still waiting.
+/// Created inside the spawned task so it stays set for the whole run and
+/// decrements on every exit path, including per-snapshot errors.
+struct ManualIndexGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl ManualIndexGuard {
-    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self(flag)
     }
 }
 impl Drop for ManualIndexGuard {
     fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -495,6 +508,30 @@ impl Drop for BatchDeregisterGuard {
         if let Ok(mut map) = self.registry.lock() {
             map.remove(&self.operation_id);
         }
+    }
+}
+
+/// A batch's `task_slot` carries its `TaskRef` (identity, including `repo_id`) for as long
+/// as it's registered in `IndexHandle::batches` — from the moment it's created (queued) until
+/// it deregisters on a terminal phase (see `BatchDeregisterGuard`). Used by both the
+/// duplicate-request guard in `index_snapshots_batch` and `get_active_index_batch` below, so
+/// the two can never disagree about what counts as "this repo already has a batch".
+fn batch_matches_repo(entry: &super::cache::BatchCancel, repo_id: &str) -> bool {
+    entry
+        .task_slot
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|r| r.repo_id == repo_id))
+        .unwrap_or(false)
+}
+
+fn repo_has_active_batch(
+    batches: &std::sync::Mutex<HashMap<String, super::cache::BatchCancel>>,
+    repo_id: &str,
+) -> bool {
+    match batches.lock() {
+        Ok(map) => map.values().any(|entry| batch_matches_repo(entry, repo_id)),
+        Err(_) => false,
     }
 }
 
@@ -600,6 +637,35 @@ pub async fn index_snapshot(
 /// shared `IndexHandle::gate`. A snapshot that fails to index does not abort
 /// the batch — the loop continues to the next one. Cancellable between
 /// snapshots via `cancel_index_batch(operation_id)`.
+///
+/// Before entering its per-snapshot loop, the batch first acquires
+/// `IndexHandle::batch_turn` — held for the batch's entire duration — so that
+/// concurrent batches (e.g. different repos) complete one at a time in the
+/// order they started, instead of round-robin-interleaving their snapshots
+/// against each other (which is what happens if each batch only takes `gate`
+/// per-snapshot with no outer ordering). A batch waiting on `batch_turn` is
+/// "queued": it acquires this via a cancellable `tokio::select!` against its
+/// own `cancel_notify`, so clicking Stop on a still-queued batch cancels it
+/// immediately rather than after the batch ahead of it finishes. The
+/// batch-level op is created via `OperationCtx::new_pending` (emits `pending`,
+/// not `started`) so a queued batch shows up — and is cancellable — before it
+/// ever runs; `.activate()` emits `started` the moment it wins its turn,
+/// letting the frontend move it from an "Up Next" area into Active Tasks (see
+/// `activity.tsx`'s `reduceIndexBatches`).
+///
+/// A repo can only ever have one batch registered at a time: if `repo_id` already
+/// has a queued or running batch (per `repo_has_active_batch`), this call rejects
+/// with `INDEX_BATCH_ALREADY_ACTIVE_ERROR` — the existing batch is left exactly as
+/// it was, nothing new is spawned or emitted. This is the authoritative guard
+/// against duplicate "Index All" requests for the same repo (e.g. a user clicking
+/// the trigger button again while unaware one is already queued); `get_active_index_batch`
+/// exists so a frontend can check first and avoid the round-trip, but the backend
+/// enforces this regardless of what the frontend does or knows. An explicit `Err`
+/// (not a silent `Ok(())`) matches every other "already in progress" guard in this
+/// codebase (`BackupHandle`/`RestoreHandle`/`CopyHandle`/`MirrorHandle`/`PruneHandle`'s
+/// busy flags) — the sentinel just lets a caller distinguish "nothing happened
+/// because one was already running" from a genuine failure, the way
+/// `CANCELLED_BACKUP_ERROR` (snapshot.rs) distinguishes a cancel from a real error.
 #[tauri::command]
 pub async fn index_snapshots_batch(
     app: tauri::AppHandle,
@@ -613,27 +679,53 @@ pub async fn index_snapshots_batch(
         validate_snapshot_id(id)?;
     }
 
+    // Reject a duplicate request — see this function's doc comment. Checked before any
+    // DB/master-key work so a duplicate call costs nothing. Narrow, practically-irrelevant
+    // race: two calls arriving within the same instant, before either's spawned task has
+    // registered in `batches`, could theoretically both pass this check — the same tolerance
+    // `IndexHandle::batch_turn`'s doc comment already accepts for approximate-FIFO ordering
+    // under human-paced clicks, not a correctness issue worth an app-wide lock for.
+    if repo_has_active_batch(&index_handle.batches, &repo_id) {
+        return Err(INDEX_BATCH_ALREADY_ACTIVE_ERROR.to_string());
+    }
+
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
     let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
     let gate = std::sync::Arc::clone(&index_handle.gate);
+    let batch_turn = std::sync::Arc::clone(&index_handle.batch_turn);
     let batches_registry = std::sync::Arc::clone(&index_handle.batches);
 
     let batch_total = snapshot_ids.len() as u64;
 
     tauri::async_runtime::spawn(async move {
+        // First, so a batch that ends up merely queued on `batch_turn` below still
+        // keeps the auto-indexer paused for the whole time it's waiting — see
+        // ManualIndexGuard's doc comment on why this is refcounted.
         let _guard = ManualIndexGuard::new(manual_active);
 
-        // Fresh per-batch cancel flag + task slot (not IndexHandle-shared — see
-        // IndexHandle::batches' doc comment). No targetId on the batch op itself
-        // (that's what lets per-snapshot events and this one be told apart on the
-        // bus). Registered under this batch's own operationId so cancel_index_batch
-        // can target exactly this run, independent of any other concurrent batch.
+        // Fresh per-batch cancel flag + task slot + cancel notify (not
+        // IndexHandle-shared — see IndexHandle::batches' doc comment). No targetId
+        // on the batch op itself (that's what lets per-snapshot events and this one
+        // be told apart on the bus). Registered under this batch's own operationId
+        // so cancel_index_batch can target exactly this run, independent of any
+        // other concurrent batch.
         let batch_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let batch_slot = new_task_slot();
-        let batch_ctx = OperationCtx::new(
+        let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let batch_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Cloned now, before the loop below consumes `snapshot_ids` via `.into_iter()` —
+        // this is the immutable record `get_active_index_batch` hands back to a page that
+        // just (re)mounted, so it can restore exactly which snapshots this batch covers.
+        let target_ids = std::sync::Arc::new(snapshot_ids.clone());
+        // Pending, not Started — this batch hasn't begun indexing yet, it's about
+        // to wait for its turn on batch_turn below. Registering + emitting Pending
+        // here (before that wait) is what makes a queued batch visible in the
+        // Activity panel's "Up Next" area and cancellable via cancel_index_batch
+        // while it's still waiting.
+        let batch_ctx = OperationCtx::new_pending(
             app.clone(),
             TaskKind::Index,
             repo_id.clone(),
@@ -648,10 +740,40 @@ pub async fn index_snapshots_batch(
         if let Ok(mut map) = batches_registry.lock() {
             map.insert(
                 operation_id.clone(),
-                super::cache::BatchCancel { cancel: batch_cancel.clone(), task_slot: batch_slot },
+                super::cache::BatchCancel {
+                    cancel: batch_cancel.clone(),
+                    task_slot: batch_slot,
+                    cancel_notify: cancel_notify.clone(),
+                    started: batch_started.clone(),
+                    target_ids: target_ids.clone(),
+                },
             );
         }
         let _dereg = BatchDeregisterGuard { registry: batches_registry.clone(), operation_id };
+
+        // Wait for this batch's turn so concurrent batches complete in start order
+        // rather than round-robin (see IndexHandle::batch_turn's doc comment). This
+        // is cancellable: a batch parked here (already registered above, so its Stop
+        // button works) bails out the moment cancel_index_batch fires cancel_notify,
+        // instead of waiting for the batch ahead of it to finish. No separate
+        // pre-check against `batch_cancel` is needed even if it was already set the
+        // instant we got here — `notify_one()`'s stored-permit semantics mean
+        // `cancel_notify.notified()` below resolves immediately on its very first
+        // poll in that case, and `biased` guarantees the cancel branch is checked
+        // before `batch_turn.lock()` (proven by
+        // `queued_batch_cancel_notify_before_wait_is_not_lost` below).
+        let _turn = tokio::select! {
+            biased;
+            _ = cancel_notify.notified() => {
+                batch_ctx.cancelled();
+                return;
+            }
+            permit = batch_turn.lock() => permit,
+        };
+        // Won the turn — this batch is now actually running. Emits Started, which
+        // promotes it from the Activity panel's "Up Next" area to Active Tasks.
+        batch_ctx.activate();
+        batch_started.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let batch_progress = batch_ctx.progress_emitter();
 
@@ -769,8 +891,66 @@ pub fn cancel_index_batch(
     if let Some(entry) = entry {
         emit_cancelling(&app, &entry.task_slot);
         entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wakes the batch if it's currently parked waiting for its turn on
+        // batch_turn, so a queued batch cancels immediately instead of waiting
+        // for the batch ahead of it to finish. notify_one()'s stored-permit
+        // semantics make this race-free even if the batch hasn't started
+        // waiting yet (or has already moved past the wait and is indexing —
+        // in that case this permit is simply never consumed, a harmless no-op).
+        entry.cancel_notify.notify_one();
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveIndexBatchStatus {
+    pub operation_id: String,
+    /// False while still queued waiting for `IndexHandle::batch_turn`; true once it's won
+    /// its turn and is actually indexing. Mirrors the `pending`/`started` task-bus phases —
+    /// see `BatchCancel::started`'s doc comment (cache.rs).
+    pub started: bool,
+    /// The exact snapshot ids this batch covers (see `BatchCancel::target_ids`) — lets a
+    /// page that just (re)mounted cross-reference against its own already-fetched
+    /// index-status map to restore accurate local progress instead of only knowing "a
+    /// batch exists" with no way to know what it's actually working on.
+    pub target_ids: Vec<String>,
+}
+
+/// Testable core of `get_active_index_batch` below, split out so it can be exercised with a
+/// plain `Mutex<HashMap<...>>` in unit tests without constructing a `tauri::State`
+/// (matching the pattern used elsewhere in this codebase — see e.g. `repo.rs`'s
+/// `set_restic_path` doc comment).
+fn find_active_batch_for_repo(
+    batches: &std::sync::Mutex<HashMap<String, super::cache::BatchCancel>>,
+    repo_id: &str,
+) -> Result<Option<ActiveIndexBatchStatus>, String> {
+    let map = batches.lock().map_err(|e| e.to_string())?;
+    for (operation_id, entry) in map.iter() {
+        if batch_matches_repo(entry, repo_id) {
+            return Ok(Some(ActiveIndexBatchStatus {
+                operation_id: operation_id.clone(),
+                started: entry.started.load(std::sync::atomic::Ordering::SeqCst),
+                target_ids: entry.target_ids.as_ref().clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Reports whether `repo_id` already has an "Index All" batch queued or running, via the
+/// same `IndexHandle::batches` lookup `index_snapshots_batch` uses to silently drop a
+/// duplicate request (see that function's doc comment). Lets a page that just (re)mounted —
+/// and so missed the live `pending`/`started` task-bus events for a batch that was started
+/// before it mounted (e.g. the user navigated away and back) — restore the correct
+/// queued/running UI state instead of only ever learning about it from events observed
+/// since mount. Sync, no restic/DB work — same category as `get_snapshot_index_status`.
+#[tauri::command]
+pub fn get_active_index_batch(
+    index_handle: State<'_, super::cache::IndexHandle>,
+    repo_id: String,
+) -> Result<Option<ActiveIndexBatchStatus>, String> {
+    find_active_batch_for_repo(&index_handle.batches, &repo_id)
 }
 
 /// Runs on a blocking-pool thread (via `spawn_blocking`) rather than inline: this query
@@ -953,14 +1133,42 @@ mod tests {
         crate::commands::cache::BatchCancel {
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             task_slot: new_task_slot(),
+            cancel_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            target_ids: std::sync::Arc::new(Vec::new()),
         }
     }
 
-    /// Mirrors `cancel_index_batch`'s exact lookup-then-store pattern (`.get(&operation_id)
-    /// .cloned()`, then set the flag on the *fetched* clone) rather than acting on a
-    /// pre-insertion reference — so these tests exercise the same path a regression at the
-    /// real call site would break, instead of just exercising HashMap/AtomicBool semantics.
-    /// Returns whether a matching batch was found (mirrors the real command's no-op-on-miss).
+    /// Like `make_batch_cancel`, but with `task_slot` populated as if a real batch had
+    /// registered for `repo_id` — `batch_matches_repo`/`repo_has_active_batch`/
+    /// `find_active_batch_for_repo` all key off the slot's `TaskRef.repo_id`, not the
+    /// `batches` map key, so exercising them needs a populated slot. `target_ids` is
+    /// almost always irrelevant to the test at hand, hence a slice (usually empty) rather
+    /// than a required `Vec`.
+    fn make_batch_cancel_for_repo(
+        repo_id: &str,
+        started: bool,
+        target_ids: &[&str],
+    ) -> crate::commands::cache::BatchCancel {
+        let mut entry = make_batch_cancel();
+        *entry.task_slot.lock().unwrap() = Some(crate::tasks::TaskRef {
+            operation_id: "op".to_string(),
+            kind: crate::tasks::TaskKind::Index,
+            repo_id: repo_id.to_string(),
+            target_id: None,
+            origin: crate::tasks::TaskOrigin::Manual,
+        });
+        entry.started.store(started, std::sync::atomic::Ordering::SeqCst);
+        entry.target_ids = std::sync::Arc::new(target_ids.iter().map(|s| s.to_string()).collect());
+        entry
+    }
+
+    /// Mirrors `cancel_index_batch`'s exact lookup-then-store-then-notify pattern
+    /// (`.get(&operation_id).cloned()`, then act on the *fetched* clone) rather than
+    /// acting on a pre-insertion reference — so these tests exercise the same path a
+    /// regression at the real call site would break, instead of just exercising
+    /// HashMap/AtomicBool semantics. Returns whether a matching batch was found
+    /// (mirrors the real command's no-op-on-miss).
     fn simulate_cancel(
         registry: &std::sync::Arc<std::sync::Mutex<HashMap<String, crate::commands::cache::BatchCancel>>>,
         operation_id: &str,
@@ -969,6 +1177,7 @@ mod tests {
         match entry {
             Some(entry) => {
                 entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                entry.cancel_notify.notify_one();
                 true
             }
             None => false,
@@ -1039,5 +1248,178 @@ mod tests {
 
         let map = index_handle.batches.lock().unwrap();
         assert!(!map.get("batchA").unwrap().cancel.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    // ── IndexHandle::batch_turn cancellable acquisition ────────────────────────
+    // Covers the new queued-batch-cancels-promptly logic in index_snapshots_batch:
+    // a batch parked waiting for batch_turn must bail out via cancel_notify the
+    // moment cancel_index_batch fires, without ever waiting for the batch ahead of
+    // it to release the turn. Mirrors the real `select! { biased; cancel_notify.notified() ,
+    // batch_turn.lock() }` shape.
+
+    /// Cancelling a batch that is *already parked* waiting on `batch_turn` (the
+    /// notify fires after the task has started `.notified()`) must resolve via the
+    /// cancel branch, not the lock branch — proven by asserting the turn is never
+    /// actually acquired.
+    #[tokio::test]
+    async fn queued_batch_cancels_promptly_when_notified_while_waiting() {
+        let batch_turn = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Simulate another batch currently holding the turn.
+        let _held = batch_turn.lock().await;
+
+        let turn2 = batch_turn.clone();
+        let notify2 = cancel_notify.clone();
+        let cancel2 = cancel.clone();
+        let waiter = tokio::spawn(async move {
+            if cancel2.load(std::sync::atomic::Ordering::SeqCst) {
+                return "cancelled-precheck";
+            }
+            tokio::select! {
+                biased;
+                _ = notify2.notified() => "cancelled",
+                _permit = turn2.lock() => "acquired",
+            }
+        });
+
+        // Give the waiter a moment to reach the select!, then cancel it while the
+        // turn is still held elsewhere — it must not have to wait for release.
+        tokio::task::yield_now().await;
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_notify.notify_one();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter must resolve promptly, not wait for the held turn to release")
+            .unwrap();
+        assert_eq!(result, "cancelled");
+    }
+
+    /// `notify_one`'s stored-permit semantics: if the notify arrives *before* the
+    /// batch starts waiting (a lost-wakeup risk with a naive Condvar-style signal),
+    /// the subsequent `.notified()` call must still resolve immediately rather than
+    /// blocking forever.
+    #[tokio::test]
+    async fn queued_batch_cancel_notify_before_wait_is_not_lost() {
+        let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Cancel arrives before anyone is waiting.
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_notify.notify_one();
+
+        let batch_turn = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let _held = batch_turn.lock().await; // turn stays held for the whole test
+
+        // The real call site's pre-check would short-circuit here; this test
+        // exercises the select! branch directly to prove the stored permit still
+        // wakes `.notified()` even though notify_one ran first.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                biased;
+                _ = cancel_notify.notified() => "cancelled",
+                _permit = batch_turn.lock() => "acquired",
+            }
+        })
+        .await
+        .expect("a notify sent before .notified() is awaited must not be lost");
+        assert_eq!(result, "cancelled");
+    }
+
+    // ── ManualIndexGuard refcount ───────────────────────────────────────────────
+    // A queued batch and the batch currently running ahead of it each hold their
+    // own ManualIndexGuard concurrently. With a plain bool, the front batch
+    // finishing (guard dropped) would clear the flag out from under the still-
+    // queued one, letting the auto-indexer slip in between batches. The refcount
+    // must stay > 0 until *both* guards have dropped.
+    #[test]
+    fn manual_active_refcount_stays_set_until_all_guards_drop() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let running_guard = ManualIndexGuard::new(flag.clone());
+        assert_eq!(flag.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let queued_guard = ManualIndexGuard::new(flag.clone());
+        assert_eq!(flag.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        drop(running_guard);
+        assert_eq!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the still-queued batch's guard must keep the flag set after the front batch finishes"
+        );
+
+        drop(queued_guard);
+        assert_eq!(flag.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    // ── duplicate-batch guard / get_active_index_batch ─────────────────────────
+    // Covers the actual dedup mechanism index_snapshots_batch relies on to silently drop a
+    // second "Index All" request for a repo that already has one queued or running, and the
+    // query command (get_active_index_batch) that lets a frontend check the same thing
+    // in advance instead of relying purely on live task-bus events.
+
+    #[test]
+    fn repo_has_active_batch_true_for_a_queued_or_running_match() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel_for_repo("repoA", false, &[]));
+        assert!(repo_has_active_batch(&batches, "repoA"));
+
+        batches.lock().unwrap().get_mut("batchA").unwrap().started.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(repo_has_active_batch(&batches, "repoA"), "a running (started) batch counts too, not just queued");
+    }
+
+    #[test]
+    fn repo_has_active_batch_false_for_a_different_repo_or_an_unregistered_slot() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel_for_repo("repoA", false, &[]));
+        assert!(!repo_has_active_batch(&batches, "repoB"));
+
+        // An entry whose task_slot was never populated (shouldn't happen for a real batch,
+        // but matches make_batch_cancel()'s default) must not match any repo.
+        batches.lock().unwrap().insert("batchB".to_string(), make_batch_cancel());
+        assert!(!repo_has_active_batch(&batches, "repoA_typo_no_match"));
+    }
+
+    #[test]
+    fn repo_has_active_batch_false_on_an_empty_registry() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        assert!(!repo_has_active_batch(&batches, "repoA"));
+    }
+
+    #[test]
+    fn find_active_batch_for_repo_reports_queued_vs_running() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel_for_repo("repoA", false, &[]));
+
+        let status = find_active_batch_for_repo(&batches, "repoA").unwrap();
+        let status = status.expect("repoA has a registered batch");
+        assert_eq!(status.operation_id, "batchA");
+        assert!(!status.started, "queued batch must report started: false");
+
+        batches.lock().unwrap().insert("batchB".to_string(), make_batch_cancel_for_repo("repoB", true, &[]));
+        let status = find_active_batch_for_repo(&batches, "repoB").unwrap().unwrap();
+        assert_eq!(status.operation_id, "batchB");
+        assert!(status.started, "running batch must report started: true");
+    }
+
+    #[test]
+    fn find_active_batch_for_repo_is_none_for_an_unrelated_repo() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        batches.lock().unwrap().insert("batchA".to_string(), make_batch_cancel_for_repo("repoA", false, &[]));
+        assert!(find_active_batch_for_repo(&batches, "repoB").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_active_batch_for_repo_reports_the_batchs_exact_target_ids() {
+        let batches = std::sync::Mutex::new(HashMap::new());
+        batches.lock().unwrap().insert(
+            "batchA".to_string(),
+            make_batch_cancel_for_repo("repoA", false, &["snap1", "snap2", "snap3"]),
+        );
+        let status = find_active_batch_for_repo(&batches, "repoA").unwrap().unwrap();
+        assert_eq!(status.target_ids, vec!["snap1", "snap2", "snap3"]);
     }
 }

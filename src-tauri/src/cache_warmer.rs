@@ -130,8 +130,8 @@ fn trigger_sweep(app: &tauri::AppHandle, running: &Arc<AtomicBool>) {
         return;
     }
 
-    if app.state::<IndexHandle>().manual_active.load(Ordering::SeqCst) {
-        return; // manual indexing in progress — yield this tick
+    if app.state::<IndexHandle>().manual_active.load(Ordering::SeqCst) != 0 {
+        return; // manual indexing in progress (or queued) — yield this tick
     }
 
     if running.swap(true, Ordering::SeqCst) {
@@ -164,9 +164,10 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
         return SweepResult::Locked;
     }
 
-    if index_handle.manual_active.load(Ordering::SeqCst) {
-        // Manual indexing (single-snapshot or "Index All") is active — stop
-        // the sweep loop cleanly; it will restart on a later tick.
+    if index_handle.manual_active.load(Ordering::SeqCst) != 0 {
+        // Manual indexing (single-snapshot or "Index All", including a batch
+        // merely queued for its turn) is active — stop the sweep loop cleanly;
+        // it will restart on a later tick.
         return SweepResult::Locked;
     }
 

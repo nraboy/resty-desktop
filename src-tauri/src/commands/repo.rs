@@ -237,20 +237,28 @@ pub async fn test_repo_connection(
     result
 }
 
+/// Cache-only read: never shells out to restic, even on a miss. This used to fall through to
+/// `fetch_and_cache_stats` on a miss — fine under normal operation (a genuine miss only ever
+/// happened for a repo that had literally never been fetched), but "Clear All Cache"
+/// (`AppDb::clear_cache`, SettingsPage) wipes `repo_stats_cache` for every repo at once, and
+/// RepositoriesPage calls this command for every repo on mount (see CLAUDE.md's Intentional
+/// Designs). Together, that meant the very next visit to Repositories after a cache clear
+/// silently kicked off a real `restic stats` subprocess for every single repo — a manual-only
+/// feature auto-refreshing itself the moment its cache was cleared, contradicting the whole
+/// point of the manual-only redesign (see this file's `refresh_repo_stats` doc comment).
+/// Returns `Err` on a miss so the frontend's existing "couldn't load" fallback (the `—`
+/// placeholder) applies — same as any other failed fetch; the user must click Refresh (row or
+/// All) to actually populate it, exactly like a brand-new repo always required. No restic call,
+/// no `RepoLocks`/`MasterKey` needed, so this is a plain sync command (matches `list_repos`).
 #[tauri::command]
-pub async fn get_repo_stats(
-    app: tauri::AppHandle,
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    repo_locks: State<'_, RepoLocks>,
-    repo_id: String,
-) -> Result<ResticStats, String> {
-    if let Ok(Some((total_size, total_file_count, snapshots_count, cached_at))) = db.get_stats(&repo_id) {
-        // Cache hit — no restic call happens, so there's no operation to report;
-        // matches the "not a real restic operation" reasoning for list_snapshots.
-        return Ok(ResticStats { total_size, total_file_count, snapshots_count, cached_at: Some(cached_at) });
+pub fn get_repo_stats(db: State<'_, AppDb>, repo_id: String) -> Result<ResticStats, String> {
+    match db.get_stats(&repo_id) {
+        Ok(Some((total_size, total_file_count, snapshots_count, cached_at))) => {
+            Ok(ResticStats { total_size, total_file_count, snapshots_count, cached_at: Some(cached_at) })
+        }
+        Ok(None) => Err("No cached stats for this repository".to_string()),
+        Err(e) => Err(e),
     }
-    fetch_and_cache_stats(&app, &db, &master_key, &repo_locks, &repo_id).await
 }
 
 /// Manual-only refresh: stats are never auto-evicted (see CLAUDE.md's Restic
