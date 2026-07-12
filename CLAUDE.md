@@ -43,13 +43,14 @@ src/
     Sidebar.tsx    # Left nav with app icon + repo indicator
     ActivityPanel.tsx # Right-side slide-in drawer (slim always-visible rail + fixed overlay) surfacing
                    #   background activity with no other visibility: auto-indexing progress, scheduler-
-                   #   triggered backups (Active Tasks — Stop wired to cancelBackup(), which kills whatever's
+                   #   triggered backups (Active Tasks — driven by the unified `task` event bus filtered
+                   #   to origin "scheduler", see Operation Event Bus and lib/activity.tsx's
+                   #   reduceSchedulerBackup; Stop wired to cancelBackup(), which kills whatever's
                    #   in BackupHandle.child regardless of manual/scheduler origin; shown only during the
                    #   "backup" phase, hidden during "retention" since apply_retention has no cancel path —
                    #   subtitle swaps to "Applying retention rules…" so the ~10-20s forget isn't mistaken for
                    #   a frozen bar), in-flight repo stats refreshes (also in Active Tasks — lifecycle-only,
-                   #   no progress bar; one of two stateful consumers of the unified `task` event bus,
-                   #   see Operation Event Bus), next few due schedules (Upcoming Tasks — rows truncate with
+                   #   no progress bar), next few due schedules (Upcoming Tasks — rows truncate with
                    #   a hover tooltip for long plan lists), and last few backup runs (Recent Logs — neutral
                    #   "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries).
                    #   Restore/copy/mirror/manual backup/prune have their own progress modals and are
@@ -62,11 +63,17 @@ src/
     invoke.ts      # Typed wrappers over tauri invoke()
     activity.tsx   # ActivityProvider (mounted once in App.tsx, outlives route changes since it must keep
                    #   updating no matter which page is mounted): indexing progress, the scheduler-triggered
-                   #   activeBackup (never a manual/"Run Now" backup — see scheduler.rs's
-                   #   scheduler:backup-started) carrying a phase ("backup"|"retention") flipped by
-                   #   scheduler:retention-started, upcoming due schedules (refreshed on schedules:changed,
-                   #   which the scheduler emits after record_schedule_run advances next_run_at — NOT on
-                   #   scheduler:backup-finished, which fires per-plan before the advance and would read a
+                   #   activeBackup (never a manual/"Run Now" backup — derived from the unified `task` bus
+                   #   filtered to origin "scheduler" via the pure, unit-tested reduceSchedulerBackup
+                   #   reducer, replacing the legacy scheduler:backup-started/backup:progress/
+                   #   scheduler:retention-started/scheduler:backup-finished events outright — see Operation
+                   #   Event Bus) carrying a phase ("backup"|"retention") flipped by the retention step's own
+                   #   `forget`-kind task op reaching "started"; a plan with no retention configured never
+                   #   gets a `forget` op, so that case is instead dismissed by a plan-lookup effect once it
+                   #   confirms no keep_* flag is set (see reduceSchedulerBackup's doc comment for why the
+                   #   reducer alone can't know this), upcoming due schedules (refreshed on schedules:changed,
+                   #   which the scheduler emits after record_schedule_run advances next_run_at — NOT on the
+                   #   task bus, which fires per-plan before the advance and would read a
                    #   stale past timestamp), recentLogs, and statsRefreshing/statsFailed — repoId sets
                    #   derived (via the pure, unit-tested reduceStatsOps reducer, StatsOpsState) from the
                    #   unified `task` event bus filtered to kind "stats" rather than from a per-operation
@@ -298,12 +305,17 @@ src-tauri/
                      #   schedules via execute_backup; applies retention after backup, calling
                      #   log_retention_failure (snapshot.rs) if it errors so the failure isn't silently swallowed;
                      #   skips when locked or when a backup is already running (busy flag); AtomicBool guards
-                     #   against overlapping ticks. Per-plan event sequence to the Activity panel:
-                     #   scheduler:backup-started → execute_backup → (scheduler:retention-started → apply_retention,
-                     #   only when retention actually runs) → scheduler:backup-finished (emitted AFTER retention so
-                     #   the active task stays visible for the whole plan — backup+retention — and retention is what
-                     #   dismisses it before the next plan; previously fired right after execute_backup, hiding the
-                     #   ~10-20s forget as a dead gap between two plans' backups). Before the first plan starts:
+                     #   against overlapping ticks. Per-plan Activity-panel visibility rides entirely on the
+                     #   `task` bus now (see Operation Event Bus) — no events are emitted from this file
+                     #   itself for it: execute_backup's own OperationCtx (kind Backup, origin Scheduler)
+                     #   covers the backup phase, and apply_retention's (kind Forget, same origin, only
+                     #   created when retention actually runs — a plan with no keep_* flag set never gets
+                     #   one) covers retention. The three legacy scheduler:backup-started/
+                     #   retention-started/backup-finished events this file used to emit alongside were
+                     #   retired outright once activity.tsx's reduceSchedulerBackup migrated onto the bus —
+                     #   the frontend now infers "plan fully done" from the retention op's own terminal
+                     #   event (or, for a no-retention plan, from a plan lookup confirming none is coming)
+                     #   rather than a dedicated finished signal from this loop. Before the first plan starts:
                      #   record_schedule_run advances next_run_at, then emits schedules:changed so Upcoming Tasks
                      #   refreshes to the next fire time immediately — not after all plans + retention finish, which
                      #   would otherwise leave Upcoming Tasks showing the stale past due-time for the entire run
@@ -502,8 +514,9 @@ means "no further snapshots will start" — the snapshot already in flight still
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — three stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle, and
-`index`'s batch-level progress); everything else still emits into the void.** `src/lib/types.ts`
+**Frontend scope — four stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
+`index`'s batch-level progress, and the scheduler-backup `activeBackup` row); everything else
+still emits into the void.** `src/lib/types.ts`
 mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
 (`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
@@ -563,6 +576,33 @@ independent of any other batch running elsewhere. The existing per-snapshot list
 (`SnapshotsPage`/`SearchPage`/`RepoSearchPage`) already guard on `targetId` being set, so they
 transparently ignore every batch-level op with no changes required.
 
+`activeBackup` (the scheduler-triggered backup row in Active Tasks) is the fourth consumer, and the
+first case of a **legacy event family fully retired** for a multi-op lifecycle rather than a
+single event (`index:done` was one event; this replaced four: `scheduler:backup-started`,
+the guarded `backup:progress`, `scheduler:retention-started`, `scheduler:backup-finished`).
+`reduceSchedulerBackup` (`activity.tsx`) filters `task` to `origin: "scheduler"` and stitches two
+separate ops into one continuous row across a plan's full run: `kind: "backup"` (started/progress/
+finished, `targetId` = plan id) for the transfer phase, then `kind: "forget"` (started/finished,
+same `targetId`, matched only once the backup op has reached `finished`) for retention — the same
+two ops `execute_backup`/`apply_retention` already emit via their own `OperationCtx`s (see
+scheduler.rs), just filtered and correlated on the frontend rather than the backend re-emitting a
+combined signal. A plan with no retention configured never gets a `forget` op (`scheduler.rs` only
+calls `apply_retention` when the plan has ≥1 `keep_*` flag set), so the reducer alone can't decide
+when to dismiss that case — it leaves the row sitting with a `backupFinished: true` marker, and a
+separate provider effect (keyed on the run and re-checked when `backupFinished` flips) resolves the
+plan via `listBackupPlans()` and clears the row once it confirms no retention is coming. That same
+lookup also resolves the row's display name — the bus carries only the plan id, not a display name,
+same as `indexBatchRepoNames` above — so the row shows plan name only (the legacy events additionally
+carried a schedule name that the bus has no equivalent for). This same fix-the-early-return-gap
+pattern used by `fetch_and_cache_stats` above was needed in `apply_retention` too, for the identical
+reason: it originally did `master_key.get()?`/`db.get_full_repo(...)?` before creating its
+`OperationCtx`, so a failure there (e.g. the plan's repo deleted in the narrow window between backup
+and retention) skipped emitting any `forget` event at all — with the legacy `scheduler:backup-finished`
+retired, nothing else would have cleared the row, leaving it stuck until some unrelated later
+scheduled backup happened to displace it. `apply_retention` now creates its `OperationCtx` first and
+calls `task_ctx.failed(e)` explicitly on both lookups, closing that gap the same way `repo.rs` already
+had for stats.
+
 The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
 `finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`
 writes `repo_stats_cache` before it calls `task_ctx.finished()`), rather than widening the
@@ -570,10 +610,14 @@ envelope with a result payload. That ordering (cache write before `finished`) is
 it makes "task says finished" provably imply "cache read will see the new value," not just
 usually true.
 
-For every other kind (`backup`, `restore`, `copy`, …) **no stateful frontend code subscribes to
-`task`** yet — that remains deliberate, not an oversight: a live consumer wired before there's an
-actual feature needing it risks the same fate as an earlier, scrapped attempt at this pattern
-(over-eager re-renders, a shape that rots before it's ever exercised). `App.tsx`'s dev-only
+`backup`/`forget` are now consumed too, but only partially — `reduceSchedulerBackup` filters to
+`origin: "scheduler"`, so manual/"Run Now" backups and manual retention (`forget_by_plan`,
+`run_schedule_now`'s retention call) still emit into the void for Activity-panel purposes; they
+already have their own progress modals per the "Restore/copy/mirror/manual backup/prune" exclusion
+above. For every other kind (`restore`, `copy`, `prune`, …) **no stateful frontend code subscribes
+to `task`** at all yet — that remains deliberate, not an oversight: a live consumer wired before
+there's an actual feature needing it risks the same fate as an earlier, scrapped attempt at this
+pattern (over-eager re-renders, a shape that rots before it's ever exercised). `App.tsx`'s dev-only
 `console.debug("[task]", ...)` effect still covers those — stateless (never calls `setState`),
 gated on `import.meta.env.DEV`, safe to delete. The floor against "emitting into the void" for
 the rest is `tasks.rs`'s own test suite (a recording `TaskSink` asserting lifecycle ordering and

@@ -25,7 +25,9 @@
 // Only one batch actually runs at a time (IndexHandle::batch_turn) — the rest sit in the
 // "Up Next" section below Active Tasks with status "queued" until they're promoted to
 // "running" (a "started" task event); Stop works immediately on a queued batch too, it
-// doesn't wait for its turn.
+// doesn't wait for its turn. The scheduler-backup row (activeBackup) is the newest bus
+// consumer — see activity.tsx's reduceSchedulerBackup — and shows plan name only (the bus
+// carries no schedule name, unlike the legacy scheduler:* events it replaced).
 //
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
@@ -116,9 +118,9 @@ export default function ActivityPanel() {
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
   // scheduler (unchanged since v0.3.0); the only thing missing was a button to call it from
-  // here. Resets automatically once activeBackup clears (scheduler:backup-finished fires
-  // regardless of outcome — success, failure, or this very cancel), so it's ready again the
-  // next time a scheduled backup runs.
+  // here. Resets automatically once activeBackup clears (its underlying `task` op reaches a
+  // terminal phase regardless of outcome — success, failure, or this very cancel — see
+  // reduceSchedulerBackup), so it's ready again the next time a scheduled backup runs.
   const [stoppingScheduled, setStoppingScheduled] = useState(false);
   useEffect(() => {
     if (!activeBackup) setStoppingScheduled(false);
@@ -240,8 +242,8 @@ export default function ActivityPanel() {
               {activeBackup && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-gray-200 truncate" title={`${activeBackup.scheduleName} — ${activeBackup.planName}`}>
-                      {activeBackup.planName} <span className="text-gray-500">· {activeBackup.scheduleName}</span>
+                    <p className="text-sm text-gray-200 truncate" title={activeBackup.planName ?? undefined}>
+                      {activeBackup.planName ?? "Scheduled backup"}
                     </p>
                     {activeBackup.phase === "backup" && (
                       <button
@@ -265,7 +267,7 @@ export default function ActivityPanel() {
                       : stoppingScheduled
                       ? "Stopping…"
                       : activeBackup.progress
-                      ? `${activeBackup.progress.filesDone.toLocaleString()} / ${activeBackup.progress.totalFiles.toLocaleString()} files`
+                      ? `${(activeBackup.progress.itemsDone ?? 0).toLocaleString()} / ${(activeBackup.progress.itemsTotal ?? 0).toLocaleString()} files`
                       : "Starting…"}
                   </p>
                 </div>

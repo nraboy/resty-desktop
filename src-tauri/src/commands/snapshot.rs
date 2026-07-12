@@ -616,8 +616,9 @@ pub async fn execute_backup(
                 started_at, duration, files_new, files_changed, bytes_added, None,
             );
             // Fires for every backup (manual or scheduled) — the Activity panel's Recent
-            // Logs section listens for this to refresh, since scheduler.rs's
-            // `scheduler:backup-finished` only covers scheduler-triggered runs.
+            // Logs section listens for this to refresh; the scheduler-only `task` bus
+            // lifecycle (origin: "scheduler", see activity.tsx's reduceSchedulerBackup)
+            // doesn't cover manual runs, so this stays the one signal both share.
             let _ = app.emit("backup:history-updated", ());
 
             let body = format!(
@@ -1074,10 +1075,14 @@ pub fn apply_retention(
     // execute_backup's `origin` param).
     origin: TaskOrigin,
 ) -> Result<String, String> {
-    let key = master_key.get()?;
-    let repo = db.get_full_repo(repo_id, &key)?;
-    let restic_path = super::get_restic_path(db);
-
+    // OperationCtx is created before the fallible key/repo lookups below (with each
+    // explicitly calling task_ctx.failed() instead of relying on `?`), same pattern as
+    // fetch_and_cache_stats (repo.rs) — this is a scheduled backup's *retention* step,
+    // which the Activity panel's activeBackup row (activity.tsx's reduceSchedulerBackup)
+    // is already displaying while waiting specifically for this op's "started" event. If a
+    // lookup failed early via `?` and skipped OperationCtx entirely, that row would never
+    // receive a task event and get stuck showing stale "backup finished" state until some
+    // other scheduled backup happened to displace it.
     let task_ctx = OperationCtx::new(
         app.clone(),
         TaskKind::Forget,
@@ -1086,6 +1091,22 @@ pub fn apply_retention(
         origin,
         None,
     );
+
+    let key = match master_key.get() {
+        Ok(k) => k,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    let repo = match db.get_full_repo(repo_id, &key) {
+        Ok(r) => r,
+        Err(e) => {
+            task_ctx.failed(e.clone());
+            return Err(e);
+        }
+    };
+    let restic_path = super::get_restic_path(db);
 
     let args = build_retention_args(tags, paths, retention);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

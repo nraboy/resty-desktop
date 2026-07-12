@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSchedulerBackup, type StatsOpsState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -192,5 +192,108 @@ describe("reduceIndexBatches", () => {
     state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batchA", repoId: "repoA", phase: "finished" }));
     expect(state.has("batchA")).toBe(false);
     expect(state.has("batchB")).toBe(true);
+  });
+});
+
+describe("reduceSchedulerBackup", () => {
+  function schedulerEvent(overrides: Partial<TaskEvent>): TaskEvent {
+    return taskEvent({ origin: "scheduler", kind: "backup", repoId: "repoA", targetId: "planA", ...overrides });
+  }
+
+  it("starts a run on a scheduler backup 'started' event", () => {
+    const state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    expect(state).toEqual({
+      runId: "opBackup1",
+      currentOperationId: "opBackup1",
+      planId: "planA",
+      planName: null,
+      progress: null,
+      phase: "backup",
+      backupFinished: false,
+    });
+  });
+
+  it("ignores a manual-origin backup event", () => {
+    const state = reduceSchedulerBackup(null, schedulerEvent({ origin: "manual", operationId: "opBackup1", phase: "started" }));
+    expect(state).toBeNull();
+  });
+
+  it("updates progress from a matching backup progress event", () => {
+    let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({
+      operationId: "opBackup1", phase: "progress",
+      progress: { percentDone: 0.5, itemsDone: 5, itemsTotal: 10 },
+    }));
+    expect(state?.progress).toEqual({ percentDone: 0.5, itemsDone: 5, itemsTotal: 10 });
+  });
+
+  it("ignores a progress event for a stale operationId", () => {
+    const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    const result = reduceSchedulerBackup(started, schedulerEvent({ operationId: "opOther", phase: "progress" }));
+    expect(result).toBe(started);
+  });
+
+  it("stays visible with backupFinished set once the backup op finishes", () => {
+    let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup1", phase: "finished" }));
+    expect(state).toMatchObject({ phase: "backup", backupFinished: true, currentOperationId: "opBackup1" });
+  });
+
+  it("clears on a matching backup failed/cancelled event", () => {
+    for (const phase of ["failed", "cancelled"] as const) {
+      const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+      const result = reduceSchedulerBackup(started, schedulerEvent({ operationId: "opBackup1", phase }));
+      expect(result).toBeNull();
+    }
+  });
+
+  it("transitions to retention on a matching forget 'started' event once the backup has finished", () => {
+    let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup1", phase: "finished" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ kind: "forget", operationId: "opForget1", phase: "started" }));
+    expect(state).toMatchObject({ phase: "retention", currentOperationId: "opForget1", runId: "opBackup1" });
+  });
+
+  it("ignores a forget 'started' event before the backup has finished", () => {
+    const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    const result = reduceSchedulerBackup(started, schedulerEvent({ kind: "forget", operationId: "opForget1", phase: "started" }));
+    expect(result).toBe(started);
+  });
+
+  it("ignores a forget 'started' event for a different plan", () => {
+    let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup1", phase: "finished" }));
+    const result = reduceSchedulerBackup(state, schedulerEvent({ kind: "forget", operationId: "opForget1", phase: "started", targetId: "planB" }));
+    expect(result).toBe(state);
+  });
+
+  it("clears on a matching forget finished/failed event", () => {
+    for (const phase of ["finished", "failed"] as const) {
+      let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+      state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup1", phase: "finished" }));
+      state = reduceSchedulerBackup(state, schedulerEvent({ kind: "forget", operationId: "opForget1", phase: "started" }));
+      state = reduceSchedulerBackup(state, schedulerEvent({ kind: "forget", operationId: "opForget1", phase }));
+      expect(state).toBeNull();
+    }
+  });
+
+  it("a new plan's 'started' event displaces the previous plan's lingering finished state", () => {
+    let state = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started", targetId: "planA" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup1", phase: "finished", targetId: "planA" }));
+    state = reduceSchedulerBackup(state, schedulerEvent({ operationId: "opBackup2", phase: "started", targetId: "planB" }));
+    expect(state).toEqual({
+      runId: "opBackup2",
+      currentOperationId: "opBackup2",
+      planId: "planB",
+      planName: null,
+      progress: null,
+      phase: "backup",
+      backupFinished: false,
+    });
+  });
+
+  it("ignores non-backup/forget scheduler task kinds", () => {
+    const result = reduceSchedulerBackup(null, schedulerEvent({ kind: "stats", phase: "started" }));
+    expect(result).toBeNull();
   });
 });

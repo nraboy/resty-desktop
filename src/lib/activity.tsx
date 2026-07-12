@@ -47,6 +47,19 @@
 // resolves the *set* of repoIds among active batches to names via listRepos() — the same by-id
 // lookup loadUpcoming already does for plan names, just async instead of inline since a batch
 // can start at any time rather than only on mount/refetch.
+//
+// `activeBackup` (the scheduler-triggered backup row) is the last "Active Tasks" consumer
+// migrated onto `task`, retiring the legacy `scheduler:backup-started`/`backup:progress`
+// (guarded)/`scheduler:retention-started`/`scheduler:backup-finished` events outright — the same
+// full-retirement treatment `index:done` got, not an add-alongside. The bus already carries the
+// whole lifecycle via `origin: "scheduler"`: `kind:"backup"` (started/progress/finished, targetId
+// = plan_id) for the transfer phase, then `kind:"forget"` (started/finished, same targetId) for
+// retention — see `reduceSchedulerBackup`. A plan with no retention configured never gets a
+// `forget` op (scheduler.rs only emits one when the plan has ≥1 keep_* flag set), so that case is
+// dismissed by the plan-lookup effect below rather than an event, since only that lookup knows
+// whether retention is actually configured for the plan. The row shows the plan name only (the
+// bus has no schedule name) — resolved the same lazy, cached-DB-read way `indexBatchRepoNames`
+// resolves repo names.
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -57,7 +70,7 @@ import {
   listRepos,
   listSchedules,
 } from "./invoke";
-import type { BackupHistoryEntry, BackupProgress, Schedule, TaskEvent } from "./types";
+import type { BackupHistoryEntry, Schedule, TaskEvent, TaskProgress } from "./types";
 
 export interface UpcomingBackup {
   scheduleId: string;
@@ -67,21 +80,36 @@ export interface UpcomingBackup {
 }
 
 export interface ActiveScheduledBackup {
-  scheduleName: string;
-  planName: string;
-  progress: BackupProgress | null;
-  /** "backup" = bytes transferring; "retention" = the post-backup forget
-   *  (apply_retention) is running. Drives the panel subtitle so the finalize
-   *  step isn't mistaken for a frozen bar. See scheduler.rs's
-   *  scheduler:retention-started. */
+  /** Stable for the whole scheduled run (backup + retention) — set once from the backup op's
+   *  operationId and never reassigned, even once `currentOperationId` adopts the forget op's id
+   *  on the retention transition. Used to key the plan-lookup effect below so it only re-runs
+   *  when a genuinely new run starts, not on every phase change. */
+  runId: string;
+  /** The operationId of whichever `task` op is currently driving this row — the backup op while
+   *  `phase === "backup"`, the forget op once `phase === "retention"`. Used by the reducer to
+   *  match incoming events to this row. */
+  currentOperationId: string;
+  planId: string;
+  /** Resolved lazily via listBackupPlans() — the `task` event only carries the plan id. Null
+   *  while resolving or if the plan was deleted mid-run. */
+  planName: string | null;
+  progress: TaskProgress | null;
+  /** "backup" = bytes transferring; "retention" = the post-backup forget (apply_retention) is
+   *  running. Drives the panel subtitle so the finalize step isn't mistaken for a frozen bar. */
   phase: "backup" | "retention";
+  /** True once the backup `task` op has reached "finished". A plan with no retention configured
+   *  never gets a "forget" op, so this is what tells the plan-lookup effect it's safe to dismiss
+   *  the row once it confirms no retention is coming, rather than waiting on an event that will
+   *  never arrive. */
+  backupFinished: boolean;
 }
 
 interface ActivityState {
   /** Background auto-indexing progress; null when auto-indexing is off or fully caught up. */
   indexing: { cached: number; total: number } | null;
-  /** The scheduler-triggered backup currently running, if any. Manual/"Run Now" backups
-   *  never populate this — see scheduler.rs's `scheduler:backup-started`. */
+  /** The scheduler-triggered backup currently running, if any. Manual/"Run Now" backups never
+   *  populate this — derived from `task` events filtered to `origin === "scheduler"`, see
+   *  `reduceSchedulerBackup`. */
   activeBackup: ActiveScheduledBackup | null;
   /** Next three enabled, due schedules, soonest first. */
   upcoming: UpcomingBackup[];
@@ -234,6 +262,64 @@ export function reduceIndexBatches(
   }
 }
 
+/** Pure reducer over `task` events, isolating the scheduler-triggered backup lifecycle (see the
+ *  module doc comment above). Filters to `origin === "scheduler"`; `kind:"backup"` drives the
+ *  transfer phase, `kind:"forget"` (matched by `targetId === planId`) drives retention. The
+ *  no-retention dismissal isn't handled here — the reducer alone can't know whether a plan has
+ *  retention configured, so a `finished` backup with no retention just sits with
+ *  `backupFinished: true` until the plan-lookup effect in the provider clears it. Exported for a
+ *  unit test (see activity.test.ts). */
+export function reduceSchedulerBackup(
+  state: ActiveScheduledBackup | null,
+  event: TaskEvent
+): ActiveScheduledBackup | null {
+  if (event.origin !== "scheduler") return state;
+
+  if (event.kind === "backup") {
+    switch (event.phase) {
+      case "started":
+        return {
+          runId: event.operationId,
+          currentOperationId: event.operationId,
+          planId: event.targetId ?? "",
+          planName: null,
+          progress: null,
+          phase: "backup",
+          backupFinished: false,
+        };
+      case "progress":
+        if (!state || state.currentOperationId !== event.operationId) return state;
+        return { ...state, progress: event.progress ?? state.progress };
+      case "finished":
+        if (!state || state.currentOperationId !== event.operationId) return state;
+        // Stays visible — a "forget" op may still follow (see the no-retention note above).
+        return { ...state, backupFinished: true };
+      case "failed":
+      case "cancelled":
+        if (!state || state.currentOperationId !== event.operationId) return state;
+        return null;
+      default:
+        return state; // "pending"/"cancelling" — backup never emits pending; cancelling is local UI state
+    }
+  }
+
+  if (event.kind === "forget") {
+    switch (event.phase) {
+      case "started":
+        if (!state || !state.backupFinished || event.targetId !== state.planId) return state;
+        return { ...state, currentOperationId: event.operationId, phase: "retention" };
+      case "finished":
+      case "failed":
+        if (!state || state.currentOperationId !== event.operationId) return state;
+        return null;
+      default:
+        return state;
+    }
+  }
+
+  return state;
+}
+
 const ActivityContext = createContext<ActivityState | null>(null);
 
 export function useActivity(): ActivityState {
@@ -276,8 +362,6 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [indexBatchRepoNames, setIndexBatchRepoNames] = useState<Record<string, string | null>>({});
   const [clockTick, setClockTick] = useState(0);
   const [statsRefreshAllProgress, setStatsRefreshAllProgress] = useState<{ current: number; total: number } | null>(null);
-  // Holds name/plan between "started" and the first "backup:progress" payload.
-  const pendingBackupRef = useRef<{ scheduleName: string; planName: string } | null>(null);
   // statsRefreshing/statsFailed (both deduped repoId arrays) are derived from this on every
   // "task" event via reduceStatsOps.
   const statsOpsRef = useRef<StatsOpsState>(initialStatsOpsState);
@@ -285,6 +369,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   // mirrored into a ref (like statsOpsRef) so the listener can compare by reference and only
   // call setActiveIndexBatches when the set of batches actually changed.
   const indexBatchesRef = useRef<Map<string, ActiveIndexBatch>>(new Map());
+  // activeBackup is derived from this on every "task" event via reduceSchedulerBackup; also
+  // written directly by the plan-lookup effect below (planName resolution, no-retention
+  // dismissal) so the ref stays the source of truth the next reduce builds on rather than
+  // reverting a plan name the reducer itself never sets.
+  const schedulerBackupRef = useRef<ActiveScheduledBackup | null>(null);
 
   const refreshIndexing = () => { loadIndexing().then(setIndexing).catch(() => {}); };
   const refreshUpcoming = () => { loadUpcoming().then(setUpcoming).catch(() => {}); };
@@ -298,46 +387,22 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     const tickTimer = setInterval(() => setClockTick((t) => t + 1), 60_000);
 
     const unlistenSnapshotsRefreshed = listen("snapshots:refreshed", refreshIndexing);
+    // upcoming is refreshed via the schedules:changed event the scheduler emits after
+    // record_schedule_run advances next_run_at — that fires after all plans + retention
+    // complete, which is when the next fire time is actually known.
     const unlistenSchedulesChanged = listen("schedules:changed", refreshUpcoming);
 
-    const unlistenBackupStarted = listen<{ scheduleName: string; planName: string }>(
-      "scheduler:backup-started",
-      (e) => {
-        pendingBackupRef.current = e.payload;
-        setActiveBackup({ ...e.payload, progress: null, phase: "backup" });
-      }
-    );
-    const unlistenBackupProgress = listen<BackupProgress>("backup:progress", (e) => {
-      if (!pendingBackupRef.current) return; // not a scheduler-triggered backup — ignore
-      // Functional update preserves `phase` (a plain spread of pendingBackupRef would
-      // drop it). No backup:progress events arrive during retention anyway, so progress
-      // stays frozen at its last value once retention-started flips the phase.
-      setActiveBackup((prev) => (prev ? { ...prev, progress: e.payload } : prev));
-    });
-    const unlistenRetentionStarted = listen("scheduler:retention-started", () => {
-      // Flip phase on the currently-active (just-backed-up) plan. Guarded so a stray
-      // event with no active task is a no-op rather than fabricating one.
-      setActiveBackup((prev) => (prev ? { ...prev, phase: "retention" } : prev));
-    });
-    const unlistenBackupFinished = listen("scheduler:backup-finished", () => {
-        pendingBackupRef.current = null;
-        setActiveBackup(null);
-        // upcoming is refreshed via the schedules:changed event the scheduler emits
-        // after record_schedule_run advances next_run_at — that fires after all plans
-        // + retention complete, which is when the next fire time is actually known.
-        // Refreshing here would read the stale (past) next_run_at.
-      });
-    // Fires for every backup, manual or scheduled (snapshot.rs's execute_backup) — unlike
-    // scheduler:backup-finished above, which only covers scheduler-triggered runs and would
-    // otherwise leave a manually-run backup missing from Recent Logs until the next
-    // scheduled run happened to refresh it.
+    // Fires for every backup, manual or scheduled (snapshot.rs's execute_backup) — unlike the
+    // scheduler-only lifecycle activeBackup tracks below, this covers manual runs too, so a
+    // manually-run backup doesn't stay missing from Recent Logs until the next scheduled tick.
     const unlistenHistoryUpdated = listen("backup:history-updated", refreshLogs);
 
-    // Subscriber to the unified `task` bus — see module doc comment above. "stats" kind
-    // events drive statsRefreshing/statsFailed; "index" kind events (replacing the legacy
-    // index:done) trigger a plain refetch, and each batch-level "index" op (no targetId)
-    // additionally drives activeIndexBatches. Every other kind is ignored here (it's still
-    // observed by App.tsx's dev-only console.debug effect).
+    // Subscriber to the unified `task` bus — see module doc comment above. "stats" kind events
+    // drive statsRefreshing/statsFailed; "index" kind events (replacing the legacy index:done)
+    // trigger a plain refetch, and each batch-level "index" op (no targetId) additionally
+    // drives activeIndexBatches; "backup"/"forget" kind events with origin "scheduler" drive
+    // activeBackup (replacing the legacy scheduler:* events, retired outright). Every other kind
+    // is ignored here (it's still observed by App.tsx's dev-only console.debug effect).
     const unlistenTask = listen<TaskEvent>("task", (e) => {
       statsOpsRef.current = reduceStatsOps(statsOpsRef.current, e.payload);
       setStatsRefreshing([...new Set(statsOpsRef.current.inFlight.values())]);
@@ -353,16 +418,17 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         indexBatchesRef.current = nextBatches;
         setActiveIndexBatches([...nextBatches.values()]);
       }
+      const nextSchedulerBackup = reduceSchedulerBackup(schedulerBackupRef.current, e.payload);
+      if (nextSchedulerBackup !== schedulerBackupRef.current) {
+        schedulerBackupRef.current = nextSchedulerBackup;
+        setActiveBackup(nextSchedulerBackup);
+      }
     });
 
     return () => {
       clearInterval(tickTimer);
       unlistenSnapshotsRefreshed.then((fn) => fn());
       unlistenSchedulesChanged.then((fn) => fn());
-      unlistenBackupStarted.then((fn) => fn());
-      unlistenBackupProgress.then((fn) => fn());
-      unlistenRetentionStarted.then((fn) => fn());
-      unlistenBackupFinished.then((fn) => fn());
       unlistenHistoryUpdated.then((fn) => fn());
       unlistenTask.then((fn) => fn());
     };
@@ -391,6 +457,51 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       });
     return () => { cancelled = true; };
   }, [batchRepoIdsKey]);
+
+  // Resolves activeBackup's plan name (the `task` event only carries the plan id — same
+  // rationale as indexBatchRepoNames above) via listBackupPlans(), and doubles as the
+  // no-retention dismissal: a plan with no keep_* flag set never gets a "forget" op (see
+  // scheduler.rs), so reduceSchedulerBackup alone can't know to clear the row once the backup
+  // finishes — only this lookup, which sees the plan's actual retention config, can. Keyed on
+  // `runId` (stable across the backup->retention transition) plus `backupFinished` so it
+  // re-checks once the backup completes, when the no-retention case actually becomes decidable.
+  const activeRunId = activeBackup?.runId;
+  const activePlanId = activeBackup?.planId;
+  const activeBackupFinished = activeBackup?.backupFinished ?? false;
+  useEffect(() => {
+    if (!activeRunId || !activePlanId) return;
+    let cancelled = false;
+    listBackupPlans()
+      .then((plans) => {
+        if (cancelled) return;
+        const plan = plans.find((p) => p.id === activePlanId);
+        const r = plan?.retention;
+        const hasRetention = !!r && (
+          r.keepLast != null || r.keepDaily != null || r.keepWeekly != null ||
+          r.keepMonthly != null || r.keepYearly != null
+        );
+        setActiveBackup((prev) => {
+          if (!prev || prev.runId !== activeRunId) return prev; // stale — a newer run has since started
+          if (prev.backupFinished && prev.phase === "backup" && !hasRetention) {
+            schedulerBackupRef.current = null;
+            return null;
+          }
+          const next = { ...prev, planName: plan?.name ?? null };
+          schedulerBackupRef.current = next;
+          return next;
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setActiveBackup((prev) => {
+          if (!prev || prev.runId !== activeRunId) return prev;
+          const next = { ...prev, planName: null };
+          schedulerBackupRef.current = next;
+          return next;
+        });
+      });
+    return () => { cancelled = true; };
+  }, [activeRunId, activePlanId, activeBackupFinished]);
 
   return (
     <ActivityContext.Provider

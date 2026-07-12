@@ -89,22 +89,13 @@ async fn tick(app: &tauri::AppHandle) {
         let _ = app.emit("schedules:changed", ());
 
         for plan in plans {
-            // These events are only emitted from this background scheduler tick, never
-            // from a user-initiated run (manual "Run" on BackupPlansPage, or "Run Now" on
-            // SchedulesPage) — that's the signal the Activity panel uses to distinguish a
-            // background scheduled backup (which it surfaces) from a manual one (which
-            // already has its own progress modal and should stay out of the panel).
-            let _ = app.emit(
-                "scheduler:backup-started",
-                serde_json::json!({
-                    "scheduleId": sched.id,
-                    "scheduleName": sched.name,
-                    "planId": plan.id,
-                    "planName": plan.name,
-                    "repoId": plan.repo_id,
-                }),
-            );
-
+            // The `task` bus (see execute_backup's OperationCtx below) is what the Activity
+            // panel now uses to distinguish a background scheduled backup (which it surfaces,
+            // via origin: "scheduler") from a manual one (which already has its own progress
+            // modal and should stay out of the panel) — see activity.tsx's
+            // reduceSchedulerBackup. The legacy scheduler:backup-started/-finished and
+            // retention-started events this loop used to emit alongside were retired once that
+            // migration landed; the bus already carries everything they did.
             let ok = execute_backup(
                 app,
                 &db,
@@ -131,17 +122,15 @@ async fn tick(app: &tauri::AppHandle) {
                         || r.keep_monthly.is_some()
                         || r.keep_yearly.is_some()
                     {
-                        // Tell the Activity panel this plan has moved from the byte-transfer
-                        // phase to the retention finalize step (a `forget --prune` that can
-                        // take 10s+). The panel keeps the active task visible and swaps its
-                        // subtitle to "Applying retention rules…" (mirroring the manual-backup
-                        // modal) instead of going blank. Emitted only when retention actually
-                        // runs (plan succeeded + at least one keep flag set), so a plan with
-                        // no retention dismisses immediately via backup-finished below.
-                        let _ = app.emit(
-                            "scheduler:retention-started",
-                            serde_json::json!({ "planId": plan.id, "repoId": plan.repo_id }),
-                        );
+                        // apply_retention's own OperationCtx (kind: Forget) tells the Activity
+                        // panel this plan has moved from the byte-transfer phase to the
+                        // retention finalize step (a `forget --prune` that can take 10s+) — the
+                        // panel keeps the active task visible and swaps its subtitle to
+                        // "Applying retention rules…" on that op's "started" event (see
+                        // reduceSchedulerBackup). Only reached when retention actually runs
+                        // (plan succeeded + at least one keep flag set); a plan with no
+                        // retention is dismissed by the Activity panel's own plan lookup
+                        // instead, once it sees the backup finished with nothing configured.
                         if let Err(e) = apply_retention(
                             app, &db, &master_key, &repo_locks, &plan.repo_id, Some(&plan.id),
                             &plan.tags, &plan.paths, r, TaskOrigin::Scheduler,
@@ -151,16 +140,6 @@ async fn tick(app: &tauri::AppHandle) {
                     }
                 }
             }
-
-            // Dismiss the active task only once the plan is fully done (backup + retention),
-            // then immediately hand off to the next plan's backup-started. Emitted here
-            // (after retention) rather than right after execute_backup so the panel doesn't
-            // blank out mid-plan — previously this fired before retention, hiding the
-            // ~10-20s forget as a dead gap between two plans' backups.
-            let _ = app.emit(
-                "scheduler:backup-finished",
-                serde_json::json!({ "success": ok, "planId": plan.id, "scheduleId": sched.id }),
-            );
         }
     }
 }

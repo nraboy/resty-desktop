@@ -127,9 +127,10 @@ export const INDEX_BATCH_ALREADY_ACTIVE_ERROR = "IndexBatchAlreadyActive";
 // Unified operation lifecycle event bus (Tauri event name "task") — see
 // tasks.rs and CLAUDE.md's "Operation Event Bus" section. Emitted by every
 // covered restic operation alongside — not instead of — its existing detailed
-// feed (BackupProgress, RestoreProgress, etc). No frontend code subscribes to
-// this yet by design; these types exist so a future consumer has a uniform,
-// operationId-correlatable contract to build on.
+// feed (BackupProgress, RestoreProgress, etc). Several frontend consumers now
+// subscribe to this (see activity.tsx: stats refreshes, index lifecycle/batch
+// progress, and the scheduler-triggered backup row) via a uniform,
+// operationId-correlatable contract.
 export type TaskKind =
   | "backup" | "restore" | "restorePath" | "copy" | "mirror" | "prune"
   | "forget" | "tag" | "check" | "diff" | "index" | "unlock" | "stats"
