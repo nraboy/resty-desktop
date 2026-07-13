@@ -434,7 +434,7 @@ collision this registry exists to prevent.
 ## Operation Event Bus
 
 `src-tauri/src/tasks.rs` defines a second, **uniform** event layer on top of the ad-hoc
-per-operation events described above (`backup:progress`, `restore:progress`, `prune:progress`,
+per-operation events described above (`backup:progress`, `restore:progress`,
 `scheduler:*`). Those events grew one at a time, so their payloads are
 inconsistent — some carry no id at all, some only a display name, and roughly half the restic
 operations (`copy`, `mirror`, single-repo `prune`, `forget`/retention, `check`, `diff`,
@@ -458,10 +458,10 @@ retrofitting every operation at that point.
 (plan/snapshot/schedule id, when one applies), `origin` (`manual`|`scheduler`|`background`),
 `progress` (normalized `percentDone`/`itemsDone`/`itemsTotal`/`bytesDone`/`bytesTotal`/`label`,
 plus `secondsElapsed`/`secondsRemaining`/`currentFiles`/`repoId` — per-kind detail kept lossless
-vs the legacy `backup:progress`/`restore:progress`/`prune:progress` payloads even though no
-consumer reads it yet (`currentFiles`/`secondsRemaining` are backup-only, `repoId` is prune-all's
-per-tick repo, distinct from the envelope's own `repoId` which is `""` for a multi-repo prune) —
-only on `phase: progress`), `error` (only on `phase: failed`), `at` (unix millis).
+vs the legacy `backup:progress`/`restore:progress` payloads even though no consumer reads it yet
+(`currentFiles`/`secondsRemaining` are backup-only, `repoId` is prune-all's per-tick repo,
+distinct from the envelope's own `repoId` which is `""` for a multi-repo prune) — only on
+`phase: progress`), `error` (only on `phase: failed`), `at` (unix millis).
 
 **Why `operationId` is the core of the design, not an afterthought:** today's per-operation events
 get away with carrying no id (or just a display name) only because of this app's single-in-flight
@@ -525,9 +525,9 @@ means "no further snapshots will start" — the snapshot already in flight still
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — four stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
-`index`'s batch-level progress, and the scheduler-backup `activeBackup` row); everything else
-still emits into the void.** `src/lib/types.ts`
+**Frontend scope — five stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
+`index`'s batch-level progress, the scheduler-backup `activeBackup` row, and `prune`'s
+`activePrune` row); everything else still emits into the void.** `src/lib/types.ts`
 mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
 (`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
@@ -616,6 +616,23 @@ scheduled backup happened to displace it. `apply_retention` now creates its `Ope
 calls `task_ctx.failed(e)` explicitly on both lookups, closing that gap the same way `repo.rs` already
 had for stats.
 
+`activePrune` (the "Pruning repositories" row in Active Tasks) is the fifth consumer, and —
+like `index`'s batch-level progress — reads real `progress` off the bus rather than treating it
+purely as a lifecycle signal. `reducePrune` (`activity.tsx`) is a single nullable slot, not a
+`Map`, since prune is single-in-flight app-wide (`PruneHandle`'s `busy` guard) unlike concurrent
+index batches. It covers both `prune_all_repos` (progress-bearing: `itemsDone`/`itemsTotal`/
+`label` per repo) and single-repo `prune_repo` (lifecycle-only — `itemsTotal` stays `0`, so the
+row renders indeterminate). This is also the first case of a legacy event retired **after** its
+one remaining consumer was ported on its own, unprompted by a wider rewrite: the legacy
+`prune:progress` event existed solely to feed `SettingsPage`'s "Prune All Repositories" modal
+(its progress bar, "Pruning `<repo>` (n of N)…" text, and repo count), which now mirrors the
+same `activePrune` state the Activity panel already reads, gated on that modal's own local
+`pruning` flag so a concurrent single-repo prune sharing the slot can't overwrite its numbers.
+Once ported, the `app.emit("prune:progress", ...)` calls and their `PruneProgress` struct
+(`repo.rs`) were deleted outright — the same "retire once ported" treatment as `index:done` and
+the `scheduler:*` events, just triggered by a single-consumer migration rather than a four- or
+five-listener one.
+
 The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
 `finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`
 writes `repo_stats_cache` before it calls `task_ctx.finished()`), rather than widening the
@@ -626,8 +643,8 @@ usually true.
 `backup`/`forget` are now consumed too, but only partially — `reduceSchedulerBackup` filters to
 `origin: "scheduler"`, so manual/"Run Now" backups and manual retention (`forget_by_plan`,
 `run_schedule_now`'s retention call) still emit into the void for Activity-panel purposes; they
-already have their own progress modals per the "Restore/copy/mirror/manual backup/prune" exclusion
-above. For every other kind (`restore`, `copy`, `prune`, …) **no stateful frontend code subscribes
+already have their own progress modals per the "Restore/copy/mirror/manual backup" exclusion
+above. For every other kind (`restore`, `copy`, `mirror`, …) **no stateful frontend code subscribes
 to `task`** at all yet — that remains deliberate, not an oversight: a live consumer wired before
 there's an actual feature needing it risks the same fate as an earlier, scrapped attempt at this
 pattern (over-eager re-renders, a shape that rots before it's ever exercised). `App.tsx`'s dev-only

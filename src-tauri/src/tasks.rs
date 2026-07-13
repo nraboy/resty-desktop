@@ -87,9 +87,10 @@ pub struct TaskProgress {
     pub label: Option<String>,
     // The four fields below carry per-kind progress detail that the normalized
     // fields above can't hold — kept optional so the bus stays lossless vs the
-    // legacy `*:progress` events (backup:progress, restore:progress,
-    // prune:progress) even though no consumer reads them yet. See CLAUDE.md's
-    // Operation Event Bus section.
+    // legacy `*:progress` events (backup:progress, restore:progress — prune:progress
+    // was retired once its one remaining consumer, SettingsPage's "Prune All" modal,
+    // moved onto the `task` bus) even though no consumer reads them yet. See
+    // CLAUDE.md's Operation Event Bus section.
     /// Backup and restore: elapsed time since the operation started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_elapsed: Option<u64>,
@@ -677,8 +678,8 @@ mod tests {
     #[test]
     fn build_event_serializes_per_kind_progress_detail() {
         // Pins the four fields added so the bus stays lossless vs the legacy
-        // backup:progress/restore:progress/prune:progress payloads (see
-        // tasks.rs's TaskProgress doc comment) and keeps types.ts in sync.
+        // backup:progress/restore:progress payloads (see tasks.rs's TaskProgress
+        // doc comment) and keeps types.ts in sync.
         let ev = build_event(
             "abc123",
             TaskKind::Backup,

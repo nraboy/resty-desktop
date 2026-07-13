@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
@@ -483,15 +483,6 @@ pub fn get_restic_version(db: State<'_, AppDb>) -> Result<String, String> {
     }
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PruneProgress {
-    current: usize,
-    total: usize,
-    repo_id: String,
-    repo_name: String,
-}
-
 /// Outcome of one `restic prune` attempt (see `run_one_prune_attempt`).
 enum PruneAttempt {
     Success,
@@ -675,12 +666,6 @@ pub async fn prune_all_repos(
                 break 'body Err("Cancelled".to_string());
             }
 
-            let _ = app.emit("prune:progress", PruneProgress {
-                current: i,
-                total,
-                repo_id: repo.id.clone(),
-                repo_name: repo.name.clone(),
-            });
             task_progress.emit(TaskProgress {
                 items_done: Some(i as u64),
                 items_total: Some(total as u64),
@@ -735,13 +720,6 @@ pub async fn prune_all_repos(
                 PruneAttempt::Failed(msg) => break 'body Err(format!("Prune failed for '{}': {}", repo.name, msg)),
             }
         }
-
-        let _ = app.emit("prune:progress", PruneProgress {
-            current: total,
-            total,
-            repo_id: String::new(),
-            repo_name: String::new(),
-        });
 
         Ok(())
     };

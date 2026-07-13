@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
+import { useActivity } from "../lib/activity";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -20,6 +20,7 @@ const THEMES: { value: Theme; label: string; description: string }[] = [
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
+  const { activePrune } = useActivity();
   const [resticPath, setResticPathLocal] = useState("restic");
   const [compression, setCompression] = useState("auto");
   const [restorePath, setRestorePathLocal] = useState("");
@@ -48,7 +49,6 @@ export default function SettingsPage() {
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const [pruneStopping, setPruneStopping] = useState(false);
   const pruneStartRef = useRef<number>(0);
-  const pruneUnlistenRef = useRef<(() => void) | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -97,7 +97,6 @@ export default function SettingsPage() {
 
   useEffect(() => {
     return () => {
-      pruneUnlistenRef.current?.();
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
@@ -192,16 +191,6 @@ export default function SettingsPage() {
     setPruneRepoName("");
     setPruneStopping(false);
 
-    const unlisten = await listen<{ current: number; total: number; repoId: string; repoName: string }>(
-      "prune:progress",
-      ({ payload }) => {
-        setPruneCurrent(payload.current);
-        setPruneTotal(payload.total);
-        setPruneRepoName(payload.repoName);
-      }
-    );
-    pruneUnlistenRef.current = unlisten;
-
     try {
       await pruneAllRepos();
       setPruneDone(true);
@@ -214,10 +203,25 @@ export default function SettingsPage() {
       }
     } finally {
       setPruning(false);
-      unlisten();
-      pruneUnlistenRef.current = null;
     }
   };
+
+  // Mirrors the shared `activePrune` task-bus slot (see activity.tsx) into this modal's local
+  // display state while this modal's own run is in flight. Gated on `pruning` — activePrune is a
+  // single app-wide slot (prune is single-in-flight via PruneHandle's busy guard), so without this
+  // gate a per-repo prune started elsewhere (RepositoriesPage's context-menu Prune, which shares
+  // the same slot but never carries progress — itemsTotal stays 0) could overwrite this modal's
+  // numbers if it happened to be open. `pruning` stays true until handlePruneAll's `finally`,
+  // i.e. until after the task's own `finished`/`failed`/`cancelled`, so the last per-repo tick
+  // (itemsDone/itemsTotal at the final repo) is captured before activePrune clears to null —
+  // the done screen below still reads the correct total.
+  useEffect(() => {
+    if (pruning && activePrune) {
+      setPruneCurrent(activePrune.itemsDone);
+      setPruneTotal(activePrune.itemsTotal);
+      setPruneRepoName(activePrune.repoLabel ?? "");
+    }
+  }, [pruning, activePrune]);
 
   // Reset the modal's display state (not the operation itself) — called before opening the
   // modal for a fresh run so a previously-dismissed run's done/error/cancelled screen doesn't
@@ -235,10 +239,9 @@ export default function SettingsPage() {
 
   // Hide the modal only. Previously this cancelled the prune on close (or on navigating away,
   // since unmount ran the same path) — now the prune keeps running and stays visible/cancellable
-  // via the Activity panel's activePrune row (see activity.tsx). Deliberately does NOT detach
-  // pruneUnlistenRef: that listener's lifetime is the operation's (attached in handlePruneAll,
-  // detached in its own `finally`), not the modal's, so reopening the modal mid-run shows live
-  // progress instead of a blank state.
+  // via the Activity panel's activePrune row (see activity.tsx), which this modal itself mirrors
+  // (see the pruning-gated effect above `handlePruneAll`) — so reopening the modal mid-run shows
+  // live progress instead of a blank state, sourced straight from the shared task-bus state.
   const closePruneModal = () => {
     setPruneModalOpen(false);
   };
