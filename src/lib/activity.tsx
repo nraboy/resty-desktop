@@ -6,8 +6,11 @@
 //
 // Scope is deliberately narrow: only activity the user has no other visibility into —
 // background auto-indexing, scheduler-triggered backups, and (as of the `statsRefreshing`
-// field below) in-flight repo stats refreshes. Restore/copy/mirror/manual backup/prune already
-// have their own progress modals and are intentionally excluded here.
+// field below) in-flight repo stats refreshes. Restore/copy/mirror/manual backup already have
+// their own progress modals and are intentionally excluded here. Prune (`activePrune` below) is
+// the second deliberate exception to that exclusion, after "Index All": its Settings modal is
+// dismissible, so the operation needs to stay visible/cancellable in the panel independent of
+// whether that modal is open — see reducePrune's doc comment.
 //
 // `statsRefreshing`/`statsFailed` are this app's first stateful consumer of the unified `task`
 // event bus (see CLAUDE.md's Operation Event Bus section) rather than a per-operation legacy
@@ -111,6 +114,11 @@ interface ActivityState {
    *  populate this — derived from `task` events filtered to `origin === "scheduler"`, see
    *  `reduceSchedulerBackup`. */
   activeBackup: ActiveScheduledBackup | null;
+  /** The currently-running prune (prune_all_repos or prune_repo), if any — derived from `kind:
+   *  "prune"` task events, single-in-flight app-wide (PruneHandle busy flag), see reducePrune.
+   *  Lets the Settings "Prune All" modal be dismissed without cancelling the operation, matching
+   *  activeIndexBatches' survive-navigation behavior. */
+  activePrune: ActivePrune | null;
   /** Next three enabled, due schedules, soonest first. */
   upcoming: UpcomingBackup[];
   /** Last three backup history entries, newest first. */
@@ -262,6 +270,45 @@ export function reduceIndexBatches(
   }
 }
 
+export interface ActivePrune {
+  operationId: string;
+  itemsDone: number;
+  itemsTotal: number;
+  /** Current repo's name from progress.label; null before the first progress tick or for a
+   *  single-repo prune (prune_repo emits no progress, so this row stays indeterminate). */
+  repoLabel: string | null;
+}
+
+/** Pure reducer over `prune`-kind task events. Single nullable (prune is single-in-flight app-wide
+ *  via the shared PruneHandle busy flag — see repo.rs), unlike activeIndexBatches' Map. Covers
+ *  both prune_all_repos (progress-bearing: itemsDone/itemsTotal/label) and prune_repo
+ *  (lifecycle-only — itemsTotal stays 0, rendering as an indeterminate row). operationId guards
+ *  keep a stale progress/terminal event from a just-superseded prune from touching a freshly
+ *  started one. Returns the same reference when nothing changes so the caller can skip a
+ *  re-render. Exported for a unit test (see activity.test.ts). */
+export function reducePrune(state: ActivePrune | null, event: TaskEvent): ActivePrune | null {
+  if (event.kind !== "prune") return state;
+  switch (event.phase) {
+    case "started":
+      return { operationId: event.operationId, itemsDone: 0, itemsTotal: 0, repoLabel: null };
+    case "progress":
+      if (!state || state.operationId !== event.operationId) return state;
+      return {
+        ...state,
+        itemsDone: event.progress?.itemsDone ?? state.itemsDone,
+        itemsTotal: event.progress?.itemsTotal ?? state.itemsTotal,
+        repoLabel: event.progress?.label ?? state.repoLabel,
+      };
+    case "finished":
+    case "failed":
+    case "cancelled":
+      if (!state || state.operationId !== event.operationId) return state;
+      return null;
+    default:
+      return state; // "pending"/"cancelling" — prune never emits pending; cancelling is local UI state
+  }
+}
+
 /** Pure reducer over `task` events, isolating the scheduler-triggered backup lifecycle (see the
  *  module doc comment above). Filters to `origin === "scheduler"`; `kind:"backup"` drives the
  *  transfer phase, `kind:"forget"` (matched by `targetId === planId`) drives retention. The
@@ -354,6 +401,7 @@ async function loadIndexing(): Promise<{ cached: number; total: number } | null>
 export function ActivityProvider({ children }: { children: ReactNode }) {
   const [indexing, setIndexing] = useState<{ cached: number; total: number } | null>(null);
   const [activeBackup, setActiveBackup] = useState<ActiveScheduledBackup | null>(null);
+  const [activePrune, setActivePrune] = useState<ActivePrune | null>(null);
   const [upcoming, setUpcoming] = useState<UpcomingBackup[]>([]);
   const [recentLogs, setRecentLogs] = useState<BackupHistoryEntry[]>([]);
   const [statsRefreshing, setStatsRefreshing] = useState<string[]>([]);
@@ -374,6 +422,9 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   // dismissal) so the ref stays the source of truth the next reduce builds on rather than
   // reverting a plan name the reducer itself never sets.
   const schedulerBackupRef = useRef<ActiveScheduledBackup | null>(null);
+  // activePrune is derived from this on every "task" event via reducePrune; same
+  // compare-by-reference discipline as the refs above.
+  const pruneRef = useRef<ActivePrune | null>(null);
 
   const refreshIndexing = () => { loadIndexing().then(setIndexing).catch(() => {}); };
   const refreshUpcoming = () => { loadUpcoming().then(setUpcoming).catch(() => {}); };
@@ -422,6 +473,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       if (nextSchedulerBackup !== schedulerBackupRef.current) {
         schedulerBackupRef.current = nextSchedulerBackup;
         setActiveBackup(nextSchedulerBackup);
+      }
+      const nextPrune = reducePrune(pruneRef.current, e.payload);
+      if (nextPrune !== pruneRef.current) {
+        pruneRef.current = nextPrune;
+        setActivePrune(nextPrune);
       }
     });
 
@@ -506,7 +562,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   return (
     <ActivityContext.Provider
       value={{
-        indexing, activeBackup, upcoming, recentLogs, statsRefreshing, statsFailed,
+        indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, statsFailed,
         activeIndexBatches, indexBatchRepoNames, clockTick,
         statsRefreshAllProgress, setStatsRefreshAllProgress,
       }}

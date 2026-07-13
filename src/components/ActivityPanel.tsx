@@ -1,12 +1,12 @@
 // Right-side activity overlay surfacing background activity the user has no other
 // visibility into: auto-indexing progress, scheduler-triggered backups, in-flight repo
-// stats refreshes, and the manual "Index All" batch (ACTIVE TASKS), the next couple of due
-// schedules (UPCOMING TASKS), and the last couple of backup runs (RECENT LOGS).
-// Restore/copy/mirror/manual backup/prune already have their own progress modals and are
-// intentionally excluded — see src/lib/activity.tsx. "Index All" is the one exception: its
-// modal (RepoSearchPage) is explicitly dismissible while the batch keeps running in the
-// background, so — unlike those other modals — it needs a way to stay visible and cancellable
-// after the modal closes.
+// stats refreshes, the manual "Index All" batch, and "Prune All Repositories" (ACTIVE TASKS),
+// the next couple of due schedules (UPCOMING TASKS), and the last couple of backup runs
+// (RECENT LOGS). Restore/copy/mirror/manual backup already have their own progress modals and
+// are intentionally excluded — see src/lib/activity.tsx. "Index All" and prune-all are the two
+// exceptions: their modals (RepoSearchPage; SettingsPage's "Prune All Repositories") are
+// explicitly dismissible while the operation keeps running in the background, so — unlike those
+// other modals — they need a way to stay visible and cancellable after the modal closes.
 // The stats row is this app's first consumer of the unified `task` event bus rather than a
 // per-operation legacy feed (stats never had one) — it's lifecycle-only (no progress bar,
 // since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
@@ -40,7 +40,7 @@
 // this once in App.tsx doesn't require every page to grow a toolbar toggle button.
 import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
-import { cancelBackup, cancelIndexBatch } from "../lib/invoke";
+import { cancelBackup, cancelIndexBatch, cancelPrune } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
 import Spinner from "./Spinner";
@@ -98,7 +98,7 @@ function StopIcon() {
 
 export default function ActivityPanel() {
   const {
-    indexing, activeBackup, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
+    indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
     indexBatchRepoNames, statsRefreshAllProgress,
   } = useActivity();
   const [open, setOpen] = useState(false);
@@ -112,7 +112,7 @@ export default function ActivityPanel() {
   const queuedIndexBatches = activeIndexBatches.filter((b) => b.status === "queued");
 
   const hasActive =
-    indexing != null || activeBackup != null || statsRefreshing.length > 0 ||
+    indexing != null || activeBackup != null || activePrune != null || statsRefreshing.length > 0 ||
     activeIndexBatches.length > 0 || statsRefreshAllProgress != null;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
@@ -125,6 +125,13 @@ export default function ActivityPanel() {
   useEffect(() => {
     if (!activeBackup) setStoppingScheduled(false);
   }, [activeBackup]);
+
+  // Same pattern, for the prune row below — resets once activePrune clears (its `task` op
+  // reached a terminal phase: finished, failed, or this very cancel).
+  const [stoppingPrune, setStoppingPrune] = useState(false);
+  useEffect(() => {
+    if (!activePrune) setStoppingPrune(false);
+  }, [activePrune]);
 
   // Same pattern as stoppingScheduled above, generalized to a set since multiple "Index All"
   // batches can be stopping independently at once. cancel_index_batch(operationId) takes effect
@@ -268,6 +275,44 @@ export default function ActivityPanel() {
                       ? "Stopping…"
                       : activeBackup.progress
                       ? `${(activeBackup.progress.itemsDone ?? 0).toLocaleString()} / ${(activeBackup.progress.itemsTotal ?? 0).toLocaleString()} files`
+                      : "Starting…"}
+                  </p>
+                </div>
+              )}
+              {activePrune && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-gray-200 truncate" title={activePrune.repoLabel ?? undefined}>
+                      Pruning repositories
+                    </p>
+                    <button
+                      onClick={async () => {
+                        setStoppingPrune(true);
+                        try {
+                          await cancelPrune();
+                        } catch {
+                          // Same rollback rationale as the other Stop buttons in this panel — the
+                          // cancel call itself failed, the prune is still running untouched, so
+                          // don't leave Stop stuck disabled with no way to retry.
+                          setStoppingPrune(false);
+                        }
+                      }}
+                      disabled={stoppingPrune}
+                      title="Stop"
+                      aria-label="Stop"
+                      className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                    >
+                      <StopIcon />
+                    </button>
+                  </div>
+                  <ProgressBar
+                    percent={activePrune.itemsTotal > 0 ? (activePrune.itemsDone / activePrune.itemsTotal) * 100 : 0}
+                  />
+                  <p className="text-xs text-gray-500">
+                    {stoppingPrune
+                      ? "Stopping…"
+                      : activePrune.itemsTotal > 0
+                      ? `${activePrune.itemsDone} / ${activePrune.itemsTotal} repos`
                       : "Starting…"}
                   </p>
                 </div>

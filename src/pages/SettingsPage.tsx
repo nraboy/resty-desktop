@@ -46,6 +46,7 @@ export default function SettingsPage() {
   const [pruneTotal, setPruneTotal] = useState(0);
   const [pruneRepoName, setPruneRepoName] = useState("");
   const [pruneElapsed, setPruneElapsed] = useState(0);
+  const [pruneStopping, setPruneStopping] = useState(false);
   const pruneStartRef = useRef<number>(0);
   const pruneUnlistenRef = useRef<(() => void) | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -189,6 +190,7 @@ export default function SettingsPage() {
     setPruneCurrent(0);
     setPruneTotal(0);
     setPruneRepoName("");
+    setPruneStopping(false);
 
     const unlisten = await listen<{ current: number; total: number; repoId: string; repoName: string }>(
       "prune:progress",
@@ -217,14 +219,11 @@ export default function SettingsPage() {
     }
   };
 
-  const closePruneModal = async () => {
-    if (pruning) {
-      await cancelPrune();
-      return;
-    }
-    pruneUnlistenRef.current?.();
-    pruneUnlistenRef.current = null;
-    setPruneModalOpen(false);
+  // Reset the modal's display state (not the operation itself) — called before opening the
+  // modal for a fresh run so a previously-dismissed run's done/error/cancelled screen doesn't
+  // reappear. Never called while `pruning` is true (see the open button below), since a
+  // still-running prune should reopen straight into its live progress, not a blank state.
+  const resetPruneDisplay = () => {
     setPruneStarted(false);
     setPruneDone(false);
     setPruneCancelled(false);
@@ -232,6 +231,16 @@ export default function SettingsPage() {
     setPruneCurrent(0);
     setPruneTotal(0);
     setPruneRepoName("");
+  };
+
+  // Hide the modal only. Previously this cancelled the prune on close (or on navigating away,
+  // since unmount ran the same path) — now the prune keeps running and stays visible/cancellable
+  // via the Activity panel's activePrune row (see activity.tsx). Deliberately does NOT detach
+  // pruneUnlistenRef: that listener's lifetime is the operation's (attached in handlePruneAll,
+  // detached in its own `finally`), not the modal's, so reopening the modal mid-run shows live
+  // progress instead of a blank state.
+  const closePruneModal = () => {
+    setPruneModalOpen(false);
   };
 
   const handleFdaOpen = async () => {
@@ -615,7 +624,16 @@ export default function SettingsPage() {
           Remove orphaned data from all repositories. This cleans up pack files not referenced by
           any snapshot, such as leftovers from interrupted backups or manually forgotten snapshots.
         </p>
-        <Button variant="secondary" onClick={() => setPruneModalOpen(true)}>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            // Only reset the modal's display to the confirm screen when nothing is running —
+            // a still-running prune (survived a prior dismiss) should reopen into its live
+            // progress, not a blank confirm screen.
+            if (!pruning) resetPruneDisplay();
+            setPruneModalOpen(true);
+          }}
+        >
           Prune All Repositories
         </Button>
       </div>
@@ -697,6 +715,28 @@ export default function SettingsPage() {
                   {pruneCurrent} / {pruneTotal} complete
                 </p>
               )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={closePruneModal} title="Keep pruning in the background">
+                Hide
+              </Button>
+              <Button
+                variant="danger"
+                disabled={pruneStopping}
+                onClick={async () => {
+                  setPruneStopping(true);
+                  try {
+                    await cancelPrune();
+                  } catch {
+                    // The cancel call itself failed (e.g. a transient IPC error) — the prune is
+                    // still running untouched, so roll back rather than leaving Stop stuck
+                    // disabled with no way to retry.
+                    setPruneStopping(false);
+                  }
+                }}
+              >
+                {pruneStopping ? "Stopping…" : "Stop"}
+              </Button>
             </div>
           </div>
         )}

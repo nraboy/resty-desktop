@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSchedulerBackup, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSchedulerBackup, reducePrune, type StatsOpsState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -295,5 +295,54 @@ describe("reduceSchedulerBackup", () => {
   it("ignores non-backup/forget scheduler task kinds", () => {
     const result = reduceSchedulerBackup(null, schedulerEvent({ kind: "stats", phase: "started" }));
     expect(result).toBeNull();
+  });
+});
+
+describe("reducePrune", () => {
+  it("starts a row with zeroed progress and no repo label", () => {
+    const state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 0, itemsTotal: 0, repoLabel: null });
+  });
+
+  it("updates itemsDone/itemsTotal/repoLabel on a matching progress event", () => {
+    let state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    state = reducePrune(state, taskEvent({
+      kind: "prune", operationId: "op1", phase: "progress",
+      progress: { itemsDone: 2, itemsTotal: 5, label: "My Repo" },
+    }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 2, itemsTotal: 5, repoLabel: "My Repo" });
+  });
+
+  it("ignores a progress event for a different (stale) operationId", () => {
+    const state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    const result = reducePrune(state, taskEvent({
+      kind: "prune", operationId: "opStale", phase: "progress",
+      progress: { itemsDone: 9, itemsTotal: 9, label: "Other Repo" },
+    }));
+    expect(result).toBe(state);
+  });
+
+  it.each(["finished", "failed", "cancelled"] as const)("clears on a matching %s event", (phase) => {
+    const state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    const result = reducePrune(state, taskEvent({ kind: "prune", operationId: "op1", phase }));
+    expect(result).toBeNull();
+  });
+
+  it("ignores a terminal event for a different (stale) operationId", () => {
+    const state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    const result = reducePrune(state, taskEvent({ kind: "prune", operationId: "opStale", phase: "finished" }));
+    expect(result).toBe(state);
+  });
+
+  it("ignores non-prune task kinds", () => {
+    const result = reducePrune(null, taskEvent({ kind: "backup", phase: "started" }));
+    expect(result).toBeNull();
+  });
+
+  it("a single-repo prune (no progress events) still starts and clears cleanly", () => {
+    let state = reducePrune(null, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 0, itemsTotal: 0, repoLabel: null });
+    state = reducePrune(state, taskEvent({ kind: "prune", operationId: "op1", phase: "finished" }));
+    expect(state).toBeNull();
   });
 });
