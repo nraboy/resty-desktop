@@ -6,13 +6,18 @@ import { listen } from "@tauri-apps/api/event";
 import { useActivity } from "../lib/activity";
 import {
   addRepo,
+  cancelIndexBatch,
   cancelMirror,
   cancelPrune,
   checkRepo,
+  getActiveIndexBatch,
   getRepoPassword,
   getRepoStats,
+  getSnapshotIndexStatus,
+  indexSnapshotsBatch,
   initRepo,
   listRepos,
+  listSnapshots,
   mirrorRepo,
   pruneRepo,
   refreshRepoStats,
@@ -23,8 +28,8 @@ import {
   updateRepoPath,
   testRepoConnection,
 } from "../lib/invoke";
-import type { CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
-import { isRemoteRepo } from "../lib/types";
+import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
+import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, isRemoteRepo } from "../lib/types";
 import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -95,6 +100,43 @@ export default function RepositoriesPage() {
   const [pruneError, setPruneError] = useState("");
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const pruneStartRef = useRef<number>(0);
+  // "Index All Snapshots" modal — mirrors RepoSearchPage.tsx's own batch-tracking state
+  // (deliberate duplication, see CLAUDE.md's "Known, deferred frontend duplication"), scoped to
+  // whichever repo the context menu most recently targeted rather than a whole page, since this
+  // page can trigger a batch for any repo. `indexAllRepo` persists independently of
+  // `indexAllOpen` so the modal can be dismissed while its batch keeps running (progress is
+  // still visible via ActivityPanel's activeIndexBatches in the meantime), and reopening the
+  // context menu for the same repo resumes tracking instead of restarting.
+  const [indexAllRepo, setIndexAllRepo] = useState<Repository | null>(null);
+  const [indexAllOpen, setIndexAllOpen] = useState(false);
+  const [indexAllError, setIndexAllError] = useState("");
+  // True when handleIndexAll's fetch found nothing left to index (repo fully indexed, or has no
+  // snapshots at all) — lets the modal explain that instead of silently closing right after it
+  // opened, which otherwise reads as an unexplained flash.
+  const [indexAllNothingToDo, setIndexAllNothingToDo] = useState(false);
+  const [indexAllTargets, setIndexAllTargets] = useState<string[]>([]);
+  const [indexAllCompleted, setIndexAllCompleted] = useState<Set<string>>(new Set());
+  const [indexAllFailedSet, setIndexAllFailedSet] = useState<Set<string>>(new Set());
+  const [indexAllStopped, setIndexAllStopped] = useState(false);
+  const indexAllTargetsRef = useRef<string[]>([]);
+  type IndexAllBatchState =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    | { kind: "queued"; operationId: string }
+    | { kind: "running"; operationId: string };
+  const [indexAllBatchState, setIndexAllBatchState] = useState<IndexAllBatchState>({ kind: "idle" });
+  const indexAllBatchActive = indexAllBatchState.kind !== "idle";
+  const indexAllQueued = indexAllBatchState.kind === "queued";
+  const indexAllOperationId =
+    indexAllBatchState.kind === "queued" || indexAllBatchState.kind === "running" ? indexAllBatchState.operationId : null;
+  const indexAllTotal = indexAllTargets.length;
+  const indexAllDoneCount = indexAllCompleted.size + indexAllFailedSet.size;
+  const indexAllFailedCount = indexAllFailedSet.size;
+  // Whether each repo has at least one snapshot that isn't fully indexed — drives the "Index All
+  // Snapshots" context-menu item's disabled state. Missing key = not yet checked; treated as
+  // enabled (fail open) rather than blocking the menu item until this loads, since clicking it
+  // with nothing to do just shows the "already indexed" modal branch.
+  const [repoNeedsIndexing, setRepoNeedsIndexing] = useState<Record<string, boolean>>({});
 
   const load = () =>
     listRepos()
@@ -111,6 +153,60 @@ export default function RepositoriesPage() {
 
   useEffect(() => {
     load().then(fetchStatsForLocal);
+  }, []);
+
+  // Populates repoNeedsIndexing for every currently-known repo — cache-only reads (no restic
+  // calls, see CLAUDE.md's Restic Integration section on list_snapshots/get_snapshot_index_status),
+  // so it's cheap to recompute whenever the repo list changes (add/edit/delete), not just on mount.
+  useEffect(() => {
+    let cancelled = false;
+    for (const repo of repos) {
+      Promise.all([listSnapshots(repo.id), getSnapshotIndexStatus(repo.id)])
+        .then(([snaps, statusMap]) => {
+          if (cancelled) return;
+          const needsIndexing = snaps.some((s) => statusMap[s.id] !== "complete");
+          setRepoNeedsIndexing((prev) => ({ ...prev, [repo.id]: needsIndexing }));
+        })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [repos]);
+
+  // Keeps repoNeedsIndexing live once loaded: a per-snapshot index finishing (whether from this
+  // page's own "Index All", RepoSearchPage's, or the background auto-indexer) can flip a repo
+  // to fully indexed, and a fresh snapshots:refreshed (new backup picked up by the cache warmer)
+  // can flip it back to needing indexing.
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenTask: (() => void) | undefined;
+    let unlistenSnapshots: (() => void) | undefined;
+
+    const refresh = (repoId: string) => {
+      Promise.all([listSnapshots(repoId), getSnapshotIndexStatus(repoId)])
+        .then(([snaps, statusMap]) => {
+          if (cancelled) return;
+          const needsIndexing = snaps.some((s) => statusMap[s.id] !== "complete");
+          setRepoNeedsIndexing((prev) => ({ ...prev, [repoId]: needsIndexing }));
+        })
+        .catch(() => {});
+    };
+
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind === "index" && t.phase === "finished") refresh(t.repoId);
+    }).then((u) => {
+      if (cancelled) { u(); return; }
+      unlistenTask = u;
+    });
+
+    listen<{ repoId: string }>("snapshots:refreshed", (e) => {
+      refresh(e.payload.repoId);
+    }).then((u) => {
+      if (cancelled) { u(); return; }
+      unlistenSnapshots = u;
+    });
+
+    return () => { cancelled = true; unlistenTask?.(); unlistenSnapshots?.(); };
   }, []);
 
   useEffect(() => {
@@ -143,6 +239,136 @@ export default function RepositoriesPage() {
   // above) are entirely event-driven now, not chained off this promise.
   const refreshRow = (repo: Repository) => {
     refreshRepoStats(repo.id).catch(() => {});
+  };
+
+  useEffect(() => {
+    indexAllTargetsRef.current = indexAllTargets;
+  }, [indexAllTargets]);
+
+  // Adopts a batch reported by getActiveIndexBatch as this modal's tracked state — shared by
+  // handleIndexAll's "already running" paths (a fresh call rejected because one exists, or a
+  // repo we're re-opening the modal for that already has one). `statusMap` is passed in rather
+  // than read from state to avoid racing a just-fetched local value.
+  const adoptIndexAllBatch = (status: ActiveIndexBatchStatus, statusMap: Record<string, string>) => {
+    const completed = new Set(status.targetIds.filter((id) => statusMap[id] === "complete"));
+    setIndexAllTargets(status.targetIds);
+    setIndexAllCompleted(completed);
+    setIndexAllFailedSet(new Set());
+    setIndexAllBatchState({ kind: status.started ? "running" : "queued", operationId: status.operationId });
+  };
+
+  // Live progress while a batch is tracked — mirrors RepoSearchPage.tsx's own `task` listener,
+  // scoped to whichever repo the modal currently targets.
+  useEffect(() => {
+    const repoId = indexAllRepo?.id;
+    if (!repoId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "index" || t.repoId !== repoId) return;
+      // The batch-level op (no targetId) — tracks queued/running/idle for the Stop button and
+      // progress header. Per-snapshot ops (targetId set) update the completed/failed sets below.
+      if (!t.targetId) {
+        if (t.origin !== "manual") return;
+        if (t.phase === "pending") {
+          setIndexAllBatchState({ kind: "queued", operationId: t.operationId });
+        } else if (t.phase === "started") {
+          setIndexAllBatchState({ kind: "running", operationId: t.operationId });
+        } else if (t.phase === "finished" || t.phase === "failed" || t.phase === "cancelled") {
+          setIndexAllBatchState({ kind: "idle" });
+        }
+        return;
+      }
+      if (t.phase !== "finished" && t.phase !== "failed") return;
+      const snapshotId = t.targetId;
+      if (!indexAllTargetsRef.current.includes(snapshotId)) return;
+      if (t.phase === "finished") {
+        setIndexAllCompleted((prev) => {
+          if (prev.has(snapshotId)) return prev;
+          const next = new Set(prev);
+          next.add(snapshotId);
+          return next;
+        });
+      } else {
+        setIndexAllFailedSet((prev) => {
+          if (prev.has(snapshotId)) return prev;
+          const next = new Set(prev);
+          next.add(snapshotId);
+          return next;
+        });
+      }
+    }).then((u) => {
+      if (cancelled) { u(); return; }
+      unlisten = u;
+    });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [indexAllRepo?.id]);
+
+  const handleIndexAll = async (repo: Repository) => {
+    // Already tracking a running/queued batch for this exact repo — just reopen the modal
+    // rather than restarting (index_snapshots_batch would reject a duplicate call anyway).
+    if (indexAllRepo?.id === repo.id && indexAllBatchActive) {
+      setIndexAllOpen(true);
+      return;
+    }
+    setIndexAllRepo(repo);
+    setIndexAllError("");
+    setIndexAllStopped(false);
+    setIndexAllNothingToDo(false);
+    setIndexAllTargets([]);
+    setIndexAllCompleted(new Set());
+    setIndexAllFailedSet(new Set());
+    setIndexAllOpen(true);
+    setIndexAllBatchState({ kind: "starting" });
+    try {
+      const [snaps, statusMap] = await Promise.all([listSnapshots(repo.id), getSnapshotIndexStatus(repo.id)]);
+      // A batch might already be running for this repo from elsewhere (e.g. its Search page) —
+      // adopt it instead of starting a duplicate.
+      const active = await getActiveIndexBatch(repo.id).catch(() => null);
+      if (active) {
+        adoptIndexAllBatch(active, statusMap);
+        return;
+      }
+      const targets = snaps
+        .filter((s) => statusMap[s.id] !== "complete" && statusMap[s.id] !== "in_progress")
+        .map((s) => s.id);
+      if (targets.length === 0) {
+        setIndexAllBatchState({ kind: "idle" });
+        setIndexAllNothingToDo(true);
+        return;
+      }
+      setIndexAllTargets(targets);
+      // Indexed sequentially, one snapshot at a time, by the backend — progress arrives via
+      // the task listener above.
+      await indexSnapshotsBatch(repo.id, targets);
+    } catch (err) {
+      if (String(err) === INDEX_BATCH_ALREADY_ACTIVE_ERROR) {
+        try {
+          const [status, statusMap] = await Promise.all([getActiveIndexBatch(repo.id), getSnapshotIndexStatus(repo.id)]);
+          if (status) {
+            adoptIndexAllBatch(status, statusMap);
+            return;
+          }
+        } catch {
+          // fall through to idle below
+        }
+        setIndexAllBatchState({ kind: "idle" });
+        return;
+      }
+      setIndexAllError("Failed to start indexing.");
+      setIndexAllBatchState({ kind: "idle" });
+    }
+  };
+
+  const handleStopIndexAll = async () => {
+    if (!indexAllOperationId) return;
+    try {
+      await cancelIndexBatch(indexAllOperationId);
+      setIndexAllStopped(true);
+    } catch {
+      // best-effort; batch will keep running if this fails
+    }
   };
 
   const handleRefreshRow = (e: MouseEvent, repo: Repository) => {
@@ -892,6 +1118,11 @@ export default function RepositoriesPage() {
               label: "Search Files…",
               onClick: () => navigate(`/snapshots/${contextMenu.repo.id}/search`),
             },
+            {
+              label: "Index All Snapshots",
+              disabled: repoNeedsIndexing[contextMenu.repo.id] === false,
+              onClick: () => handleIndexAll(contextMenu.repo),
+            },
             { separator: true },
             {
               label: "Refresh Stats",
@@ -1055,6 +1286,97 @@ export default function RepositoriesPage() {
             </div>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        title="Index All Snapshots"
+        open={indexAllOpen}
+        onClose={() => setIndexAllOpen(false)}
+      >
+        {indexAllError ? (
+          <div className="py-2">
+            <p className="text-sm text-red-300 mb-4">{indexAllError}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        ) : indexAllNothingToDo ? (
+          <div className="py-2">
+            <p className="text-sm text-gray-300 mb-4">All snapshots are already indexed.</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        ) : indexAllStopped && indexAllDoneCount < indexAllTotal ? (
+          <div className="py-2">
+            <p className="text-sm text-gray-300 mb-3">
+              Stopped after {indexAllDoneCount} of {indexAllTotal} snapshots.
+            </p>
+            <p className="text-xs text-gray-600 mb-4">
+              The remaining snapshots were not indexed. You can resume later from this repository.
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        ) : indexAllDoneCount < indexAllTotal || indexAllTotal === 0 ? (
+          <div className="py-2">
+            {indexAllQueued || indexAllTotal === 0 ? (
+              <>
+                <p className="text-sm text-gray-300 mb-3">
+                  {indexAllQueued ? "Queued — waiting for other indexing to finish…" : "Starting…"}
+                </p>
+                <p className="text-xs text-gray-600 mb-4">
+                  Only one repository is indexed at a time. This batch will start automatically
+                  as soon as the one ahead of it finishes.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-300 mb-3">
+                  Indexing {indexAllDoneCount} of {indexAllTotal} snapshots…
+                </p>
+                <div className="w-full bg-gray-800 rounded-full h-1.5 mb-4">
+                  <div
+                    className="bg-blue-500 h-1.5 rounded-full transition-all"
+                    style={{ width: `${(indexAllDoneCount / indexAllTotal) * 100}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-600 mb-4">
+                  Snapshots are indexed one at a time. You can close this and keep browsing —
+                  indexing continues in the background.
+                </p>
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                onClick={handleStopIndexAll}
+                disabled={!indexAllOperationId}
+                title={indexAllOperationId ? undefined : "Starting…"}
+              >
+                Stop
+              </Button>
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="py-2">
+            <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+              </svg>
+              Indexing complete
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Indexed {indexAllTotal - indexAllFailedCount} of {indexAllTotal} snapshot{indexAllTotal !== 1 ? "s" : ""}.
+              {indexAllFailedCount > 0 && ` ${indexAllFailedCount} failed and can be retried individually from the Snapshots page.`}
+            </p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={() => setIndexAllOpen(false)}>Close</Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

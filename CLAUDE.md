@@ -102,9 +102,20 @@ src/
                             #   get_repo_stats on "finished" (a guaranteed cache hit); each row shows a
                             #   "Refreshed …" label from cached_at, and a failed refresh keeps the last-good
                             #   value visible with a plain "refresh failed" marker rather than blanking to
-                            #   "unavailable"; mirror, edit, check, prune via right-click context menu;
-                            #   edit modal: name/path/password with Test
-                            #   Connection; prune: confirmation→progress→done
+                            #   "unavailable"; mirror, edit, check, prune, "Index All Snapshots" via
+                            #   right-click context menu; edit modal: name/path/password with Test
+                            #   Connection; prune: confirmation→progress→done; "Index All Snapshots"
+                            #   opens the same dismissible progress/queued/Stop/complete modal pattern as
+                            #   RepoSearchPage's own "Index All" (independent state, its own `task`
+                            #   listener scoped to whichever repo the context menu targeted — deliberate
+                            #   duplication, see "Known, deferred frontend duplication" below), and calls
+                            #   the same index_snapshots_batch/getActiveIndexBatch/cancel_index_batch
+                            #   commands, so a batch started from either page is visible in both
+                            #   (and in ActivityPanel) and adopted rather than duplicated; the menu item is
+                            #   disabled per-repo via a page-local `repoNeedsIndexing` map (cache-only
+                            #   listSnapshots+get_snapshot_index_status reads, recomputed on repo-list
+                            #   changes and kept live via the `task` bus + snapshots:refreshed — fails
+                            #   open/enabled while unchecked)
     SnapshotsPage.tsx       # Snapshot table; stale-while-revalidate cache; inline tag editor; delete with prune option;
                             #   full-snapshot restore with streaming progress; per-snapshot copy with cancellation;
                             #   pagination (PAGE_SIZE=10); filter with × clear; right-click context menu;
@@ -568,12 +579,14 @@ the same by-id lookup `loadUpcoming` does for plan names, just async since a bat
 time; falls back to a repo-less label per batch if the lookup fails or that repo was deleted
 mid-batch. This is deliberately the one exception to "restore/copy/mirror/manual backup/prune
 already have their own progress modals and are intentionally excluded" (see `ActivityPanel.tsx`'s
-header comment): "Index All"'s modal (`RepoSearchPage`) is explicitly dismissible while its batch
-keeps running, so unlike those other modals it needs a way to stay visible and cancellable after
-the modal closes — `RepoSearchPage`'s own Stop button captures its batch's `operationId` from the
-same `started` task event (see the page's `task` listener) so it targets only its own batch,
-independent of any other batch running elsewhere. The existing per-snapshot listeners
-(`SnapshotsPage`/`SearchPage`/`RepoSearchPage`) already guard on `targetId` being set, so they
+header comment): "Index All"'s modal — `RepoSearchPage`, and independently `RepositoriesPage`'s
+context-menu equivalent — is explicitly dismissible while its batch keeps running, so unlike those
+other modals it needs a way to stay visible and cancellable after the modal closes — each page's own
+Stop button captures its batch's `operationId` from the same `started` task event (see the page's
+`task` listener) so it targets only its own batch, independent of any other batch running elsewhere
+(including one started from the *other* page — each page's `getActiveIndexBatch` call adopts an
+already-running batch for the same repo instead of rejecting/duplicating). The existing per-snapshot
+listeners (`SnapshotsPage`/`SearchPage`/`RepoSearchPage`) already guard on `targetId` being set, so they
 transparently ignore every batch-level op with no changes required.
 
 `activeBackup` (the scheduler-triggered backup row in Active Tasks) is the fourth consumer, and the
@@ -712,7 +725,10 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `SearchPage.tsx`, `RepoSearchPage.tsx`, and (partially) `BrowsePage.tsx`/`DiffPage.tsx`;
   `RepoSearchPage` re-subscribes its `task` (index) listener on every keystroke; every page
   independently calls `listRepos()` on mount instead of sharing a cache; `BrowsePage` renders a
-  directory's full entry list with no pagination or virtualization. All are known and intentionally
+  directory's full entry list with no pagination or virtualization; the "Index All Snapshots"
+  batch-tracking state machine and progress modal (queued/running/stopped/complete, `task`
+  listener, `getActiveIndexBatch` adoption) is duplicated between `RepoSearchPage.tsx` and
+  `RepositoriesPage.tsx`'s context-menu equivalent. All are known and intentionally
   deferred (structural refactor / new dependency required) — revisit deliberately, don't
   rediscover them as "new" findings.
 - **Backup progress bars are non-monotonic by design.** restic's `percent_done` (= `bytes_done /
