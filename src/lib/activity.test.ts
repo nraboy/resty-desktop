@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSchedulerBackup, reducePrune, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, type StatsOpsState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -192,6 +192,70 @@ describe("reduceIndexBatches", () => {
     state = reduceIndexBatches(state, taskEvent({ kind: "index", operationId: "batchA", repoId: "repoA", phase: "finished" }));
     expect(state.has("batchA")).toBe(false);
     expect(state.has("batchB")).toBe(true);
+  });
+});
+
+describe("reduceSnapshotIndexes", () => {
+  it("adds a standalone single-snapshot index on started", () => {
+    const state = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "started",
+    }));
+    expect(state.get("op1")).toEqual({ operationId: "op1", repoId: "repoA", snapshotId: "snap1" });
+  });
+
+  it.each(["finished", "failed", "cancelled"] as const)("removes the entry on %s", (phase) => {
+    const started = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "started",
+    }));
+    const cleared = reduceSnapshotIndexes(started, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase,
+    }));
+    expect(cleared.has("op1")).toBe(false);
+  });
+
+  it("ignores an event with no targetId (batch-level op)", () => {
+    const state = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "index", operationId: "batch1", repoId: "repoA", phase: "started",
+    }));
+    expect(state.size).toBe(0);
+  });
+
+  it("ignores a background-origin event (cache-warmer auto-indexer)", () => {
+    const state = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", origin: "background", phase: "started",
+    }));
+    expect(state.size).toBe(0);
+  });
+
+  it("ignores a non-index kind", () => {
+    const state = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "stats", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "started",
+    }));
+    expect(state.size).toBe(0);
+  });
+
+  it("returns the same reference when nothing changes", () => {
+    const empty = new Map();
+    const result = reduceSnapshotIndexes(empty, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "cancelling",
+    }));
+    expect(result).toBe(empty);
+  });
+
+  it("tracks two concurrent standalone indexes independently", () => {
+    let state = reduceSnapshotIndexes(new Map(), taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "started",
+    }));
+    state = reduceSnapshotIndexes(state, taskEvent({
+      kind: "index", operationId: "op2", repoId: "repoB", targetId: "snap2", phase: "started",
+    }));
+    expect(state.size).toBe(2);
+
+    state = reduceSnapshotIndexes(state, taskEvent({
+      kind: "index", operationId: "op1", repoId: "repoA", targetId: "snap1", phase: "finished",
+    }));
+    expect(state.has("op1")).toBe(false);
+    expect(state.has("op2")).toBe(true);
   });
 });
 

@@ -29,6 +29,14 @@
 // consumer — see activity.tsx's reduceSchedulerBackup — and shows plan name only (the bus
 // carries no schedule name, unlike the legacy scheduler:* events it replaced).
 //
+// Standalone single-snapshot indexing ("Index Snapshot" on SnapshotsPage, "Index Now" on
+// SearchPage) gets its own lifecycle-only spinner row per in-flight index (activeSnapshotIndexes,
+// see activity.tsx's reduceSnapshotIndexes) — same rationale as "Index All": their modal/inline
+// UI's Close button doesn't cancel anything, so this is what stays visible once it's dismissed.
+// No Stop button: `index_snapshot` has no cancel path at all (unlike the batch, which does).
+// A batch's own per-snapshot events are indistinguishable on the wire from a standalone call, so
+// entries whose repo already has a running batch are filtered out here to avoid a duplicate row.
+//
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
 // opens a `fixed` drawer that slides in over the content (no reflow, no scrim) — dismissed via
@@ -99,7 +107,7 @@ function StopIcon() {
 export default function ActivityPanel() {
   const {
     indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
-    indexBatchRepoNames, statsRefreshAllProgress,
+    activeSnapshotIndexes, indexBatchRepoNames, statsRefreshAllProgress,
   } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
@@ -111,9 +119,16 @@ export default function ActivityPanel() {
   const runningIndexBatches = activeIndexBatches.filter((b) => b.status === "running");
   const queuedIndexBatches = activeIndexBatches.filter((b) => b.status === "queued");
 
+  // A batch's own per-snapshot progress events are indistinguishable on the wire from a
+  // standalone "Index Snapshot"/"Index Now" call (see ActiveSnapshotIndex's doc comment in
+  // activity.tsx) — so suppress any standalone entry whose repo already has a batch running,
+  // rather than rendering a redundant row alongside the batch's own "X / N snapshots" bar.
+  const batchRepoIds = new Set(activeIndexBatches.map((b) => b.repoId));
+  const standaloneSnapshotIndexes = activeSnapshotIndexes.filter((s) => !batchRepoIds.has(s.repoId));
+
   const hasActive =
     indexing != null || activeBackup != null || activePrune != null || statsRefreshing.length > 0 ||
-    activeIndexBatches.length > 0 || statsRefreshAllProgress != null;
+    activeIndexBatches.length > 0 || standaloneSnapshotIndexes.length > 0 || statsRefreshAllProgress != null;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -242,6 +257,19 @@ export default function ActivityPanel() {
                     <ProgressBar percent={(batch.itemsDone / Math.max(1, batch.itemsTotal)) * 100} />
                     <p className="text-xs text-gray-500">
                       {stopping ? "Stopping…" : `${batch.itemsDone} / ${batch.itemsTotal} snapshots`}
+                    </p>
+                  </div>
+                );
+              })}
+              {standaloneSnapshotIndexes.map((s) => {
+                const repoName = indexBatchRepoNames[s.repoId];
+                const shortId = s.snapshotId.slice(0, 8);
+                return (
+                  <div key={s.operationId} className="flex items-center gap-2">
+                    <Spinner className="w-3.5 h-3.5 flex-shrink-0" />
+                    <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
+                      Indexing snapshot <span className="font-mono">{shortId}</span>
+                      {repoName ? ` — ${repoName}` : ""}
                     </p>
                   </div>
                 );

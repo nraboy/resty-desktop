@@ -134,10 +134,17 @@ interface ActivityState {
    *  are running. Populated from each batch-level `task` op (kind "index", no targetId); see the
    *  module doc comment above and reduceIndexBatches. */
   activeIndexBatches: ActiveIndexBatch[];
-  /** Display names for the repoIds among `activeIndexBatches`, resolved via listRepos() (the
-   *  event only carries the id — see the module doc comment above), keyed by repoId. A missing
-   *  or null entry means still resolving or the repo can no longer be found (e.g. deleted
-   *  mid-batch); the panel falls back to a generic label in that case rather than a raw id. */
+  /** Every in-progress standalone single-snapshot index ("Index Snapshot" / "Index Now"),
+   *  across all repos — derived from each per-snapshot manual `task` op (kind "index", targetId
+   *  set). Includes a batch's own per-snapshot events too (indistinguishable on the wire — see
+   *  ActiveSnapshotIndex's doc comment); ActivityPanel filters out entries whose repoId matches
+   *  a currently-running batch so the two rows don't double up for the same repo. */
+  activeSnapshotIndexes: ActiveSnapshotIndex[];
+  /** Display names for the repoIds among `activeIndexBatches` and `activeSnapshotIndexes`,
+   *  resolved via listRepos() (the event only carries the id — see the module doc comment
+   *  above), keyed by repoId. A missing or null entry means still resolving or the repo can no
+   *  longer be found (e.g. deleted mid-batch); the panel falls back to a generic label in that
+   *  case rather than a raw id. */
   indexBatchRepoNames: Record<string, string | null>;
   /** Bumped every 60s so relative-time labels ("in 3 hours") stay fresh without a refetch. */
   clockTick: number;
@@ -172,6 +179,21 @@ export interface ActiveIndexBatch {
   itemsDone: number;
   itemsTotal: number;
   status: "queued" | "running";
+}
+
+/** A single manually-triggered snapshot index in flight — "Index Snapshot"
+ *  (SnapshotsPage context menu) or "Index Now" (SearchPage) — derived from its per-snapshot
+ *  `task` op (`kind: "index"`, `origin: "manual"`, `targetId` = snapshot id). This is the
+ *  mirror image of `ActiveIndexBatch`: a batch's own per-snapshot progress events share this
+ *  exact shape (see reduceSnapshotIndexes), so a repo running an "Index All" batch is
+ *  suppressed at render time (ActivityPanel filters by repoId against activeIndexBatches)
+ *  rather than distinguished on the wire — there's nothing in the payload that tells them
+ *  apart. No progress/cancel affordance: `index_snapshot` has no cancel slot at all (see
+ *  browse.rs), so this is a lifecycle-only spinner row, same treatment as `statsRefreshing`. */
+export interface ActiveSnapshotIndex {
+  operationId: string;
+  repoId: string;
+  snapshotId: string;
 }
 
 /** In-flight `stats` task operations (operationId -> repoId, so concurrent refreshes — e.g.
@@ -267,6 +289,45 @@ export function reduceIndexBatches(
     }
     default:
       return state; // "cancelling" — no state change, Stop's disabled/"Stopping…" is local UI state
+  }
+}
+
+/** Pure reducer over `index`-kind task events, isolating standalone manual single-snapshot
+ *  index ops ("Index Snapshot" / "Index Now") — the inverse guard of reduceIndexBatches
+ *  above: this one only wants events that DO carry a `targetId`. A batch's own per-snapshot
+ *  events (index_snapshots_batch, browse.rs) are indistinguishable on the wire from a
+ *  standalone `index_snapshot` call, so this reducer tracks both — ActivityPanel is
+ *  responsible for filtering out any entry whose repoId matches a currently-running batch
+ *  (see its module doc comment) so a batch's per-snapshot progress doesn't also render a
+ *  redundant standalone row. `origin: "background"` (the cache-warmer auto-indexer) is
+ *  excluded — that's already covered by the `indexing` cached/total row. Returns the same
+ *  `state` reference whenever nothing changes so the caller can skip a re-render. Exported
+ *  for a unit test (see activity.test.ts). */
+export function reduceSnapshotIndexes(
+  state: Map<string, ActiveSnapshotIndex>,
+  event: TaskEvent
+): Map<string, ActiveSnapshotIndex> {
+  if (event.kind !== "index" || event.origin !== "manual" || !event.targetId) return state;
+  switch (event.phase) {
+    case "started": {
+      const next = new Map(state);
+      next.set(event.operationId, {
+        operationId: event.operationId,
+        repoId: event.repoId,
+        snapshotId: event.targetId,
+      });
+      return next;
+    }
+    case "finished":
+    case "failed":
+    case "cancelled": {
+      if (!state.has(event.operationId)) return state;
+      const next = new Map(state);
+      next.delete(event.operationId);
+      return next;
+    }
+    default:
+      return state; // "pending"/"progress"/"cancelling" — single-snapshot ops never emit these
   }
 }
 
@@ -407,6 +468,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [statsRefreshing, setStatsRefreshing] = useState<string[]>([]);
   const [statsFailed, setStatsFailed] = useState<string[]>([]);
   const [activeIndexBatches, setActiveIndexBatches] = useState<ActiveIndexBatch[]>([]);
+  const [activeSnapshotIndexes, setActiveSnapshotIndexes] = useState<ActiveSnapshotIndex[]>([]);
   const [indexBatchRepoNames, setIndexBatchRepoNames] = useState<Record<string, string | null>>({});
   const [clockTick, setClockTick] = useState(0);
   const [statsRefreshAllProgress, setStatsRefreshAllProgress] = useState<{ current: number; total: number } | null>(null);
@@ -417,6 +479,9 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   // mirrored into a ref (like statsOpsRef) so the listener can compare by reference and only
   // call setActiveIndexBatches when the set of batches actually changed.
   const indexBatchesRef = useRef<Map<string, ActiveIndexBatch>>(new Map());
+  // activeSnapshotIndexes is derived from this on every "task" event via
+  // reduceSnapshotIndexes; same compare-by-reference discipline as indexBatchesRef above.
+  const snapshotIndexesRef = useRef<Map<string, ActiveSnapshotIndex>>(new Map());
   // activeBackup is derived from this on every "task" event via reduceSchedulerBackup; also
   // written directly by the plan-lookup effect below (planName resolution, no-retention
   // dismissal) so the ref stays the source of truth the next reduce builds on rather than
@@ -469,6 +534,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         indexBatchesRef.current = nextBatches;
         setActiveIndexBatches([...nextBatches.values()]);
       }
+      const nextSnapIdx = reduceSnapshotIndexes(snapshotIndexesRef.current, e.payload);
+      if (nextSnapIdx !== snapshotIndexesRef.current) {
+        snapshotIndexesRef.current = nextSnapIdx;
+        setActiveSnapshotIndexes([...nextSnapIdx.values()]);
+      }
       const nextSchedulerBackup = reduceSchedulerBackup(schedulerBackupRef.current, e.payload);
       if (nextSchedulerBackup !== schedulerBackupRef.current) {
         schedulerBackupRef.current = nextSchedulerBackup;
@@ -491,12 +561,18 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // The task event only carries repoId, not a display name — resolve the whole set of
-  // currently-active batches' repoIds in one listRepos() call (same by-id lookup loadUpcoming
-  // does for plan names above) whenever that set changes. Joined into a stable string key so the
-  // effect only re-runs when the actual set of repos changes, not on every progress tick. Falls
-  // back to null per id (panel shows a generic label) if a repo can't be found or the lookup
-  // fails, including the rare case of a repo being deleted mid-batch.
-  const batchRepoIdsKey = [...new Set(activeIndexBatches.map((b) => b.repoId))].sort().join(",");
+  // currently-active batches' AND standalone snapshot indexes' repoIds in one listRepos() call
+  // (same by-id lookup loadUpcoming does for plan names above) whenever that set changes.
+  // Joined into a stable string key so the effect only re-runs when the actual set of repos
+  // changes, not on every progress tick. Falls back to null per id (panel shows a generic
+  // label) if a repo can't be found or the lookup fails, including the rare case of a repo
+  // being deleted mid-batch/mid-index.
+  const batchRepoIdsKey = [
+    ...new Set([
+      ...activeIndexBatches.map((b) => b.repoId),
+      ...activeSnapshotIndexes.map((s) => s.repoId),
+    ]),
+  ].sort().join(",");
   useEffect(() => {
     const repoIds = batchRepoIdsKey ? batchRepoIdsKey.split(",") : [];
     if (repoIds.length === 0) { setIndexBatchRepoNames({}); return; }
@@ -563,7 +639,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     <ActivityContext.Provider
       value={{
         indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, statsFailed,
-        activeIndexBatches, indexBatchRepoNames, clockTick,
+        activeIndexBatches, activeSnapshotIndexes, indexBatchRepoNames, clockTick,
         statsRefreshAllProgress, setStatsRefreshAllProgress,
       }}
     >
