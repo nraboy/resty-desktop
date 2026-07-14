@@ -124,6 +124,13 @@ export interface ActiveIndexBatchStatus {
  *  state) instead of treating this as a genuine failure. */
 export const INDEX_BATCH_ALREADY_ACTIVE_ERROR = "IndexBatchAlreadyActive";
 
+/** Sentinel error returned by `mirror_repo` when the exact same `(srcRepoId, destRepoId)`
+ *  pair already has a mirror queued or running — matches snapshot.rs's
+ *  `MIRROR_ALREADY_ACTIVE_ERROR` exactly, same pattern as `INDEX_BATCH_ALREADY_ACTIVE_ERROR`
+ *  above. A different source or a different destination is not a duplicate and queues
+ *  normally — see `mirror_repo`'s doc comment. */
+export const MIRROR_ALREADY_ACTIVE_ERROR = "MirrorAlreadyActive";
+
 // Unified operation lifecycle event bus (Tauri event name "task") — see
 // tasks.rs and CLAUDE.md's "Operation Event Bus" section. Emitted by every
 // covered restic operation alongside — not instead of — its existing detailed
@@ -137,10 +144,10 @@ export type TaskKind =
   | "testConnection" | "browse" | "init";
 export type TaskPhase =
   | "pending" | "started" | "progress" | "cancelling" | "cancelled" | "finished" | "failed";
-// "pending" (queued, not yet running) is currently only emitted by "Index All"
-// batches waiting their turn on the backend's batch_turn mutex — see
-// tasks.rs's TaskPhase::Pending doc comment. Followed by "started" once the
-// batch actually begins.
+// "pending" (queued, not yet running) is emitted by "Index All" batches waiting
+// their turn on the backend's batch_turn mutex, and by mirror runs waiting
+// their turn on MirrorHandle::turn — see tasks.rs's TaskPhase::Pending doc
+// comment. Followed by "started" once the operation actually begins.
 export type TaskOrigin = "manual" | "scheduler" | "background";
 
 export interface TaskProgress {

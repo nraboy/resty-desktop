@@ -171,11 +171,16 @@ export const copySnapshot = (
 export const cancelCopy = (): Promise<void> =>
   invoke("cancel_copy");
 
-export const mirrorRepo = (srcRepoId: string, destRepoId: string): Promise<void> =>
+// Returns the mirror's operationId immediately — the actual copy runs in a detached
+// backend task (queued behind any other mirror already running). Use the returned id to
+// correlate `task` events (kind "mirror") and to target cancelMirror precisely; a rejected
+// promise with message MIRROR_ALREADY_ACTIVE_ERROR means this exact (srcRepoId, destRepoId)
+// pair already has a mirror queued or running.
+export const mirrorRepo = (srcRepoId: string, destRepoId: string): Promise<string> =>
   invoke("mirror_repo", { srcRepoId, destRepoId });
 
-export const cancelMirror = (): Promise<void> =>
-  invoke("cancel_mirror");
+export const cancelMirror = (operationId: string): Promise<void> =>
+  invoke("cancel_mirror", { operationId });
 
 export const cancelBackup = (): Promise<void> =>
   invoke("cancel_backup");

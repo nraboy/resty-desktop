@@ -259,7 +259,16 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         origin: TaskOrigin,
         slot: Option<TaskSlot>,
     ) -> Self {
-        Self::new_with_initial_phase(sink, kind, repo_id, target_id, origin, slot, TaskPhase::Started)
+        Self::new_with_initial_phase(
+            sink,
+            kind,
+            repo_id,
+            target_id,
+            origin,
+            slot,
+            TaskPhase::Started,
+            new_operation_id(),
+        )
     }
 
     /// Like `new`, but the operation isn't doing its real work yet — it's queued,
@@ -275,7 +284,45 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         origin: TaskOrigin,
         slot: Option<TaskSlot>,
     ) -> Self {
-        Self::new_with_initial_phase(sink, kind, repo_id, target_id, origin, slot, TaskPhase::Pending)
+        Self::new_with_initial_phase(
+            sink,
+            kind,
+            repo_id,
+            target_id,
+            origin,
+            slot,
+            TaskPhase::Pending,
+            new_operation_id(),
+        )
+    }
+
+    /// Like `new_pending`, but the caller supplies the `operation_id` instead of a
+    /// fresh one being generated here. Needed when the caller must know the id
+    /// *before* the operation is registered/emitted — e.g. `mirror_repo` generates
+    /// the id up front so it can register the queue entry and return the id to the
+    /// frontend from the same synchronous command call, before the spawned task
+    /// (which is what actually constructs this `OperationCtx`) ever runs. Every
+    /// other caller should keep using `new`/`new_pending`, which mint their own id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_pending_with_id(
+        sink: S,
+        kind: TaskKind,
+        repo_id: impl Into<String>,
+        target_id: Option<String>,
+        origin: TaskOrigin,
+        slot: Option<TaskSlot>,
+        operation_id: String,
+    ) -> Self {
+        Self::new_with_initial_phase(
+            sink,
+            kind,
+            repo_id,
+            target_id,
+            origin,
+            slot,
+            TaskPhase::Pending,
+            operation_id,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -287,8 +334,8 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
         origin: TaskOrigin,
         slot: Option<TaskSlot>,
         initial_phase: TaskPhase,
+        operation_id: String,
     ) -> Self {
-        let operation_id = new_operation_id();
         let repo_id = repo_id.into();
 
         if let Some(s) = &slot {
@@ -527,6 +574,32 @@ mod tests {
         assert_eq!(events[3].phase, TaskPhase::Finished);
         for ev in &events {
             assert_eq!(ev.operation_id, op_id);
+        }
+    }
+
+    #[test]
+    fn pending_with_id_uses_the_supplied_operation_id_throughout() {
+        let sink = RecordingSink::new();
+        let ctx = OperationCtx::new_pending_with_id(
+            sink.clone(),
+            TaskKind::Mirror,
+            "repo-1",
+            None,
+            TaskOrigin::Manual,
+            None,
+            "caller-supplied-id".to_string(),
+        );
+        assert_eq!(ctx.operation_id(), "caller-supplied-id");
+        ctx.activate();
+        ctx.finished();
+
+        let events = sink.events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].phase, TaskPhase::Pending);
+        assert_eq!(events[1].phase, TaskPhase::Started);
+        assert_eq!(events[2].phase, TaskPhase::Finished);
+        for ev in &events {
+            assert_eq!(ev.operation_id, "caller-supplied-id");
         }
     }
 

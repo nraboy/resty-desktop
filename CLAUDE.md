@@ -56,9 +56,11 @@ src/
                    #   a frozen bar), in-flight repo stats refreshes (also in Active Tasks — lifecycle-only,
                    #   no progress bar), next few due schedules (Upcoming Tasks — rows truncate with
                    #   a hover tooltip for long plan lists), and last few backup runs (Recent Logs — neutral
-                   #   "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries).
-                   #   Restore/copy/mirror/manual backup/prune have their own progress modals and are
-                   #   intentionally excluded — see lib/activity.tsx.
+                   #   "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries),
+                   #   and queued/running mirror runs (Active Tasks — one row per mirror, "Up Next" for
+                   #   any additionally queued ones; see lib/activity.tsx's reduceMirror). Restore/copy/
+                   #   manual backup still have their own blocking progress modals and are intentionally
+                   #   excluded — see lib/activity.tsx.
   lib/
     types.ts       # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
                    #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan,
@@ -90,7 +92,12 @@ src/
                    #   explicitly so this marker never depends on the invoke promise's own rejection). The
                    #   actual numbers are re-read from the DB cache by RepositoriesPage's own `task`
                    #   listener (only on "finished"), not carried on the event. Powers ActivityPanel.tsx and
-                   #   (for statsRefreshing/statsFailed) RepositoriesPage.tsx directly.
+                   #   (for statsRefreshing/statsFailed) RepositoriesPage.tsx directly. activeMirrors tracks
+                   #   every queued/running mirror (Map<operationId, ActiveMirror>, not a nullable slot —
+                   #   mirror_repo allows multiple runs to be queued at once, including two into the same
+                   #   destination from different sources, so it's attributed strictly by operationId, never
+                   #   repoId — see reduceMirror). Mirror has no `progress` phase (restic `copy` streams
+                   #   nothing incremental), so a running row is always an indeterminate ProgressBar.
     format.ts      # formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration
     config.ts      # MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
     utils.ts       # needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
@@ -118,7 +125,23 @@ src/
                             #   busy guard) so a click on a different repo can't silently reopen the modal
                             #   onto the wrong repo's progress; a backgrounded prune otherwise stays
                             #   visible/cancellable via the Activity panel's `activePrune` row — see
-                            #   ActivityPanel.tsx; "Index All Snapshots"
+                            #   ActivityPanel.tsx; mirror: destination picker → queued/running (an
+                            #   indeterminate bar; mirror_repo emits no progress) → done/cancelled/failed,
+                            #   with a Hide button on the queued/running screen that backgrounds the run
+                            #   without cancelling it (mirrorOpId/mirrorOutcome tracked locally; the
+                            #   queued-vs-running state itself is read live from ActivityProvider's
+                            #   activeMirrors, matched by operationId — never repoId, since mirror_repo
+                            #   allows multiple runs queued at once, including two into the same
+                            #   destination from different sources); deliberately no re-adoption path (unlike
+                            #   "Index All"'s getActiveIndexBatch below) — reopening the modal for a repo
+                            #   always starts a fresh picker, since a backgrounded mirror stays fully
+                            #   visible/cancellable via the panel regardless, and the backend's `(src, dest)`
+                            #   dedup guard rejects an accidental exact repeat (MIRROR_ALREADY_ACTIVE_ERROR);
+                            #   a page-local `task` listener drives the terminal outcome, backstopped by a
+                            #   second effect that infers "done" if activeMirrors drops the operationId first
+                            #   (closes a narrow race where Tauri's async `listen()` registration can lose to
+                            #   an unusually fast mirror's terminal event — activeMirrors isn't subject to
+                            #   this, since ActivityProvider has been subscribed since app launch); "Index All Snapshots"
                             #   opens the same dismissible progress/queued/Stop/complete modal pattern as
                             #   RepoSearchPage's own "Index All" (independent state, its own `task`
                             #   listener scoped to whichever repo the context menu targeted — deliberate
@@ -244,12 +267,22 @@ src-tauri/
                      #   log_retention_failure (pub(crate)) records a failed retention as its own backup_history
                      #   row ("Retention failed: <err>") so it's visible in Recent Logs/LogsPage even though
                      #   apply_retention has no history entry of its own — called from all three retention call
-                     #   sites (forget_by_plan, the scheduler tick, run_schedule_now); copy_snapshot/mirror_repo
-                     #   each carry a `busy` guard on CopyHandle/MirrorHandle (a second concurrent attempt fails
-                     #   fast with "already in progress" instead of corrupting shared state); execute_backup/
+                     #   sites (forget_by_plan, the scheduler tick, run_schedule_now); copy_snapshot carries a
+                     #   `busy` guard on CopyHandle (a second concurrent attempt fails fast with "already in
+                     #   progress" instead of corrupting shared state); mirror_repo is queued rather than
+                     #   single-in-flight — see MirrorHandle/MirrorEntry (cache.rs) and the Operation Event Bus
+                     #   section's mirror paragraph — so it has no busy flag of its own: a duplicate is only
+                     #   rejected when it's the exact same (src_repo_id, dest_repo_id) pair already queued or
+                     #   running (MIRROR_ALREADY_ACTIVE_ERROR), checked and registered atomically under one
+                     #   `MirrorHandle::mirrors` lock acquisition; mirror_repo returns its operationId
+                     #   immediately (the actual copy runs in a detached `spawn`ed task, queued behind
+                     #   MirrorHandle::turn) rather than blocking until the copy finishes, and cancel_mirror
+                     #   takes that operationId rather than targeting a single shared handle; execute_backup/
                      #   copy_snapshot/mirror_repo/refresh_snapshots/get_snapshot_stats/diff_snapshots each
-                     #   acquire a RepoLocks read guard, delete_snapshot/tag_snapshot/apply_retention each
-                     #   acquire a write guard (see Concurrency section)
+                     #   acquire a RepoLocks read guard — mirror_repo's is the one exception acquired *inside*
+                     #   its spawned task rather than the outer command body, since the command already
+                     #   returned by the time the guard is needed — delete_snapshot/tag_snapshot/apply_retention
+                     #   each acquire a write guard (see Concurrency section)
       browse.rs      # list_files; restore_path (strip_leading_path moves restored item to target root);
                      #   restore_snapshot (streaming restore:progress events); EA-error suppression on Windows;
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
@@ -293,11 +326,19 @@ src-tauri/
                      #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup;
                      #   preview_backrest_import/import_backrest_config: one-way import of Backrest config.json
                      #   (plaintext pw re-encrypted under master key; lossy — see Import / Export)
-      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; MirrorHandle; BackupHandle (with busy flag); PruneHandle
-                     #   (CopyHandle/MirrorHandle/PruneHandle each also have a `busy` guard, closing a gap where they
+      cache.rs       # AppDb (SQLite state); MasterKey; CopyHandle; BackupHandle (with busy flag); PruneHandle
+                     #   (CopyHandle/PruneHandle each also have a `busy` guard, closing a gap where they
                      #   previously shared their handle with no serialization — a concurrent second run could clobber
                      #   the first run's child/cancelled state; a second concurrent attempt now returns a clean
                      #   "already in progress" error, matching BackupHandle/RestoreHandle's existing pattern);
+                     #   MirrorHandle (a queue registry, not a single-in-flight busy-guarded handle like the
+                     #   others — modeled on IndexHandle's "Index All" batch machinery, but simpler: one FIFO
+                     #   `turn: tokio::Mutex<()>` lane (no `gate` equivalent, since a single `restic copy`
+                     #   process has nothing to memory-bound the way concurrent `restic ls` calls did) plus a
+                     #   `mirrors: Mutex<HashMap<operationId, MirrorEntry>>` per-run cancel/child/task-slot
+                     #   registry, so multiple mirrors — including two into the same destination from different
+                     #   sources — can be queued and cancelled independently; see the Operation Event Bus
+                     #   section's mirror paragraph for the full design);
                      #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
                      #   get_snapshots_vec: reads snapshots_cache rows straight into Vec<Snapshot> (paths/tags JSON
                      #   columns parsed once) — no intermediate JSON-string serialization;
@@ -377,7 +418,7 @@ src-tauri/
 - `execute_backup` streams NDJSON line-by-line; `status` lines → `backup:progress` events; `summary` line captured and returned. Fires notification on completion. Reads compression from `app_settings` (`RESTIC_COMPRESSION` env). Accepts `limit_upload`/`limit_download` (KiB/s); `Some(0)` treated as `None`. Serialized via a `busy` flag on `BackupHandle` — only one backup runs at a time; a concurrent attempt (e.g. a scheduler tick firing during a manual backup) returns `"A backup is already in progress"`. Sequential callers (`run_schedule_now`, scheduler loop) are unaffected since each `await` releases the flag before the next starts. On a genuine cancellation (`BackupHandle::cancelled` set), the `Err` branch logs `CANCELLED_BACKUP_ERROR` ("Cancelled") to `backup_history` instead of the raw `"cancelled"` control-flow string, and fires a "Backup cancelled" notification instead of "Backup failed" — see `CANCELLED_BACKUP_ERROR` in `lib/types.ts` and `LogsPage`/`ActivityPanel`'s matching neutral rendering.
 - `cancel_backup`, `cancel_copy`, `cancel_mirror`, `cancel_prune`, `cancel_restore` all run `restic unlock` after SIGKILL to clear stale locks.
 - `copy_snapshot` runs `restic copy --from-repo <src> <snapshot_id>` against the destination repo.
-- `mirror_repo` uses `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots src→dest.
+- `mirror_repo` uses `RESTIC_FROM_REPOSITORY`/`RESTIC_FROM_PASSWORD` env vars to copy all snapshots src→dest. Queued rather than single-in-flight (see `MirrorHandle`/`MirrorEntry`, `cache.rs`, and the Operation Event Bus section's mirror paragraph): the command registers the run and returns its `operationId` immediately — the actual copy runs in a detached `spawn`ed task, waiting its turn on `MirrorHandle::turn` (a FIFO lane; only one `restic copy` process runs at a time) before executing. Multiple mirrors can be queued at once, including two into the same destination from different sources; only an exact `(src_repo_id, dest_repo_id)` repeat already queued or running is rejected (`MIRROR_ALREADY_ACTIVE_ERROR`), checked and registered atomically under one lock acquisition. `cancel_mirror(operation_id)` targets one run by id — a still-queued run is woken via `MirrorEntry::cancel_notify` and never spawns; a running one is SIGKILLed, with the `restic unlock` on both repos happening in the task's own cancelled-branch handling once `wait()` confirms the process exited (same "kill in `cancel_*`, unlock in the operation's own post-kill handling" pattern `cancel_backup`/`cancel_copy` already follow).
 - `diff_snapshots` parses plain-text `restic diff` output (no `--json`); prefixes `+`/`-`/`M`/`T`; capped at 500 entries with `truncated` flag. DiffPage always navigates older→newer so `+` = added in newer.
 - `check_repo` runs `restic check --json`; duration measured via `Instant` (no timing in summary). Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore --json`; emits `restore:progress` events. Stderr drained on background thread. Serialized via a `busy` flag on `RestoreHandle` (same pattern as `BackupHandle`) — a concurrent attempt returns `"A restore is already in progress"`. Cancellable via `cancel_restore`; on cancel, a successful exit still wins over the cancelled flag (handles the race where Stop is clicked right as the restore finishes).
@@ -417,8 +458,12 @@ Wired into every shared-lock op (`execute_backup`, `restore_snapshot`, `restore_
 `cache_warmer` auto-sweep) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
 `prune_repo`/`prune_all_repos`, `apply_retention` — covering all three callers: `forget_by_plan`,
 the scheduler tick, `run_schedule_now`). For a streaming op the guard is a local held across the
-`spawn_blocking(...).await`, claimed for the whole child-process lifetime. `restic unlock` calls
-(cancel paths, `unlock_app`) are **exempt** — they're the recovery mechanism and must never wait.
+`spawn_blocking(...).await`, claimed for the whole child-process lifetime. `mirror_repo` is the one
+exception to "acquired in the outer command body": since it queues and returns its `operationId`
+immediately (see Restic Integration), its guards are acquired *inside* the detached `spawn`ed task,
+right after it wins its turn on `MirrorHandle::turn` — the outer command has already returned by
+the time a guard would otherwise be needed. `restic unlock` calls (cancel paths, `unlock_app`) are
+**exempt** — they're the recovery mechanism and must never wait.
 
 `prune_repo`/`prune_all_repos` re-check `PruneHandle::cancelled` right after acquiring their
 write guard and before spawning the child — `write()`'s wait has no cancellation hook, so
@@ -497,7 +542,7 @@ used specifically so every one of their several early-return points still report
 `OperationCtx` instead of falling through to the Drop backstop). `TaskSink` is a trait (implemented
 for `AppHandle`) purely so `tasks.rs`'s tests can record emitted events without a real app.
 
-Cancellable operations (backup, restore, copy, mirror, prune) carry a `current_task: TaskSlot`
+Cancellable operations (backup, restore, copy, prune) carry a `current_task: TaskSlot`
 (`Arc<Mutex<Option<TaskRef>>>`) on their existing handle (`BackupHandle`, `RestoreHandle`, ...) —
 `OperationCtx::new` publishes its `TaskRef` (including the operation's `origin`, so
 `emit_cancelling` reports the operation's real origin rather than assuming every cancel is
@@ -519,6 +564,21 @@ Drop pattern). `cancel_index_batch(operation_id)` looks up that specific batch's
 means "no further snapshots will start" — the snapshot already in flight still finishes normally
 (`finished`/`failed`), since cancellation is checked only between snapshots, never mid-`restic`.
 
+`mirror_repo` is the second operation to move onto this same per-operation-registry pattern rather
+than a shared handle slot, for the identical reason as "Index All": once queueing multiple mirrors
+was added — including two into the same destination from different sources, which share a `repoId`
+on the wire — a single `TaskSlot` on `MirrorHandle` could no longer identify which run a cancel or
+terminal event belonged to. `MirrorHandle::mirrors: Arc<Mutex<HashMap<operationId, MirrorEntry>>>`
+(`cache.rs`) mirrors `IndexHandle::batches`/`BatchCancel` field-for-field (cancel flag, `TaskSlot`,
+a `cancel_notify` for a still-queued run, `started`), plus the run's own `child` handle and its
+`(src_id, dest_id)` pair (for the duplicate-request guard); `MirrorHandle::turn` mirrors
+`IndexHandle::batch_turn`'s FIFO lane, without a `gate` equivalent — a single `restic copy` process
+has nothing to memory-bound the way concurrent `restic ls` calls did. `cancel_mirror(operation_id)`
+targets one run's entry the same way `cancel_index_batch` does. Simpler than index in two ways: no
+per-item loop (a mirror is one process, not N snapshots), and a queued run's cancellation is
+unambiguous — a *running* mirror is killed immediately, a *queued* one never spawns at all (no
+"takes effect between snapshots" caveat).
+
 **Coverage:** every restic-shelling operation is wired, including the click-bounded metadata reads
 (`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the outer command —
 `get_snapshot_stats`, `test_repo_connection`, `list_files`). Two categories are excluded, deliberately:
@@ -539,9 +599,10 @@ means "no further snapshots will start" — the snapshot already in flight still
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — five stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
-`index`'s batch-level progress, the scheduler-backup `activeBackup` row, and `prune`'s
-`activePrune` row); everything else still emits into the void.** `src/lib/types.ts`
+**Frontend scope — six stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
+`index`'s batch-level progress, the scheduler-backup `activeBackup` row, `prune`'s
+`activePrune` row, and mirror's `activeMirrors`); everything else still emits into the void.**
+`src/lib/types.ts`
 mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
 (`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
@@ -592,9 +653,10 @@ separately resolves display names via a single `listRepos()` call covering the w
 currently-active batches' repoIds (`indexBatchRepoNames`, re-fetched whenever that set changes) —
 the same by-id lookup `loadUpcoming` does for plan names, just async since a batch can start at any
 time; falls back to a repo-less label per batch if the lookup fails or that repo was deleted
-mid-batch. This is deliberately the one exception to "restore/copy/mirror/manual backup/prune
-already have their own progress modals and are intentionally excluded" (see `ActivityPanel.tsx`'s
-header comment): "Index All"'s modal — `RepoSearchPage`, and independently `RepositoriesPage`'s
+mid-batch. This was deliberately the *first* exception to "restore/copy/manual backup already have
+their own progress modals and are intentionally excluded" (see `ActivityPanel.tsx`'s header
+comment) — prune and mirror have since followed the same pattern, see their own paragraphs below.
+"Index All"'s modal — `RepoSearchPage`, and independently `RepositoriesPage`'s
 context-menu equivalent — is explicitly dismissible while its batch keeps running, so unlike those
 other modals it needs a way to stay visible and cancellable after the modal closes — each page's own
 Stop button captures its batch's `operationId` from the same `started` task event (see the page's
@@ -649,6 +711,32 @@ Once ported, the `app.emit("prune:progress", ...)` calls and their `PruneProgres
 the `scheduler:*` events, just triggered by a single-consumer migration rather than a four- or
 five-listener one.
 
+`activeMirrors` is the sixth consumer, and — unlike every consumer above it — required no
+"port a legacy event" or "read `progress` for the first time" story: `mirror_repo` already emitted
+`started`/`finished`/`cancelled`/`failed` via `OperationCtx` before it gained a modal-visible
+Activity-panel row, since it emits no `progress` at all (restic `copy` streams nothing incremental,
+so a running row is always an indeterminate `ProgressBar`, never `X`-of-`N`). What's new is the
+*queueing*: `reduceMirror` (`activity.tsx`) is a `Map<operationId, ActiveMirror>` — the same shape
+`reduceIndexBatches` uses, and for the identical reason — since `mirror_repo` allows multiple runs
+to be queued at once, including two into the same destination from different sources, which share
+a `repoId` on the wire; a single nullable slot (like `activePrune`, correct only because prune is
+single-in-flight app-wide) would conflate them. `reduceMirror` needs no `origin`/`targetId` guard
+the way `reduceIndexBatches` does to isolate batch-level ops from per-snapshot ones — mirror always
+emits `origin: "manual"` and never sets `targetId` (it copies every snapshot, not one), so
+`kind === "mirror"` alone is enough, the same single-guard shape `reducePrune` uses. `ActivityPanel`
+renders one row per running mirror in Active Tasks and one per queued mirror in "Up Next" — the
+same running/queued split `activeIndexBatches` already renders — each independently stoppable via
+`cancelMirror(operationId)`. Enabling this consumer *did* change a backend signature, unlike every
+consumer above it: `mirror_repo` now returns its `operationId` immediately (queued, fire-and-forget)
+rather than blocking until the copy finishes, and `cancel_mirror` now takes that `operationId`
+rather than targeting a single shared handle — see the mirror paragraph earlier in this section and
+Restic Integration's `mirror_repo` bullet for the full backend design. `RepositoriesPage`'s own
+mirror modal reads the same `activeMirrors` state directly (matched by `operationId`) to render its
+queued/running phase live, rather than duplicating that state locally — see its doc comment in the
+Project Structure tree above for the full modal state machine, including the backstop that infers a
+terminal outcome from `activeMirrors` dropping the id, for the narrow case where the modal's own
+dedicated listener loses a race with an unusually fast mirror.
+
 The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
 `finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`
 writes `repo_stats_cache` before it calls `task_ctx.finished()`), rather than widening the
@@ -659,9 +747,10 @@ usually true.
 `backup`/`forget` are now consumed too, but only partially — `reduceSchedulerBackup` filters to
 `origin: "scheduler"`, so manual/"Run Now" backups and manual retention (`forget_by_plan`,
 `run_schedule_now`'s retention call) still emit into the void for Activity-panel purposes; they
-already have their own progress modals per the "Restore/copy/mirror/manual backup" exclusion
-above. For every other kind (`restore`, `copy`, `mirror`, …) **no stateful frontend code subscribes
-to `task`** at all yet — that remains deliberate, not an oversight: a live consumer wired before
+already have their own progress modals per the "Restore/copy/manual backup" exclusion above (`mirror`
+is no longer part of that list — see its consumer paragraph above). For every other kind (`restore`,
+`copy`, …) **no stateful frontend code subscribes to `task`** at all yet — that remains deliberate,
+not an oversight: a live consumer wired before
 there's an actual feature needing it risks the same fate as an earlier, scrapped attempt at this
 pattern (over-eager re-renders, a shape that rots before it's ever exercised). `App.tsx`'s dev-only
 `console.debug("[task]", ...)` effect still covers those — stateless (never calls `setState`),

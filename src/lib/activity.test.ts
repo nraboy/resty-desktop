@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, reduceMirror, type StatsOpsState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -408,5 +408,72 @@ describe("reducePrune", () => {
     expect(state).toEqual({ operationId: "op1", itemsDone: 0, itemsTotal: 0, repoLabel: null });
     state = reducePrune(state, taskEvent({ kind: "prune", operationId: "op1", phase: "finished" }));
     expect(state).toBeNull();
+  });
+});
+
+describe("reduceMirror", () => {
+  const empty = new Map();
+
+  it("queues a mirror with status queued on a pending event", () => {
+    const state = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "pending" }));
+    expect(state.get("op1")).toEqual({ operationId: "op1", repoId: "repoB", status: "queued" });
+  });
+
+  it("promotes a queued mirror to running on started", () => {
+    let state = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "pending" }));
+    state = reduceMirror(state, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "started" }));
+    expect(state.get("op1")).toEqual({ operationId: "op1", repoId: "repoB", status: "running" });
+  });
+
+  it("a mirror can also start running directly (nothing ahead in the queue)", () => {
+    const state = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "started" }));
+    expect(state.get("op1")).toEqual({ operationId: "op1", repoId: "repoB", status: "running" });
+  });
+
+  it("cancelling a still-queued mirror removes it without ever seeing started", () => {
+    let state = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "pending" }));
+    state = reduceMirror(state, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "cancelled" }));
+    expect(state.has("op1")).toBe(false);
+  });
+
+  it("clears the matching operationId on finished/failed/cancelled", () => {
+    for (const phase of ["finished", "failed", "cancelled"] as const) {
+      const started = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "started" }));
+      const cleared = reduceMirror(started, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase }));
+      expect(cleared.has("op1")).toBe(false);
+    }
+  });
+
+  it("ignores non-mirror task kinds", () => {
+    const state = reduceMirror(empty, taskEvent({ kind: "prune", operationId: "op1", phase: "started" }));
+    expect(state.size).toBe(0);
+  });
+
+  it("a terminal event for an unknown operationId is a no-op", () => {
+    const started = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op2", repoId: "repoB", phase: "started" }));
+    const result = reduceMirror(started, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "finished" }));
+    expect(result).toBe(started);
+  });
+
+  it("returns the same reference for a phase mirror never emits (progress/cancelling)", () => {
+    const started = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "started" }));
+    const result = reduceMirror(started, taskEvent({ kind: "mirror", operationId: "op1", repoId: "repoB", phase: "cancelling" }));
+    expect(result).toBe(started);
+  });
+
+  it("tracks two concurrent mirrors into the same destination (different sources) independently", () => {
+    // This is the exact scenario the operationId-based attribution guards against: two mirrors
+    // sharing a repoId (the destination) must not be conflated — see ActiveMirror's doc comment.
+    let state = reduceMirror(empty, taskEvent({ kind: "mirror", operationId: "opA", repoId: "repoB", phase: "started" }));
+    state = reduceMirror(state, taskEvent({ kind: "mirror", operationId: "opC", repoId: "repoB", phase: "pending" }));
+    expect(state.size).toBe(2);
+    expect(state.get("opA")).toEqual({ operationId: "opA", repoId: "repoB", status: "running" });
+    expect(state.get("opC")).toEqual({ operationId: "opC", repoId: "repoB", status: "queued" });
+
+    // Finishing opA (A -> B) must not affect opC (C -> B), even though both share repoId "repoB".
+    state = reduceMirror(state, taskEvent({ kind: "mirror", operationId: "opA", repoId: "repoB", phase: "finished" }));
+    expect(state.has("opA")).toBe(false);
+    expect(state.has("opC")).toBe(true);
+    expect(state.get("opC")).toEqual({ operationId: "opC", repoId: "repoB", status: "queued" });
   });
 });

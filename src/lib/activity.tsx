@@ -6,11 +6,13 @@
 //
 // Scope is deliberately narrow: only activity the user has no other visibility into —
 // background auto-indexing, scheduler-triggered backups, and (as of the `statsRefreshing`
-// field below) in-flight repo stats refreshes. Restore/copy/mirror/manual backup already have
-// their own progress modals and are intentionally excluded here. Prune (`activePrune` below) is
-// the second deliberate exception to that exclusion, after "Index All": its Settings modal is
+// field below) in-flight repo stats refreshes. Restore/copy/manual backup still have their own
+// blocking progress modals and are intentionally excluded here. Prune (`activePrune` below) was
+// the first deliberate exception to that exclusion, after "Index All": its Settings modal is
 // dismissible, so the operation needs to stay visible/cancellable in the panel independent of
-// whether that modal is open — see reducePrune's doc comment.
+// whether that modal is open — see reducePrune's doc comment. `activeMirrors` (below) is the
+// next: unlike prune (single-in-flight app-wide) or index (one batch per repo), mirror allows
+// multiple runs to be queued at once — see reduceMirror's doc comment.
 //
 // `statsRefreshing`/`statsFailed` are this app's first stateful consumer of the unified `task`
 // event bus (see CLAUDE.md's Operation Event Bus section) rather than a per-operation legacy
@@ -63,6 +65,17 @@
 // whether retention is actually configured for the plan. The row shows the plan name only (the
 // bus has no schedule name) — resolved the same lazy, cached-DB-read way `indexBatchRepoNames`
 // resolves repo names.
+//
+// `activeMirrors` is a further consumer, tracked as a `Map<operationId, ActiveMirror>` — the
+// same shape `activeIndexBatches` uses, and for the same reason: `mirror_repo` (snapshot.rs)
+// deliberately allows multiple mirrors to be queued at once (even two into the same
+// destination from different sources), each with its own cancel flag/task slot
+// (MirrorHandle::mirrors), so a single nullable slot (like `activePrune`, which is
+// single-in-flight app-wide via PruneHandle's busy flag) would lose all but one concurrent run.
+// Mirror has no `progress` phase (restic `copy` streams no `--json` progress the way backup
+// does), so a running row always renders as an indeterminate bar rather than X-of-N — see
+// `reduceMirror`. Dest repo names are resolved by folding `activeMirrors`' repoIds into the same
+// `batchRepoIdsKey` effect `indexBatchRepoNames` already uses, rather than a second resolver.
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -140,12 +153,17 @@ interface ActivityState {
    *  ActiveSnapshotIndex's doc comment); ActivityPanel filters out entries whose repoId matches
    *  a currently-running batch so the two rows don't double up for the same repo. */
   activeSnapshotIndexes: ActiveSnapshotIndex[];
-  /** Display names for the repoIds among `activeIndexBatches` and `activeSnapshotIndexes`,
-   *  resolved via listRepos() (the event only carries the id — see the module doc comment
-   *  above), keyed by repoId. A missing or null entry means still resolving or the repo can no
-   *  longer be found (e.g. deleted mid-batch); the panel falls back to a generic label in that
-   *  case rather than a raw id. */
+  /** Display names for the repoIds among `activeIndexBatches`, `activeSnapshotIndexes`, and
+   *  `activeMirrors` (for mirrors, the destination repo), resolved via listRepos() (the event
+   *  only carries the id — see the module doc comment above), keyed by repoId. A missing or null
+   *  entry means still resolving or the repo can no longer be found (e.g. deleted mid-batch); the
+   *  panel falls back to a generic label in that case rather than a raw id. */
   indexBatchRepoNames: Record<string, string | null>;
+  /** Every queued or running mirror (RepositoriesPage's "Mirror to another repository"), across
+   *  all repos — empty when none are active. Unlike `activePrune` (single-in-flight app-wide),
+   *  multiple mirrors can be queued at once, so this is a Map-backed array like
+   *  `activeIndexBatches` — see `reduceMirror` and the module doc comment above. */
+  activeMirrors: ActiveMirror[];
   /** Bumped every 60s so relative-time labels ("in 3 hours") stay fresh without a refetch. */
   clockTick: number;
   /** Progress of RepositoriesPage's "Refresh Stats" (all-repos) button, or null when it isn't
@@ -370,6 +388,61 @@ export function reducePrune(state: ActivePrune | null, event: TaskEvent): Active
   }
 }
 
+/** A queued or running mirror (RepositoriesPage's "Mirror to another repository") — derived from
+ *  its `task` op. `status` starts "queued" on a "pending" event and flips to "running" once
+ *  "started" arrives, mirroring `ActiveIndexBatch`'s same two-state shape. No `itemsDone`/
+ *  `itemsTotal` — mirror_repo emits no `progress` phase (restic `copy` streams no `--json`
+ *  progress the way backup does), so a running row always renders as an indeterminate bar. */
+export interface ActiveMirror {
+  operationId: string;
+  repoId: string;
+  status: "queued" | "running";
+}
+
+/** Pure reducer over `mirror`-kind task events, one entry per concurrently queued/running mirror
+ *  (keyed by operationId — see the module doc comment above). Unlike `reduceIndexBatches`, no
+ *  `origin`/`targetId` guard is needed: mirror_repo always emits `origin: "manual"` and never
+ *  sets `targetId` (it copies every snapshot, not one), so `kind === "mirror"` alone is enough to
+ *  isolate these events — the same single-guard shape `reducePrune` uses. Returns the same `state`
+ *  reference whenever nothing changes so the caller can skip a re-render. Exported for a unit
+ *  test (see activity.test.ts). */
+export function reduceMirror(
+  state: Map<string, ActiveMirror>,
+  event: TaskEvent
+): Map<string, ActiveMirror> {
+  if (event.kind !== "mirror") return state;
+  switch (event.phase) {
+    case "pending": {
+      const next = new Map(state);
+      next.set(event.operationId, {
+        operationId: event.operationId,
+        repoId: event.repoId,
+        status: "queued",
+      });
+      return next;
+    }
+    case "started": {
+      const next = new Map(state);
+      next.set(event.operationId, {
+        operationId: event.operationId,
+        repoId: event.repoId,
+        status: "running",
+      });
+      return next;
+    }
+    case "finished":
+    case "failed":
+    case "cancelled": {
+      if (!state.has(event.operationId)) return state;
+      const next = new Map(state);
+      next.delete(event.operationId);
+      return next;
+    }
+    default:
+      return state; // "progress"/"cancelling" — mirror never emits progress; cancelling is local UI state
+  }
+}
+
 /** Pure reducer over `task` events, isolating the scheduler-triggered backup lifecycle (see the
  *  module doc comment above). Filters to `origin === "scheduler"`; `kind:"backup"` drives the
  *  transfer phase, `kind:"forget"` (matched by `targetId === planId`) drives retention. The
@@ -469,6 +542,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [statsFailed, setStatsFailed] = useState<string[]>([]);
   const [activeIndexBatches, setActiveIndexBatches] = useState<ActiveIndexBatch[]>([]);
   const [activeSnapshotIndexes, setActiveSnapshotIndexes] = useState<ActiveSnapshotIndex[]>([]);
+  const [activeMirrors, setActiveMirrors] = useState<ActiveMirror[]>([]);
   const [indexBatchRepoNames, setIndexBatchRepoNames] = useState<Record<string, string | null>>({});
   const [clockTick, setClockTick] = useState(0);
   const [statsRefreshAllProgress, setStatsRefreshAllProgress] = useState<{ current: number; total: number } | null>(null);
@@ -490,6 +564,10 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   // activePrune is derived from this on every "task" event via reducePrune; same
   // compare-by-reference discipline as the refs above.
   const pruneRef = useRef<ActivePrune | null>(null);
+  // activeMirrors is derived from this on every "task" event via reduceMirror; same
+  // compare-by-reference discipline as indexBatchesRef above (a Map, since multiple mirrors
+  // can be queued/running at once — see reduceMirror's doc comment).
+  const mirrorsRef = useRef<Map<string, ActiveMirror>>(new Map());
 
   const refreshIndexing = () => { loadIndexing().then(setIndexing).catch(() => {}); };
   const refreshUpcoming = () => { loadUpcoming().then(setUpcoming).catch(() => {}); };
@@ -549,6 +627,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         pruneRef.current = nextPrune;
         setActivePrune(nextPrune);
       }
+      const nextMirrors = reduceMirror(mirrorsRef.current, e.payload);
+      if (nextMirrors !== mirrorsRef.current) {
+        mirrorsRef.current = nextMirrors;
+        setActiveMirrors([...nextMirrors.values()]);
+      }
     });
 
     return () => {
@@ -561,16 +644,18 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // The task event only carries repoId, not a display name — resolve the whole set of
-  // currently-active batches' AND standalone snapshot indexes' repoIds in one listRepos() call
-  // (same by-id lookup loadUpcoming does for plan names above) whenever that set changes.
-  // Joined into a stable string key so the effect only re-runs when the actual set of repos
-  // changes, not on every progress tick. Falls back to null per id (panel shows a generic
-  // label) if a repo can't be found or the lookup fails, including the rare case of a repo
-  // being deleted mid-batch/mid-index.
+  // currently-active batches', standalone snapshot indexes', AND mirrors' repoIds (for mirrors,
+  // the destination — see ActiveMirror's doc comment) in one listRepos() call (same by-id lookup
+  // loadUpcoming does for plan names above) whenever that set changes. Joined into a stable
+  // string key so the effect only re-runs when the actual set of repos changes, not on every
+  // progress tick. Falls back to null per id (panel shows a generic label) if a repo can't be
+  // found or the lookup fails, including the rare case of a repo being deleted mid-batch/
+  // mid-index/mid-mirror.
   const batchRepoIdsKey = [
     ...new Set([
       ...activeIndexBatches.map((b) => b.repoId),
       ...activeSnapshotIndexes.map((s) => s.repoId),
+      ...activeMirrors.map((m) => m.repoId),
     ]),
   ].sort().join(",");
   useEffect(() => {
@@ -639,7 +724,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     <ActivityContext.Provider
       value={{
         indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, statsFailed,
-        activeIndexBatches, activeSnapshotIndexes, indexBatchRepoNames, clockTick,
+        activeIndexBatches, activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, clockTick,
         statsRefreshAllProgress, setStatsRefreshAllProgress,
       }}
     >

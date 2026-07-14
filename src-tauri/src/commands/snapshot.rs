@@ -1,16 +1,48 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
-use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorHandle, RetentionPolicy};
+use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
 use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
-use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
+use crate::tasks::{emit_cancelling, new_operation_id, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
 
 /// Sentinel `backup_history.error` value for a genuinely cancelled backup, distinguishing it
 /// from a real failure so Recent Logs / LogsPage can render it neutrally instead of as an
 /// error (see the frontend's matching CANCELLED_BACKUP_ERROR in lib/types.ts).
 pub(crate) const CANCELLED_BACKUP_ERROR: &str = "Cancelled";
+
+/// Sentinel error string returned by `mirror_repo` when the exact same `(src, dest)` repo
+/// pair already has a queued or running mirror — matches the frontend's
+/// `MIRROR_ALREADY_ACTIVE_ERROR` (lib/types.ts) exactly, same pattern as
+/// `INDEX_BATCH_ALREADY_ACTIVE_ERROR` (browse.rs). A different source or a different
+/// destination is not a duplicate and queues normally — see `mirror_repo`'s doc comment.
+pub(crate) const MIRROR_ALREADY_ACTIVE_ERROR: &str = "MirrorAlreadyActive";
+
+/// Deregisters a mirror run's entry from `MirrorHandle::mirrors` on every exit path, mirroring
+/// `BatchDeregisterGuard` (browse.rs) — so `cancel_mirror` can never target a run that has
+/// already finished, and so a finished run's `(src, dest)` pair stops blocking a fresh mirror
+/// between the same two repos.
+struct MirrorDeregisterGuard {
+    registry: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, MirrorEntry>>>,
+    operation_id: String,
+}
+impl Drop for MirrorDeregisterGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.registry.lock() {
+            map.remove(&self.operation_id);
+        }
+    }
+}
+
+/// Testable core of `mirror_repo`'s `(src, dest)` duplicate-request guard, split out as a pure
+/// predicate so it can be exercised in a unit test without constructing a `tauri::State` —
+/// mirrors browse.rs's `batch_matches_repo` pattern. `mirror_repo` itself checks this under the
+/// same lock acquisition it registers the new entry under (see its body), so the check and the
+/// registration are atomic; this function only expresses the per-entry comparison.
+fn mirror_pair_matches(entry: &MirrorEntry, src_id: &str, dest_id: &str) -> bool {
+    entry.src_id == src_id && entry.dest_id == dest_id
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -849,152 +881,233 @@ pub async fn cancel_copy(app: tauri::AppHandle, copy_handle: State<'_, CopyHandl
     Ok(())
 }
 
+/// Queues a mirror run and returns immediately with its `operationId` — the run itself
+/// (waiting its turn, then copying) happens in a detached `spawn`ed task, the same
+/// fire-and-forget shape as `index_snapshots_batch` (browse.rs). The frontend uses the
+/// returned id to correlate every subsequent `task` event and to target `cancel_mirror`
+/// precisely, rather than by `repoId` — the envelope's `repoId` is the *destination*, and
+/// this command deliberately allows multiple mirrors into the same destination from
+/// different sources (or the same source into different destinations) to be queued at
+/// once, so `repoId` alone can't tell two such runs apart (see this module's design notes
+/// in CLAUDE.md's Operation Event Bus section).
+///
+/// Only an exact `(src_repo_id, dest_repo_id)` repeat — one already queued or running — is
+/// rejected with `MIRROR_ALREADY_ACTIVE_ERROR`; a different source or a different
+/// destination queues normally. The check and the registration happen under one
+/// `mirrors` lock acquisition, so there's no window between "checked" and "registered"
+/// where two identical requests could both slip through (tighter than
+/// `index_snapshots_batch`'s analogous check, which tolerates that narrow race as
+/// acceptable for human-paced clicks).
 #[tauri::command]
 pub async fn mirror_repo(
     app: tauri::AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     mirror_handle: State<'_, MirrorHandle>,
-    repo_locks: State<'_, RepoLocks>,
     src_repo_id: String,
     dest_repo_id: String,
-) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    // Serialize mirrors: only one may run at a time — this handle previously had no busy
-    // guard, so a second concurrent mirror could clobber the first run's child/cancelled state.
-    if mirror_handle
-        .busy
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("A mirror is already in progress".to_string());
-    }
-    struct BusyGuard<'a>(&'a AtomicBool);
-    impl Drop for BusyGuard<'_> {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::SeqCst);
-        }
-    }
-    let _busy = BusyGuard(&mirror_handle.busy);
+) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
 
     let key = master_key.get()?;
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
-    // `repoId` is the destination, same rationale as copy_snapshot; mirror has no
-    // single-snapshot targetId (it copies every snapshot).
-    let task_ctx = OperationCtx::new(
-        app,
-        TaskKind::Mirror,
-        dest_repo_id.clone(),
-        None,
-        TaskOrigin::Manual,
-        Some(mirror_handle.current_task.clone()),
-    );
+    let operation_id = new_operation_id();
+    let entry = MirrorEntry {
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        task_slot: new_task_slot(),
+        cancel_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        src_id: src_repo_id.clone(),
+        dest_id: dest_repo_id.clone(),
+    };
 
-    mirror_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
-    let child_arc = std::sync::Arc::clone(&mirror_handle.child);
-    let cancelled_arc = std::sync::Arc::clone(&mirror_handle.cancelled);
+    {
+        let mut map = mirror_handle.mirrors.lock().map_err(|e| e.to_string())?;
+        if map.values().any(|e| mirror_pair_matches(e, &src_repo_id, &dest_repo_id)) {
+            return Err(MIRROR_ALREADY_ACTIVE_ERROR.to_string());
+        }
+        map.insert(operation_id.clone(), entry.clone());
+    }
 
-    // Stash credentials so we can run `restic unlock` after a cancel-kill.
+    // Stash credentials so the task can run `restic unlock` after a cancel-kill, and so it
+    // doesn't need to re-resolve the master key (which may since have locked) or re-fetch
+    // from `db` after the outer command has already returned.
     let src_path_for_unlock = src_repo.path.clone();
     let src_pass_for_unlock = src_repo.password.clone();
     let dst_path_for_unlock = dest_repo.path.clone();
     let dst_pass_for_unlock = dest_repo.password.clone();
     let restic_path_for_unlock = restic_path.clone();
 
-    // Same reasoning as copy_snapshot: register as a reader on both repos, held
-    // across the spawn_blocking below.
-    let _src_rg = repo_locks.read(&src_repo.path);
-    let _dst_rg = repo_locks.read(&dest_repo.path);
+    let registry = std::sync::Arc::clone(&mirror_handle.mirrors);
+    let turn = std::sync::Arc::clone(&mirror_handle.turn);
+    let op_id_for_task = operation_id.clone();
+    let app_for_task = app.clone();
 
-    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader, Read};
-        use std::process::Stdio;
+    tauri::async_runtime::spawn(async move {
+        // Removes this run's entry from `mirrors` on every exit path below (including the
+        // early `return` in the cancelled-while-queued branch), mirroring
+        // `BatchDeregisterGuard` — see its doc comment.
+        let _dereg = MirrorDeregisterGuard { registry, operation_id: op_id_for_task.clone() };
 
-        let mut cmd = std::process::Command::new(&restic_path);
-        cmd.args(["copy"])
-            .env("RESTIC_REPOSITORY", &dest_repo.path)
-            .env("RESTIC_FROM_REPOSITORY", &src_repo.path);
-        super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
-        super::repo::apply_from_repo_password(&mut cmd, &src_repo.password);
-        let mut child = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .no_console()
-            .augment_path()
-            .spawn()
-            .map_err(|e| format!("Failed to run restic: {e}"))?;
+        let task_ctx = OperationCtx::new_pending_with_id(
+            app_for_task.clone(),
+            TaskKind::Mirror,
+            dest_repo_id.clone(),
+            None,
+            TaskOrigin::Manual,
+            Some(entry.task_slot.clone()),
+            op_id_for_task,
+        );
 
-        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
-        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
-
-        let stderr_thread = std::thread::spawn(move || {
-            let mut s = String::new();
-            BufReader::new(stderr).read_to_string(&mut s).ok();
-            s
-        });
-
-        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
-
-        // Drain stdout to avoid blocking the process on a full pipe buffer.
-        for _ in BufReader::new(stdout).lines() {}
-
-        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
-            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
-            None => return Err("cancelled".to_string()),
+        // Wait for this run's turn so only one mirror ever has a live child at once (see
+        // MirrorHandle::turn's doc comment). Cancellable while queued: a run parked here
+        // (already registered above, so its Stop button works) bails the moment
+        // cancel_mirror fires cancel_notify, instead of waiting for the run ahead of it to
+        // finish. `biased` + `notify_one`'s stored-permit semantics make this race-free even
+        // if cancel arrives before this select! starts polling — same reasoning as
+        // index_snapshots_batch's identical pattern (browse.rs).
+        let _turn = tokio::select! {
+            biased;
+            _ = entry.cancel_notify.notified() => {
+                task_ctx.cancelled();
+                return;
+            }
+            permit = turn.lock() => permit,
         };
+        // Won the turn — this run is now actually executing. Promotes it from the Activity
+        // panel's "Up Next" area into Active Tasks.
+        task_ctx.activate();
+        entry.started.store(true, Ordering::SeqCst);
 
-        let stderr_str = stderr_thread.join().unwrap_or_default();
+        // Acquired here (inside the task), not in the outer command — the command already
+        // returned once this run was queued, so a guard taken in the outer scope would have
+        // dropped before the copy ever ran. `ReadGuard` owns an `Arc` internally (see
+        // repo_locks.rs), so it's safe to hold across this whole async block.
+        let repo_locks = app_for_task.state::<RepoLocks>();
+        let _src_rg = repo_locks.read(&src_repo.path);
+        let _dst_rg = repo_locks.read(&dest_repo.path);
 
-        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
-        // clicked just as restic finished) — the mirror genuinely completed and must not be
-        // reported as cancelled.
-        if status.success() {
-            return Ok(());
-        }
+        let child_arc = std::sync::Arc::clone(&entry.child);
+        let cancel_arc = std::sync::Arc::clone(&entry.cancel);
+        let src_repo_inner = src_repo.clone();
+        let dest_repo_inner = dest_repo.clone();
+        let restic_path_inner = restic_path.clone();
 
-        if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("cancelled".to_string());
-        }
+        let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
+            use std::io::{BufRead, BufReader, Read};
+            use std::process::Stdio;
 
-        let msg = stderr_str.trim();
-        Err(if msg.is_empty() { "restic mirror failed".to_string() } else { msg.to_string() })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+            let mut cmd = std::process::Command::new(&restic_path_inner);
+            cmd.args(["copy"])
+                .env("RESTIC_REPOSITORY", &dest_repo_inner.path)
+                .env("RESTIC_FROM_REPOSITORY", &src_repo_inner.path);
+            super::repo::apply_repo_password(&mut cmd, &dest_repo_inner.password);
+            super::repo::apply_from_repo_password(&mut cmd, &src_repo_inner.password);
+            let mut child = cmd
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .no_console()
+                .augment_path()
+                .spawn()
+                .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-    match &result {
-        Ok(_) => task_ctx.finished(),
-        Err(_) if mirror_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
-        Err(e) => task_ctx.failed(e.clone()),
-    }
+            let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+            let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
 
-    if result.is_ok() {
-        let _ = db.evict_snapshots(&dest_repo_id);
-    } else if mirror_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-        // The process was killed via SIGKILL and left stale locks on both repos.
-        // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
-            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
-            let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
-            let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+            let stderr_thread = std::thread::spawn(move || {
+                let mut s = String::new();
+                BufReader::new(stderr).read_to_string(&mut s).ok();
+                s
+            });
+
+            *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
+
+            // Drain stdout to avoid blocking the process on a full pipe buffer.
+            for _ in BufReader::new(stdout).lines() {}
+
+            let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
+                Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+                None => return Err("cancelled".to_string()),
+            };
+
+            let stderr_str = stderr_thread.join().unwrap_or_default();
+
+            // A successful exit always wins, even if `cancel` got set in a race (e.g. Stop
+            // clicked just as restic finished) — the mirror genuinely completed and must
+            // not be reported as cancelled.
+            if status.success() {
+                return Ok(());
+            }
+
+            if cancel_arc.load(Ordering::SeqCst) {
+                return Err("cancelled".to_string());
+            }
+
+            let msg = stderr_str.trim();
+            Err(if msg.is_empty() { "restic mirror failed".to_string() } else { msg.to_string() })
         })
-        .await;
-    }
-    result
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+
+        let cancelled = entry.cancel.load(Ordering::SeqCst);
+        match &result {
+            Ok(_) => task_ctx.finished(),
+            Err(_) if cancelled => task_ctx.cancelled(),
+            Err(e) => task_ctx.failed(e.clone()),
+        }
+
+        if result.is_ok() {
+            let _ = app_for_task.state::<AppDb>().evict_snapshots(&dest_repo_id);
+        } else if cancelled {
+            // The process was killed via SIGKILL and left stale locks on both repos.
+            // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
+                let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
+                let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+                let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+            })
+            .await;
+        }
+    });
+
+    Ok(operation_id)
 }
 
+/// Signals a specific queued or running mirror (identified by its operationId — see
+/// `mirror_repo`'s doc comment) to stop. A no-op, not an error, if that id doesn't match any
+/// tracked run (already finished, or never existed) — mirrors `cancel_index_batch`'s
+/// (browse.rs) same-shaped no-op behavior, now scoped per-run instead of app-wide.
 #[tauri::command]
-pub async fn cancel_mirror(app: tauri::AppHandle, mirror_handle: State<'_, MirrorHandle>) -> Result<(), String> {
-    emit_cancelling(&app, &mirror_handle.current_task);
-    mirror_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(ref mut child) = *mirror_handle.child.lock().map_err(|e| e.to_string())? {
-        child.kill().map_err(|e| e.to_string())?;
+pub fn cancel_mirror(
+    app: tauri::AppHandle,
+    mirror_handle: State<'_, MirrorHandle>,
+    operation_id: String,
+) -> Result<(), String> {
+    let entry = mirror_handle
+        .mirrors
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&operation_id)
+        .cloned();
+    if let Some(entry) = entry {
+        emit_cancelling(&app, &entry.task_slot);
+        entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wakes the run if it's currently parked waiting for its turn on
+        // MirrorHandle::turn, so a queued mirror cancels immediately instead of waiting for
+        // the run ahead of it to finish. A harmless no-op if the run has already won its
+        // turn and is executing (in which case the kill below handles it) — see
+        // MirrorEntry::cancel_notify's doc comment.
+        entry.cancel_notify.notify_one();
+        if let Some(ref mut child) = *entry.child.lock().map_err(|e| e.to_string())? {
+            child.kill().map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -1406,5 +1519,101 @@ mod tests {
         assert_eq!(result.entries.len(), 500);
         assert_eq!(result.total_added, 501);
         assert!(result.truncated);
+    }
+
+    // ── mirror queue ─────────────────────────────────────────────────────────
+
+    use super::mirror_pair_matches;
+    use crate::commands::cache::MirrorEntry;
+    use crate::tasks::new_task_slot;
+
+    fn test_mirror_entry(src_id: &str, dest_id: &str) -> MirrorEntry {
+        MirrorEntry {
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_slot: new_task_slot(),
+            cancel_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            src_id: src_id.to_string(),
+            dest_id: dest_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn mirror_pair_matches_rejects_only_exact_src_and_dest_repeat() {
+        let entry = test_mirror_entry("repo-a", "repo-b");
+        // Exact repeat — this is the case mirror_repo rejects with
+        // MIRROR_ALREADY_ACTIVE_ERROR.
+        assert!(mirror_pair_matches(&entry, "repo-a", "repo-b"));
+        // Same source, different destination — a distinct mirror, must queue.
+        assert!(!mirror_pair_matches(&entry, "repo-a", "repo-c"));
+        // Different source, same destination — also a distinct mirror, must queue.
+        assert!(!mirror_pair_matches(&entry, "repo-d", "repo-b"));
+        // Neither matches.
+        assert!(!mirror_pair_matches(&entry, "repo-x", "repo-y"));
+    }
+
+    /// `notify_one`'s stored-permit semantics, exercised directly against the same
+    /// `tokio::select! { biased; cancel_notify.notified() ; turn.lock() }` shape
+    /// `mirror_repo`'s spawned task uses to wait its turn — mirrors browse.rs's
+    /// `queued_batch_cancel_notify_before_wait_is_not_lost` test for the identical
+    /// index-batch pattern. Proves a mirror cancelled while still queued reliably
+    /// bails out of the wait rather than risking a lost wakeup.
+    #[tokio::test]
+    async fn queued_mirror_cancel_notify_before_wait_is_not_lost() {
+        let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Cancel arrives before anyone is waiting.
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_notify.notify_one();
+
+        let turn = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let _held = turn.lock().await; // turn stays held for the whole test
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                biased;
+                _ = cancel_notify.notified() => "cancelled",
+                _permit = turn.lock() => "acquired",
+            }
+        })
+        .await
+        .expect("a notify sent before .notified() is awaited must not be lost");
+        assert_eq!(result, "cancelled");
+    }
+
+    /// A mirror parked waiting for its turn must cancel immediately once notified,
+    /// without waiting for the run ahead of it to release the turn — mirrors
+    /// browse.rs's equivalent queued-batch-cancel test.
+    #[tokio::test]
+    async fn queued_mirror_cancels_immediately_without_waiting_for_turn_release() {
+        let turn = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let _held_turn = turn.lock().await; // simulates another mirror currently running
+
+        let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let turn2 = std::sync::Arc::clone(&turn);
+        let notify2 = std::sync::Arc::clone(&cancel_notify);
+        let waiter = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = notify2.notified() => "cancelled",
+                _permit = turn2.lock() => "acquired",
+            }
+        });
+
+        // Give the waiter a moment to reach the select!, then cancel it while the
+        // turn is still held elsewhere — it must not have to wait for release.
+        tokio::task::yield_now().await;
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_notify.notify_one();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter must resolve promptly, not wait for the held turn to release")
+            .unwrap();
+        assert_eq!(result, "cancelled");
     }
 }

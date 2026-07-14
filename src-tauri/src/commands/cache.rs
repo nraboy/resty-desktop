@@ -119,26 +119,67 @@ impl CopyHandle {
     }
 }
 
+/// Coordinates queued mirror runs so multiple `mirror_repo` calls (e.g. several
+/// sources into the same destination, or entirely different repo pairs) can be
+/// submitted at once without corrupting each other's state, while restic itself
+/// only ever runs one `copy` process at a time.
+///
+/// Modeled directly on `IndexHandle`'s "Index All" batch machinery
+/// (`IndexHandle::batch_turn`/`batches`), but simpler: mirror has no `gate`
+/// equivalent (a single `restic copy` process has nothing to memory-bound the
+/// way concurrent `restic ls` calls did — see CLAUDE.md's `IndexHandle::gate`
+/// note) and no per-item loop (a mirror is one process, not N snapshots).
 pub struct MirrorHandle {
-    pub child: Arc<Mutex<Option<std::process::Child>>>,
-    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
-    /// Set while a mirror is executing. Serializes mirrors so two concurrent
-    /// `mirror_repo` calls can't corrupt the shared `child`/`cancelled` state.
-    pub busy: std::sync::atomic::AtomicBool,
-    /// Identity of the currently-running operation on the `task` event bus, if
-    /// any — read by `cancel_mirror` to emit a `Cancelling` event. See tasks.rs.
-    pub current_task: TaskSlot,
+    /// FIFO lane — exactly one mirror actually runs (has a live child) at a time.
+    /// A mirror waiting on this is "queued"; tokio's `Mutex` is FIFO among
+    /// waiters, so queued mirrors run in (approximately, for human-paced clicks)
+    /// the order they were submitted — same tolerance `IndexHandle::batch_turn`
+    /// documents.
+    pub turn: Arc<tokio::sync::Mutex<()>>,
+    /// Per-mirror cancel/child/slot registry, keyed by operationId, so
+    /// concurrently queued/running mirrors (including two into the same
+    /// destination from different sources) can each be tracked and cancelled
+    /// independently — mirrors `IndexHandle::batches`.
+    pub mirrors: Arc<Mutex<HashMap<String, MirrorEntry>>>,
 }
 
 impl MirrorHandle {
     pub fn new() -> Self {
         Self {
-            child: Arc::new(Mutex::new(None)),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            busy: std::sync::atomic::AtomicBool::new(false),
-            current_task: new_task_slot(),
+            turn: Arc::new(tokio::sync::Mutex::new(())),
+            mirrors: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+/// One mirror run's cancel flag/child/task slot, registered in
+/// `MirrorHandle::mirrors` for the run's duration (queued through terminal).
+/// `cancel_mirror(operation_id)` looks this up to target exactly one run.
+/// Mirrors `BatchCancel` (browse.rs's index-batch equivalent).
+#[derive(Clone)]
+pub struct MirrorEntry {
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub task_slot: TaskSlot,
+    /// Wakes a mirror that's parked waiting for its turn on `MirrorHandle::turn`
+    /// so it cancels immediately instead of waiting for the mirror ahead of it
+    /// to finish. `cancel_mirror` calls `notify_one()` right after setting
+    /// `cancel`; the run's `tokio::select!` between this and `turn.lock()`
+    /// picks up whichever fires first. `notify_one`'s stored-permit semantics
+    /// make this race-free even if the notify arrives before the run starts
+    /// waiting. Mirrors `BatchCancel::cancel_notify`.
+    pub cancel_notify: Arc<tokio::sync::Notify>,
+    /// False while the run is still queued waiting for `MirrorHandle::turn`
+    /// (registered but not yet `activate()`d); flipped true the moment it wins
+    /// its turn and actually starts copying. Mirrors `BatchCancel::started`.
+    pub started: Arc<std::sync::atomic::AtomicBool>,
+    /// The live child process, `Some` only while this run actually holds
+    /// `turn` and is executing `restic copy`. `None` while merely queued.
+    pub child: Arc<Mutex<Option<std::process::Child>>>,
+    /// Source/destination repo ids this run copies between — used by
+    /// `mirror_repo`'s `(src, dest)` dedup guard, and to run `restic unlock`
+    /// against both repos after a cancel-kill.
+    pub src_id: String,
+    pub dest_id: String,
 }
 
 pub struct BackupHandle {

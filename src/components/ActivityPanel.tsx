@@ -1,12 +1,13 @@
 // Right-side activity overlay surfacing background activity the user has no other
 // visibility into: auto-indexing progress, scheduler-triggered backups, in-flight repo
-// stats refreshes, the manual "Index All" batch, and "Prune All Repositories" (ACTIVE TASKS),
-// the next couple of due schedules (UPCOMING TASKS), and the last couple of backup runs
-// (RECENT LOGS). Restore/copy/mirror/manual backup already have their own progress modals and
-// are intentionally excluded — see src/lib/activity.tsx. "Index All" and prune-all are the two
-// exceptions: their modals (RepoSearchPage; SettingsPage's "Prune All Repositories") are
-// explicitly dismissible while the operation keeps running in the background, so — unlike those
-// other modals — they need a way to stay visible and cancellable after the modal closes.
+// stats refreshes, the manual "Index All" batch, "Prune All Repositories", and mirror runs
+// (ACTIVE TASKS), the next couple of due schedules (UPCOMING TASKS), and the last couple of
+// backup runs (RECENT LOGS). Restore/copy/manual backup still have their own blocking progress
+// modals and are intentionally excluded — see src/lib/activity.tsx. "Index All", prune-all, and
+// mirror are the exceptions: their modals (RepoSearchPage; SettingsPage's "Prune All
+// Repositories"; RepositoriesPage's "Mirror Repository") are explicitly dismissible while the
+// operation keeps running in the background, so — unlike those other modals — they need a way
+// to stay visible and cancellable after the modal closes.
 // The stats row is this app's first consumer of the unified `task` event bus rather than a
 // per-operation legacy feed (stats never had one) — it's lifecycle-only (an indeterminate
 // ProgressBar, since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
@@ -25,9 +26,15 @@
 // Only one batch actually runs at a time (IndexHandle::batch_turn) — the rest sit in the
 // "Up Next" section below Active Tasks with status "queued" until they're promoted to
 // "running" (a "started" task event); Stop works immediately on a queued batch too, it
-// doesn't wait for its turn. The scheduler-backup row (activeBackup) is the newest bus
-// consumer — see activity.tsx's reduceSchedulerBackup — and shows plan name only (the bus
-// carries no schedule name, unlike the legacy scheduler:* events it replaced).
+// doesn't wait for its turn. The scheduler-backup row (activeBackup) is a bus consumer too —
+// see activity.tsx's reduceSchedulerBackup — and shows plan name only (the bus carries no
+// schedule name, unlike the legacy scheduler:* events it replaced). Mirror rows (activeMirrors)
+// are the newest consumer, modeled directly on "Index All": multiple mirrors can be queued at
+// once (each with its own cancel flag on MirrorHandle::mirrors, cache.rs), so — like index
+// batches — only one actually runs at a time and the rest sit in "Up Next" with status "queued"
+// until promoted to "running". Unlike index batches, mirror never emits `progress` (restic
+// `copy` has nothing to report incrementally), so a running mirror row is always an
+// indeterminate ProgressBar, never a determinate X-of-N bar.
 //
 // Standalone single-snapshot indexing ("Index Snapshot" on SnapshotsPage, "Index Now" on
 // SearchPage) gets its own lifecycle-only row (an indeterminate ProgressBar, no measurable
@@ -54,7 +61,7 @@
 // this once in App.tsx doesn't require every page to grow a toolbar toggle button.
 import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
-import { cancelBackup, cancelIndexBatch, cancelPrune } from "../lib/invoke";
+import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
 import ProgressBar from "./ProgressBar";
@@ -102,7 +109,7 @@ function StopIcon() {
 export default function ActivityPanel() {
   const {
     indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
-    activeSnapshotIndexes, indexBatchRepoNames, statsRefreshAllProgress,
+    activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, statsRefreshAllProgress,
   } = useActivity();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
@@ -121,9 +128,16 @@ export default function ActivityPanel() {
   const batchRepoIds = new Set(activeIndexBatches.map((b) => b.repoId));
   const standaloneSnapshotIndexes = activeSnapshotIndexes.filter((s) => !batchRepoIds.has(s.repoId));
 
+  // Same "queued" vs "running" split as index batches above — a mirror is "queued" until it
+  // wins its turn on the backend's MirrorHandle::turn mutex and its task event flips to
+  // "started" (see reduceMirror).
+  const runningMirrors = activeMirrors.filter((m) => m.status === "running");
+  const queuedMirrors = activeMirrors.filter((m) => m.status === "queued");
+
   const hasActive =
     indexing != null || activeBackup != null || activePrune != null || statsRefreshing.length > 0 ||
-    activeIndexBatches.length > 0 || standaloneSnapshotIndexes.length > 0 || statsRefreshAllProgress != null;
+    activeIndexBatches.length > 0 || standaloneSnapshotIndexes.length > 0 ||
+    activeMirrors.length > 0 || statsRefreshAllProgress != null;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -157,6 +171,17 @@ export default function ActivityPanel() {
       return next.size === prev.size ? prev : next;
     });
   }, [activeIndexBatches]);
+
+  // Same pattern as stoppingBatchIds above, for mirrors — a Set since multiple mirrors can be
+  // queued/running (and stopping) at once, unlike prune's single boolean.
+  const [stoppingMirrorIds, setStoppingMirrorIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const liveIds = new Set(activeMirrors.map((m) => m.operationId));
+    setStoppingMirrorIds((prev) => {
+      const next = new Set([...prev].filter((id) => liveIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [activeMirrors]);
 
   useEffect(() => {
     if (!open) return;
@@ -341,6 +366,45 @@ export default function ActivityPanel() {
                   </p>
                 </div>
               )}
+              {runningMirrors.map((mirror) => {
+                const repoName = indexBatchRepoNames[mirror.repoId];
+                const stopping = stoppingMirrorIds.has(mirror.operationId);
+                return (
+                  <div key={mirror.operationId} className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
+                        Mirroring{repoName ? ` to ${repoName}` : ""}
+                      </p>
+                      <button
+                        onClick={async () => {
+                          setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
+                          try {
+                            await cancelMirror(mirror.operationId);
+                          } catch {
+                            // The cancel call itself failed (e.g. a transient IPC error) — the
+                            // mirror is still running untouched, so roll back the optimistic
+                            // "Stopping…" state rather than leaving Stop stuck disabled with no
+                            // way to retry.
+                            setStoppingMirrorIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(mirror.operationId);
+                              return next;
+                            });
+                          }
+                        }}
+                        disabled={stopping}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                      >
+                        <StopIcon />
+                      </button>
+                    </div>
+                    <ProgressBar indeterminate />
+                    <p className="text-xs text-gray-500">{stopping ? "Stopping…" : "Mirroring…"}</p>
+                  </div>
+                );
+              })}
               {statsRefreshAllProgress ? (
                 // RepositoriesPage's "Refresh Stats" button — shows real batch progress
                 // (current/total, 0-indexed completed-so-far — see statsRefreshAllProgress's
@@ -371,7 +435,7 @@ export default function ActivityPanel() {
             </div>
           </div>
 
-          {queuedIndexBatches.length > 0 && (
+          {(queuedIndexBatches.length > 0 || queuedMirrors.length > 0) && (
             <div className="border-b border-gray-800 pb-1">
               <SectionHeading>Up Next</SectionHeading>
               <div className="space-y-2 px-4 pb-3">
@@ -394,6 +458,39 @@ export default function ActivityPanel() {
                             setStoppingBatchIds((prev) => {
                               const next = new Set(prev);
                               next.delete(batch.operationId);
+                              return next;
+                            });
+                          }
+                        }}
+                        disabled={stopping}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                      >
+                        <StopIcon />
+                      </button>
+                    </div>
+                  );
+                })}
+                {queuedMirrors.map((mirror) => {
+                  const repoName = indexBatchRepoNames[mirror.repoId];
+                  const stopping = stoppingMirrorIds.has(mirror.operationId);
+                  return (
+                    <div key={mirror.operationId} className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
+                        Mirroring{repoName ? ` to ${repoName}` : ""}{" "}
+                        <span className="text-xs text-gray-600">· {stopping ? "Stopping…" : "Queued"}</span>
+                      </p>
+                      <button
+                        onClick={async () => {
+                          setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
+                          try {
+                            await cancelMirror(mirror.operationId);
+                          } catch {
+                            // Same rollback rationale as the Active Tasks Stop button above.
+                            setStoppingMirrorIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(mirror.operationId);
                               return next;
                             });
                           }

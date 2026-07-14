@@ -29,7 +29,7 @@ import {
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
-import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, isRemoteRepo } from "../lib/types";
+import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, MIRROR_ALREADY_ACTIVE_ERROR, isRemoteRepo } from "../lib/types";
 import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -54,7 +54,7 @@ export default function RepositoriesPage() {
   // navigating away from this page mid-refresh — see activity.tsx's doc comment on that field
   // for why it's tracked separately from statsRefreshing (which is always 1 throughout this
   // operation, since it refreshes repos one at a time, not in parallel — see handleRefreshAll).
-  const { statsRefreshing, statsFailed, statsRefreshAllProgress, setStatsRefreshAllProgress } = useActivity();
+  const { statsRefreshing, statsFailed, activeMirrors, statsRefreshAllProgress, setStatsRefreshAllProgress } = useActivity();
   // Deliberately no local `refreshingAll` state — an earlier version had one, gating the
   // buttons below via `disabled={refreshingAll}`. It reset to `false` on every remount
   // (plain useState), while `statsRefreshAllProgress` lives in ActivityProvider specifically
@@ -82,14 +82,30 @@ export default function RepositoriesPage() {
   const [deleting, setDeleting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  // Mirror is queued/fire-and-forget (mirror_repo returns its operationId immediately — see
+  // snapshot.rs), so this modal is a small state machine rather than a single blocking await
+  // like prune's below: mirrorSource/mirrorDestId control the destination-picker phase;
+  // mirrorOpId (set once mirrorRepo's promise resolves) switches to the queued/running phase,
+  // whose live state (queued vs running) is read directly from ActivityProvider's
+  // activeMirrors — never duplicated into page-local state — and attributed strictly by
+  // operationId (not repoId), since multiple mirrors can target the same destination at once
+  // (see activity.tsx's ActiveMirror doc comment). mirrorOutcome is set by this page's own
+  // `task` listener below once that operationId reaches a terminal phase. There is
+  // deliberately no re-adoption path (unlike "Index All"'s getActiveIndexBatch) — a
+  // backgrounded mirror stays fully visible/cancellable via the Activity panel, so reopening
+  // this modal for a repo always starts a fresh picker; the (src, dest) dedup guard on the
+  // backend rejects an exact accidental repeat.
   const [mirrorSource, setMirrorSource] = useState<Repository | null>(null);
   const [mirrorDestId, setMirrorDestId] = useState("");
-  const [mirroring, setMirroring] = useState(false);
-  const [mirrorDone, setMirrorDone] = useState(false);
-  const [mirrorCancelled, setMirrorCancelled] = useState(false);
-  const [mirrorError, setMirrorError] = useState("");
-  const [mirrorElapsed, setMirrorElapsed] = useState(0);
-  const mirrorStartRef = useRef<number>(0);
+  const [mirrorStarting, setMirrorStarting] = useState(false);
+  const [mirrorOpId, setMirrorOpId] = useState<string | null>(null);
+  // Shown inline on the destination-picker phase only — a rejected mirrorRepo() call (e.g. the
+  // (src, dest) dedup guard) before anything was ever queued, so the user stays on the picker
+  // and can adjust the destination or retry.
+  const [mirrorPickerError, setMirrorPickerError] = useState("");
+  const [mirrorOutcome, setMirrorOutcome] = useState<"done" | "cancelled" | "failed" | null>(null);
+  // Only populated when mirrorOutcome === "failed", from the terminal task event's error field.
+  const [mirrorFailureError, setMirrorFailureError] = useState("");
   const [contextMenu, setContextMenu] = useState<{ repo: Repository; x: number; y: number } | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
@@ -513,16 +529,6 @@ export default function RepositoriesPage() {
   };
 
   useEffect(() => {
-    if (!mirroring) return;
-    mirrorStartRef.current = Date.now();
-    setMirrorElapsed(0);
-    const id = setInterval(() => {
-      setMirrorElapsed(Math.floor((Date.now() - mirrorStartRef.current) / 1000));
-    }, 1000);
-    return () => clearInterval(id);
-  }, [mirroring]);
-
-  useEffect(() => {
     if (!pruning) return;
     pruneStartRef.current = Date.now();
     setPruneElapsed(0);
@@ -532,42 +538,87 @@ export default function RepositoriesPage() {
     return () => clearInterval(id);
   }, [pruning]);
 
+  // Listens for this modal's own tracked mirror (once mirrorOpId is set) reaching a terminal
+  // phase. Strictly filtered by operationId, not repoId — the envelope's repoId is the
+  // *destination*, and mirror_repo deliberately allows multiple mirrors into the same
+  // destination from different sources to be queued at once, so repoId alone can't tell two
+  // such runs apart (see activity.tsx's ActiveMirror doc comment). The queued/running phase
+  // itself isn't tracked here — it's read live from ActivityProvider's activeMirrors below —
+  // this effect only needs to catch the terminal event.
+  useEffect(() => {
+    if (!mirrorOpId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<TaskEvent>("task", (e) => {
+      const t = e.payload;
+      if (t.kind !== "mirror" || t.operationId !== mirrorOpId) return;
+      if (t.phase === "finished") {
+        // Deliberately does not touch statsMap or call refreshRepoStats — the stats cache is
+        // never auto-evicted/refreshed, mirror included (see CLAUDE.md's Restic Integration
+        // section); populating it after a mirror is exclusively the Refresh row/Refresh All
+        // buttons' job, same as after backup/forget/copy/snapshot delete.
+        setMirrorOutcome("done");
+      } else if (t.phase === "cancelled") {
+        setMirrorOutcome("cancelled");
+      } else if (t.phase === "failed") {
+        setMirrorOutcome("failed");
+        setMirrorFailureError(t.error || "Mirror failed.");
+      }
+    }).then((u) => {
+      if (cancelled) { u(); return; }
+      unlisten = u;
+    });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [mirrorOpId, mirrorDestId]);
+
+  // Backstop for the narrow race where the listener above (registered only after mirrorOpId is
+  // set, itself only after mirrorRepo()'s IPC round-trip already resolved) misses the terminal
+  // task event for an unusually fast mirror (e.g. destination already fully in sync — restic
+  // copy can exit almost immediately). ActivityProvider's activeMirrors is not subject to that
+  // race — it's been listening since app launch — so its entry disappearing while we're still
+  // waiting is proof the operation reached some terminal phase we missed. Defaults to "done"
+  // rather than leaving the modal stuck showing "Copying snapshots…" forever; can't distinguish
+  // success/cancel/fail in that window, but a stuck spinner is strictly worse UX than an
+  // occasional optimistic label.
+  useEffect(() => {
+    if (!mirrorOpId || mirrorOutcome) return;
+    const stillActive = activeMirrors.some((m) => m.operationId === mirrorOpId);
+    if (!stillActive) {
+      setMirrorOutcome("done");
+    }
+  }, [mirrorOpId, mirrorOutcome, activeMirrors]);
+
   const handleMirror = async () => {
     if (!mirrorSource || !mirrorDestId) return;
-    setMirroring(true);
-    setMirrorDone(false);
-    setMirrorCancelled(false);
-    setMirrorError("");
+    setMirrorStarting(true);
+    setMirrorPickerError("");
     try {
-      await mirrorRepo(mirrorSource.id, mirrorDestId);
-      setMirrorDone(true);
-      setStatsMap((prev) => { const next = { ...prev }; delete next[mirrorDestId]; return next; });
-      refreshRepoStats(mirrorDestId)
-        .then((s) => setStatsMap((prev) => ({ ...prev, [mirrorDestId]: s })))
-        .catch(() => {});
-    } catch (err: any) {
+      const opId = await mirrorRepo(mirrorSource.id, mirrorDestId);
+      setMirrorOpId(opId);
+    } catch (err) {
       const msg = String(err);
-      if (msg === "cancelled") {
-        setMirrorCancelled(true);
-      } else {
-        setMirrorError(msg);
-      }
+      setMirrorPickerError(
+        msg === MIRROR_ALREADY_ACTIVE_ERROR
+          ? "This source is already mirroring to that destination."
+          : "Failed to start mirror."
+      );
     } finally {
-      setMirroring(false);
+      setMirrorStarting(false);
     }
   };
 
   const handleCancelMirror = async () => {
-    try { await cancelMirror(); } catch {}
+    if (!mirrorOpId) return;
+    try { await cancelMirror(mirrorOpId); } catch {}
   };
 
+  // Hides the modal only — a queued or running mirror keeps going in the background and stays
+  // visible/cancellable via the Activity panel's activeMirrors rows (see activity.tsx).
+  // Deliberately does not reset mirrorOpId/mirrorOutcome — there is no re-adoption path (see the
+  // mirror state declarations above), so those only ever get reset by the "Mirror to another
+  // repository" button starting a fresh picker, never by closing this modal.
   const closeMirrorModal = () => {
-    if (mirroring) return;
     setMirrorSource(null);
-    setMirrorDestId("");
-    setMirrorDone(false);
-    setMirrorCancelled(false);
-    setMirrorError("");
   };
 
   const handlePrune = async () => {
@@ -738,11 +789,15 @@ export default function RepositoriesPage() {
                     size="sm"
                     onClick={(e) => {
                       e.stopPropagation();
+                      // Always starts a fresh picker — no re-adoption of an already-running
+                      // mirror for this repo (see the mirror state declarations above); it
+                      // stays visible/cancellable in the Activity panel regardless.
                       setMirrorSource(repo);
                       setMirrorDestId("");
-                      setMirrorDone(false);
-                      setMirrorCancelled(false);
-                      setMirrorError("");
+                      setMirrorOpId(null);
+                      setMirrorPickerError("");
+                      setMirrorOutcome(null);
+                      setMirrorFailureError("");
                     }}
                     className="text-gray-500 hover:text-purple-400"
                     title="Mirror to another repository"
@@ -960,7 +1015,7 @@ export default function RepositoriesPage() {
         open={mirrorSource !== null}
         onClose={closeMirrorModal}
       >
-        {mirrorDone ? (
+        {mirrorOutcome === "done" ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
@@ -976,13 +1031,51 @@ export default function RepositoriesPage() {
               <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
             </div>
           </>
-        ) : mirrorCancelled ? (
+        ) : mirrorOutcome === "cancelled" ? (
           <>
             <p className="text-sm text-gray-400 mb-4">Mirror was cancelled.</p>
             <div className="flex justify-end">
               <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
             </div>
           </>
+        ) : mirrorOutcome === "failed" ? (
+          <>
+            <p className="text-sm text-red-300 mb-4">{mirrorFailureError || "Mirror failed."}</p>
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={closeMirrorModal}>Close</Button>
+            </div>
+          </>
+        ) : mirrorOpId ? (
+          // Queued or running phase, driven live by ActivityProvider's activeMirrors (matched
+          // by operationId) rather than page-local state — see the mirror state declarations
+          // above for why. `activeMirror` can be briefly undefined for one render right after
+          // Start (before the provider's own "task" listener has processed the "pending"
+          // event) — treated the same as "running" in that case, since the common case (no
+          // mirror ahead of this one) resolves to running immediately anyway.
+          (() => {
+            const activeMirror = activeMirrors.find((m) => m.operationId === mirrorOpId);
+            const queued = activeMirror?.status === "queued";
+            return (
+              <>
+                <p className="text-sm text-gray-300 mb-4">
+                  Copying all snapshots from <span className="font-semibold text-gray-50">{mirrorSource?.name}</span> to{" "}
+                  <span className="font-semibold text-gray-50">{repos.find((r) => r.id === mirrorDestId)?.name}</span>.
+                </p>
+                <div className="mb-4">
+                  <p className="text-xs text-gray-400 mb-1">
+                    {queued ? "Waiting in queue…" : "Copying snapshots…"}
+                  </p>
+                  <ProgressBar indeterminate colorClass="bg-purple-500" heightClass="h-2" />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="secondary" onClick={closeMirrorModal} title="Keep mirroring in the background">
+                    Hide
+                  </Button>
+                  <Button variant="secondary" onClick={handleCancelMirror}>Cancel</Button>
+                </div>
+              </>
+            );
+          })()
         ) : (
           <>
             <p className="text-sm text-gray-300 mb-4">
@@ -996,7 +1089,7 @@ export default function RepositoriesPage() {
                   className="w-full appearance-none px-3 py-2 pr-8 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
                   value={mirrorDestId}
                   onChange={(e) => setMirrorDestId(e.target.value)}
-                  disabled={mirroring}
+                  disabled={mirrorStarting}
                 >
                   <option value="">Select a repository…</option>
                   {repos
@@ -1008,41 +1101,18 @@ export default function RepositoriesPage() {
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
               </div>
             </div>
-            {mirrorError && (
-              <p className="text-sm text-red-300 mb-3">{mirrorError}</p>
+            {mirrorPickerError && (
+              <p className="text-sm text-red-300 mb-3">{mirrorPickerError}</p>
             )}
-            {mirroring && (
-              <div className="mb-4">
-                <p className="text-xs text-gray-400 mb-1">Copying snapshots…</p>
-                <ProgressBar indeterminate colorClass="bg-purple-500" heightClass="h-2" />
-              </div>
-            )}
-            <div className="flex items-center justify-between">
-              {mirroring ? (
-                <span className="text-xs text-gray-500">
-                  {mirrorElapsed < 60
-                    ? `${mirrorElapsed}s elapsed`
-                    : `${Math.floor(mirrorElapsed / 60)}m ${mirrorElapsed % 60}s elapsed`}
-                </span>
-              ) : (
-                <span />
-              )}
-              <div className="flex gap-2">
-              {mirroring ? (
-                <Button variant="secondary" onClick={handleCancelMirror}>Cancel</Button>
-              ) : (
-                <>
-                  <Button variant="secondary" onClick={closeMirrorModal}>Cancel</Button>
-                  <Button
-                    onClick={handleMirror}
-                    disabled={!mirrorDestId}
-                    className="bg-purple-600 hover:bg-purple-500"
-                  >
-                    Mirror
-                  </Button>
-                </>
-              )}
-              </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={closeMirrorModal}>Cancel</Button>
+              <Button
+                onClick={handleMirror}
+                disabled={!mirrorDestId || mirrorStarting}
+                className="bg-purple-600 hover:bg-purple-500"
+              >
+                Mirror
+              </Button>
             </div>
           </>
         )}
@@ -1167,11 +1237,14 @@ export default function RepositoriesPage() {
             {
               label: "Mirror…",
               onClick: () => {
+                // Always starts a fresh picker — see the row button's identical reset above
+                // for why (no re-adoption; the panel covers a backgrounded mirror already).
                 setMirrorSource(contextMenu.repo);
                 setMirrorDestId("");
-                setMirrorDone(false);
-                setMirrorCancelled(false);
-                setMirrorError("");
+                setMirrorOpId(null);
+                setMirrorPickerError("");
+                setMirrorOutcome(null);
+                setMirrorFailureError("");
               },
             },
             {
