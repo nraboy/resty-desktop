@@ -7,6 +7,7 @@ import { formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Spinner from "../components/Spinner";
+import ProgressBar from "../components/ProgressBar";
 
 type IndexState = "loading" | "not_indexed" | "indexing" | "ready";
 
@@ -241,9 +242,7 @@ export default function SearchPage() {
             </p>
           </div>
           <div className="w-full">
-            <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
-              <div className="h-1.5 w-1/3 rounded-full bg-blue-500 animate-[slide_1.4s_ease-in-out_infinite]" />
-            </div>
+            <ProgressBar indeterminate />
           </div>
           <p className="text-xs text-gray-600">You can navigate away — indexing continues in the background.</p>
         </div>

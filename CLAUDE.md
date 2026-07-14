@@ -40,6 +40,10 @@ src/
     Input.tsx      # Labeled input with error state; optional onClear prop shows inline × when value non-empty;
                    #   className applies to outer wrapper div (not <input>); <input> is always w-full inside wrapper
     Modal.tsx      # Overlay modal dialog
+    ProgressBar.tsx # Determinate (percent) or indeterminate (constantly-sliding, via index.css's
+                   #   `slide` keyframe) bar; shared by ActivityPanel and every modal that shows
+                   #   backup/restore/copy/index/prune progress — indeterminate mode is for
+                   #   operations that report no incremental progress (e.g. single-repo prune)
     Sidebar.tsx    # Left nav with app icon + repo indicator
     ActivityPanel.tsx # Right-side slide-in drawer (slim always-visible rail + fixed overlay) surfacing
                    #   background activity with no other visibility: auto-indexing progress, scheduler-
@@ -79,8 +83,9 @@ src/
                    #   unified `task` event bus filtered to kind "stats" rather than from a per-operation
                    #   feed (stats never had one). Lifecycle-only, no error text: the reducer tracks
                    #   operationId→repoId across started (also clears any prior failure marker for that
-                   #   repo)/finished/failed/cancelled to drive a spinner (statsRefreshing) and a plain
-                   #   boolean "last attempt failed" marker (statsFailed, no message — see repo.rs's
+                   #   repo)/finished/failed/cancelled to drive an in-flight indicator (statsRefreshing —
+                   #   a spinning icon on RepositoriesPage's own rows, an indeterminate ProgressBar in the
+                   #   Activity panel) and a plain boolean "last attempt failed" marker (statsFailed, no message — see repo.rs's
                    #   fetch_and_cache_stats, where every failure path reports through task_ctx.failed(...)
                    #   explicitly so this marker never depends on the invoke promise's own rejection). The
                    #   actual numbers are re-read from the DB cache by RepositoriesPage's own `task`
@@ -104,7 +109,16 @@ src/
                             #   value visible with a plain "refresh failed" marker rather than blanking to
                             #   "unavailable"; mirror, edit, check, prune, "Index All Snapshots" via
                             #   right-click context menu; edit modal: name/path/password with Test
-                            #   Connection; prune: confirmation→progress→done; "Index All Snapshots"
+                            #   Connection; prune: confirmation→progress→done, with a Hide button on the
+                            #   progress screen (mirrors SettingsPage's "Prune All Repositories" modal) that
+                            #   dismisses the modal while the prune keeps running — reopening via "Prune…"
+                            #   shows the same repo's live progress rather than a blank state, sourced from
+                            #   local `pruning`/`pruneElapsed`; "Prune…" is disabled for every repo except
+                            #   the one currently pruning (prune is single-in-flight app-wide, `PruneHandle`'s
+                            #   busy guard) so a click on a different repo can't silently reopen the modal
+                            #   onto the wrong repo's progress; a backgrounded prune otherwise stays
+                            #   visible/cancellable via the Activity panel's `activePrune` row — see
+                            #   ActivityPanel.tsx; "Index All Snapshots"
                             #   opens the same dismissible progress/queued/Stop/complete modal pattern as
                             #   RepoSearchPage's own "Index All" (independent state, its own `task`
                             #   listener scoped to whichever repo the context menu targeted — deliberate
@@ -535,9 +549,10 @@ never had a legacy per-operation feed (the page always updated straight from the
 promise return), so this was the first case with no existing detail feed to duplicate or
 choreograph around. The subscription is deliberately **lifecycle-only, and text-free**: it tracks
 `operationId → repoId` across `started`/`finished`/`failed`/`cancelled` to drive both an
-in-flight spinner (`statsRefreshing`) and a plain boolean "last attempt failed" marker
-(`statsFailed`, cleared the moment a new attempt starts or a later one succeeds) — both
-surfaced in `ActivityPanel` and read directly by `RepositoriesPage`. No error *message* is ever
+in-flight indicator (`statsRefreshing` — rendered as an indeterminate `ProgressBar` row in
+`ActivityPanel`, a spinning icon on `RepositoriesPage`'s own rows) and a plain boolean "last
+attempt failed" marker (`statsFailed`, cleared the moment a new attempt starts or a later one
+succeeds) — both surfaced in `ActivityPanel` and read directly by `RepositoriesPage`. No error *message* is ever
 carried, stored, or shown; a manual refresh only needs to tell the user "that didn't work," not
 restic's specific reason, so the marker is a `Set<repoId>`, never a `Map<repoId, string>`. This
 is also why `fetch_and_cache_stats` (`repo.rs`) creates its `OperationCtx` **before** validating
@@ -622,7 +637,8 @@ purely as a lifecycle signal. `reducePrune` (`activity.tsx`) is a single nullabl
 `Map`, since prune is single-in-flight app-wide (`PruneHandle`'s `busy` guard) unlike concurrent
 index batches. It covers both `prune_all_repos` (progress-bearing: `itemsDone`/`itemsTotal`/
 `label` per repo) and single-repo `prune_repo` (lifecycle-only — `itemsTotal` stays `0`, so the
-row renders indeterminate). This is also the first case of a legacy event retired **after** its
+row renders the shared `ProgressBar` component's `indeterminate` (constantly-sliding) mode
+rather than a determinate bar stuck at 0%). This is also the first case of a legacy event retired **after** its
 one remaining consumer was ported on its own, unprompted by a wider rewrite: the legacy
 `prune:progress` event existed solely to feed `SettingsPage`'s "Prune All Repositories" modal
 (its progress bar, "Pruning `<repo>` (n of N)…" text, and repo count), which now mirrors the

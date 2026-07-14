@@ -36,6 +36,7 @@ import Input from "../components/Input";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
+import ProgressBar from "../components/ProgressBar";
 
 type ModalMode = "add" | "init" | null;
 
@@ -94,6 +95,10 @@ export default function RepositoriesPage() {
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [checkRepoName, setCheckRepoName] = useState("");
   const [pruneTarget, setPruneTarget] = useState<Repository | null>(null);
+  // Decoupled from pruneTarget so the modal can be hidden while a prune keeps running in the
+  // background (see closePruneModal) — pruneTarget stays set so reopening shows the same
+  // repo's live progress instead of a blank state. Mirrors SettingsPage's "Prune All" modal.
+  const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [pruning, setPruning] = useState(false);
   const [pruneDone, setPruneDone] = useState(false);
   const [pruneCancelled, setPruneCancelled] = useState(false);
@@ -590,12 +595,13 @@ export default function RepositoriesPage() {
     try { await cancelPrune(); } catch {}
   };
 
+  // Hides the modal only — a still-running prune keeps going in the background and stays
+  // visible/cancellable via the Activity panel's activePrune row (see activity.tsx). Reopening
+  // via the "Prune…" context-menu item (below) shows the same repo's live progress rather than
+  // a blank state, since pruneTarget is left untouched here. Mirrors SettingsPage's
+  // closePruneModal for "Prune All Repositories".
   const closePruneModal = () => {
-    if (pruning) return;
-    setPruneTarget(null);
-    setPruneDone(false);
-    setPruneCancelled(false);
-    setPruneError("");
+    setPruneModalOpen(false);
   };
 
   return (
@@ -1008,9 +1014,7 @@ export default function RepositoriesPage() {
             {mirroring && (
               <div className="mb-4">
                 <p className="text-xs text-gray-400 mb-1">Copying snapshots…</p>
-                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
-                  <div className="h-2 w-1/3 rounded-full bg-purple-500 animate-[slide_1.4s_ease-in-out_infinite]" />
-                </div>
+                <ProgressBar indeterminate colorClass="bg-purple-500" heightClass="h-2" />
               </div>
             )}
             <div className="flex items-center justify-between">
@@ -1046,7 +1050,7 @@ export default function RepositoriesPage() {
 
       <Modal
         title={`Prune: ${pruneTarget?.name ?? ""}`}
-        open={pruneTarget !== null}
+        open={pruneModalOpen}
         onClose={closePruneModal}
       >
         {pruneDone ? (
@@ -1075,9 +1079,7 @@ export default function RepositoriesPage() {
         ) : pruning ? (
           <>
             <p className="text-xs text-gray-400 mb-1">Pruning repository…</p>
-            <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden mb-4">
-              <div className="h-2 w-1/3 rounded-full bg-blue-500 animate-[slide_1.4s_ease-in-out_infinite]" />
-            </div>
+            <ProgressBar indeterminate heightClass="h-2" className="mb-4" />
             {pruneError && <p className="text-sm text-red-300 mb-3">{pruneError}</p>}
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-500">
@@ -1085,7 +1087,12 @@ export default function RepositoriesPage() {
                   ? `${pruneElapsed}s elapsed`
                   : `${Math.floor(pruneElapsed / 60)}m ${pruneElapsed % 60}s elapsed`}
               </span>
-              <Button variant="secondary" onClick={handleCancelPrune}>Cancel</Button>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={closePruneModal} title="Keep pruning in the background">
+                  Hide
+                </Button>
+                <Button variant="secondary" onClick={handleCancelPrune}>Cancel</Button>
+              </div>
             </div>
           </>
         ) : (
@@ -1169,11 +1176,22 @@ export default function RepositoriesPage() {
             },
             {
               label: "Prune…",
+              // Prune is single-in-flight app-wide (PruneHandle's busy guard) — disable this
+              // for every repo except the one currently pruning, so a click on a *different*
+              // repo can't silently reopen the modal onto the wrong repo's live progress (the
+              // reset-on-open logic below only skips resetting pruneTarget for that same repo).
+              disabled: pruning && pruneTarget?.id !== contextMenu.repo.id,
               onClick: () => {
-                setPruneTarget(contextMenu.repo);
-                setPruneDone(false);
-                setPruneCancelled(false);
-                setPruneError("");
+                // Only reset to a fresh confirm screen when nothing is running — a
+                // still-running prune (survived a prior Hide) should reopen into its live
+                // progress instead of a blank confirm screen.
+                if (!pruning) {
+                  setPruneTarget(contextMenu.repo);
+                  setPruneDone(false);
+                  setPruneCancelled(false);
+                  setPruneError("");
+                }
+                setPruneModalOpen(true);
               },
             },
             { separator: true },

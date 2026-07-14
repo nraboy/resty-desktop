@@ -8,8 +8,8 @@
 // explicitly dismissible while the operation keeps running in the background, so — unlike those
 // other modals — they need a way to stay visible and cancellable after the modal closes.
 // The stats row is this app's first consumer of the unified `task` event bus rather than a
-// per-operation legacy feed (stats never had one) — it's lifecycle-only (no progress bar,
-// since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
+// per-operation legacy feed (stats never had one) — it's lifecycle-only (an indeterminate
+// ProgressBar, since a single `restic stats` call has no measurable progress); RepositoriesPage owns the
 // actual per-row numbers via its own `task` listener re-reading the DB cache. When
 // RepositoriesPage's "Refresh Stats" button is running, its batch progress (statsRefreshAllProgress,
 // a plain done/total counter the page pushes into ActivityProvider directly — there's no
@@ -30,12 +30,18 @@
 // carries no schedule name, unlike the legacy scheduler:* events it replaced).
 //
 // Standalone single-snapshot indexing ("Index Snapshot" on SnapshotsPage, "Index Now" on
-// SearchPage) gets its own lifecycle-only spinner row per in-flight index (activeSnapshotIndexes,
-// see activity.tsx's reduceSnapshotIndexes) — same rationale as "Index All": their modal/inline
-// UI's Close button doesn't cancel anything, so this is what stays visible once it's dismissed.
-// No Stop button: `index_snapshot` has no cancel path at all (unlike the batch, which does).
-// A batch's own per-snapshot events are indistinguishable on the wire from a standalone call, so
-// entries whose repo already has a running batch are filtered out here to avoid a duplicate row.
+// SearchPage) gets its own lifecycle-only row (an indeterminate ProgressBar, no measurable
+// progress) per in-flight index (activeSnapshotIndexes, see activity.tsx's
+// reduceSnapshotIndexes) — same rationale as "Index All": their modal/inline UI's Close button
+// doesn't cancel anything, so this is what stays visible once it's dismissed. No Stop button:
+// `index_snapshot` has no cancel path at all (unlike the batch, which does). A batch's own
+// per-snapshot events are indistinguishable on the wire from a standalone call, so entries whose
+// repo already has a running batch are filtered out here to avoid a duplicate row.
+//
+// Every "Active Tasks" row uses the same ProgressBar component (determinate when real
+// itemsDone/itemsTotal or percentDone is available, indeterminate otherwise) rather than mixing
+// in a spinner+text treatment for the lifecycle-only rows — kept visually consistent on
+// purpose, see ProgressBar.tsx.
 //
 // Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
 // normal sibling, so it never changes the width available to routed page content. Clicking it
@@ -51,18 +57,7 @@ import { useActivity } from "../lib/activity";
 import { cancelBackup, cancelIndexBatch, cancelPrune } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative } from "../lib/format";
-import Spinner from "./Spinner";
-
-function ProgressBar({ percent, colorClass = "bg-blue-500" }: { percent: number; colorClass?: string }) {
-  return (
-    <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
-      <div
-        className={`${colorClass} h-1.5 rounded-full transition-all duration-500`}
-        style={{ width: `${Math.min(100, Math.max(0, percent)).toFixed(1)}%` }}
-      />
-    </div>
-  );
-}
+import ProgressBar from "./ProgressBar";
 
 function SectionHeading({ children }: { children: string }) {
   return <h3 className="text-xs font-semibold text-gray-500 tracking-wider uppercase px-4 pt-4 pb-2">{children}</h3>;
@@ -265,12 +260,12 @@ export default function ActivityPanel() {
                 const repoName = indexBatchRepoNames[s.repoId];
                 const shortId = s.snapshotId.slice(0, 8);
                 return (
-                  <div key={s.operationId} className="flex items-center gap-2">
-                    <Spinner className="w-3.5 h-3.5 flex-shrink-0" />
+                  <div key={s.operationId} className="space-y-2">
                     <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
                       Indexing snapshot <span className="font-mono">{shortId}</span>
                       {repoName ? ` — ${repoName}` : ""}
                     </p>
+                    <ProgressBar indeterminate />
                   </div>
                 );
               })}
@@ -334,6 +329,7 @@ export default function ActivityPanel() {
                     </button>
                   </div>
                   <ProgressBar
+                    indeterminate={activePrune.itemsTotal === 0}
                     percent={activePrune.itemsTotal > 0 ? (activePrune.itemsDone / activePrune.itemsTotal) * 100 : 0}
                   />
                   <p className="text-xs text-gray-500">
@@ -341,7 +337,7 @@ export default function ActivityPanel() {
                       ? "Stopping…"
                       : activePrune.itemsTotal > 0
                       ? `${activePrune.itemsDone} / ${activePrune.itemsTotal} repos`
-                      : "Starting…"}
+                      : "Pruning…"}
                   </p>
                 </div>
               )}
@@ -365,11 +361,11 @@ export default function ActivityPanel() {
                   />
                 </div>
               ) : statsRefreshing.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Spinner className="w-3.5 h-3.5 flex-shrink-0" />
+                <div className="space-y-2">
                   <p className="text-sm text-gray-200">
                     Refreshing stats — {statsRefreshing.length} {statsRefreshing.length === 1 ? "repository" : "repositories"}
                   </p>
+                  <ProgressBar indeterminate />
                 </div>
               )}
             </div>

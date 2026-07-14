@@ -12,6 +12,7 @@ import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
+import ProgressBar from "../components/ProgressBar";
 
 const PAGE_SIZE = 10;
 
@@ -1124,9 +1125,7 @@ export default function SnapshotsPage() {
             {copying && (
               <div className="mb-4">
                 <div className="text-xs text-gray-400 mb-1">Copying — this may take a while…</div>
-                <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
-                  <div className="h-2 w-1/3 rounded-full bg-purple-500 animate-[slide_1.4s_ease-in-out_infinite]" />
-                </div>
+                <ProgressBar indeterminate colorClass="bg-purple-500" heightClass="h-2" />
               </div>
             )}
             <div className="flex justify-end gap-2">
@@ -1319,9 +1318,7 @@ export default function SnapshotsPage() {
             </p>
             <div className="mb-4">
               <div className="text-xs text-gray-400 mb-1">Building file index…</div>
-              <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
-                <div className="h-2 w-1/3 rounded-full bg-blue-500 animate-[slide_1.4s_ease-in-out_infinite]" />
-              </div>
+              <ProgressBar indeterminate heightClass="h-2" />
             </div>
             <div className="flex justify-end">
               <Button variant="secondary" onClick={() => setIndexingTarget(null)}>Close</Button>
