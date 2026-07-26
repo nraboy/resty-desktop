@@ -245,7 +245,7 @@ export default function BackupPlansPage() {
     unlistenRef.current = unlisten;
 
     try {
-      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.id, backupPlan.limitUpload, backupPlan.limitDownload);
+      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.excludeIfPresent, backupPlan.excludeCaches, backupPlan.id, backupPlan.limitUpload, backupPlan.limitDownload);
       if (backupPlan.retention) {
         setApplyingRetention(true);
         try {
@@ -374,7 +374,11 @@ export default function BackupPlansPage() {
                   {plan.paths.length} {plan.paths.length === 1 ? "path" : "paths"}
                   {(() => {
                     const excCount = plan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length;
-                    return excCount > 0 ? ` · ${excCount} ${excCount === 1 ? "exclusion" : "exclusions"}` : null;
+                    const markerCount = plan.excludeIfPresent.filter(e => e.trim() && !e.trim().startsWith('#')).length + (plan.excludeCaches ? 1 : 0);
+                    const parts: string[] = [];
+                    if (excCount > 0) parts.push(`${excCount} ${excCount === 1 ? "exclusion" : "exclusions"}`);
+                    if (markerCount > 0) parts.push(`${markerCount} ${markerCount === 1 ? "marker file" : "marker files"}`);
+                    return parts.length > 0 ? ` · ${parts.join(", ")}` : null;
                   })()}
                   {plan.tags.length > 0 && ` · ${plan.tags.join(", ")}`}
                 </p>
@@ -653,6 +657,14 @@ export default function BackupPlansPage() {
                 <div className="flex justify-between">
                   <span className="text-gray-500">Exclusions</span>
                   <span className="text-gray-200">{backupPlan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length} rules</span>
+                </div>
+              )}
+              {(backupPlan.excludeIfPresent.filter(e => e.trim() && !e.trim().startsWith('#')).length > 0 || backupPlan.excludeCaches) && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Marker files</span>
+                  <span className="text-gray-200">
+                    {backupPlan.excludeIfPresent.filter(e => e.trim() && !e.trim().startsWith('#')).length + (backupPlan.excludeCaches ? 1 : 0)}
+                  </span>
                 </div>
               )}
               {backupPlan.retention && (

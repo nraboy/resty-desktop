@@ -155,11 +155,13 @@ export const runBackup = (
   paths: string[],
   tags: string[],
   excludes: string[],
+  excludeIfPresent: string[],
+  excludeCaches: boolean,
   planId?: string,
   limitUpload?: number,
   limitDownload?: number,
 ): Promise<string> =>
-  invoke("run_backup", { repoId, paths, tags, excludes, planId: planId ?? null, limitUpload: limitUpload ?? null, limitDownload: limitDownload ?? null });
+  invoke("run_backup", { repoId, paths, tags, excludes, excludeIfPresent, excludeCaches, planId: planId ?? null, limitUpload: limitUpload ?? null, limitDownload: limitDownload ?? null });
 
 export const unlockRepo = (repoId: string): Promise<void> =>
   invoke("unlock_repo", { repoId });

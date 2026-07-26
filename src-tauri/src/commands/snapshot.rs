@@ -380,6 +380,36 @@ pub async fn get_snapshot_stats(
     })
 }
 
+/// Builds the `--exclude` / `--exclude-if-present` / `--exclude-caches` args for a
+/// `restic backup` invocation. `excludes` and `exclude_if_present` entries are trimmed,
+/// with blank lines and `#`-comments dropped — Rust is the authoritative filter here since
+/// Expert-mode exclude-pattern text on the frontend can carry both.
+pub(crate) fn build_exclude_args(
+    excludes: &[String],
+    exclude_if_present: &[String],
+    exclude_caches: bool,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    for pattern in excludes {
+        let trimmed = pattern.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            args.push("--exclude".to_string());
+            args.push(trimmed.to_string());
+        }
+    }
+    for marker in exclude_if_present {
+        let trimmed = marker.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            args.push("--exclude-if-present".to_string());
+            args.push(trimmed.to_string());
+        }
+    }
+    if exclude_caches {
+        args.push("--exclude-caches".to_string());
+    }
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_backup(
     app: &tauri::AppHandle,
@@ -392,6 +422,8 @@ pub async fn execute_backup(
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
+    exclude_if_present: Vec<String>,
+    exclude_caches: bool,
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
     origin: TaskOrigin,
@@ -467,13 +499,7 @@ pub async fn execute_backup(
         args.push("--tag".to_string());
         args.push(tag.clone());
     }
-    for pattern in &excludes {
-        let trimmed = pattern.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            args.push("--exclude".to_string());
-            args.push(trimmed.to_string());
-        }
-    }
+    args.extend(build_exclude_args(&excludes, &exclude_if_present, exclude_caches));
     if let Some(kib) = limit_upload.filter(|&v| v > 0) {
         args.push("--limit-upload".to_string());
         args.push(kib.to_string());
@@ -751,10 +777,12 @@ pub async fn run_backup(
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
+    exclude_if_present: Vec<String>,
+    exclude_caches: bool,
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, limit_upload, limit_download, TaskOrigin::Manual).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, exclude_if_present, exclude_caches, limit_upload, limit_download, TaskOrigin::Manual).await
 }
 
 #[tauri::command]
@@ -1418,8 +1446,58 @@ pub async fn forget_by_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_retention_args, parse_diff_output, validate_snapshot_id};
+    use super::{build_exclude_args, build_retention_args, parse_diff_output, validate_snapshot_id};
     use crate::commands::cache::RetentionPolicy;
+
+    #[test]
+    fn exclude_args_emits_repeated_exclude_if_present() {
+        let args = build_exclude_args(&[], &[".nobackup".to_string(), "CACHEDIR.TAG".to_string()], false);
+        assert_eq!(
+            args,
+            vec![
+                "--exclude-if-present", ".nobackup",
+                "--exclude-if-present", "CACHEDIR.TAG",
+            ]
+        );
+    }
+
+    #[test]
+    fn exclude_args_drops_blank_and_comment_markers() {
+        let args = build_exclude_args(
+            &[],
+            &["  ".to_string(), "# a comment".to_string(), ".nobackup".to_string()],
+            false,
+        );
+        assert_eq!(args, vec!["--exclude-if-present", ".nobackup"]);
+    }
+
+    #[test]
+    fn exclude_args_emits_exclude_caches_once() {
+        let args = build_exclude_args(&[], &[], true);
+        assert_eq!(args, vec!["--exclude-caches"]);
+    }
+
+    #[test]
+    fn exclude_args_combines_all_three_kinds() {
+        let args = build_exclude_args(
+            &["*.log".to_string()],
+            &[".nobackup".to_string()],
+            true,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--exclude", "*.log",
+                "--exclude-if-present", ".nobackup",
+                "--exclude-caches",
+            ]
+        );
+    }
+
+    #[test]
+    fn exclude_args_empty_when_nothing_set() {
+        assert!(build_exclude_args(&[], &[], false).is_empty());
+    }
 
     #[test]
     fn accepts_8_char_hex_id() {

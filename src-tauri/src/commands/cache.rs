@@ -69,6 +69,10 @@ pub struct BackupPlan {
     pub paths: Vec<String>,
     pub tags: Vec<String>,
     pub excludes: Vec<String>,
+    #[serde(default)]
+    pub exclude_if_present: Vec<String>,
+    #[serde(default)]
+    pub exclude_caches: bool,
     pub retention: Option<RetentionPolicy>,
     pub limit_upload: Option<u32>,
     pub limit_download: Option<u32>,
@@ -453,6 +457,8 @@ impl AppDb {
                 paths_json      TEXT NOT NULL,
                 tags_json       TEXT NOT NULL,
                 excludes_json   TEXT NOT NULL,
+                exclude_if_present_json TEXT,
+                exclude_caches  INTEGER NOT NULL DEFAULT 0,
                 retention_json  TEXT,
                 limit_upload    INTEGER,
                 limit_download  INTEGER
@@ -531,6 +537,12 @@ impl AppDb {
         // Migrations for existing installs — silently ignored if columns already exist.
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;");
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE backup_plans ADD COLUMN exclude_if_present_json TEXT;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE backup_plans ADD COLUMN exclude_caches INTEGER NOT NULL DEFAULT 0;",
+        );
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
         );
@@ -801,7 +813,7 @@ impl AppDb {
     pub fn list_backup_plans(&self) -> Result<Vec<BackupPlan>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download FROM backup_plans ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download FROM backup_plans ORDER BY name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let plans = stmt
             .query_map([], |row| {
@@ -813,8 +825,10 @@ impl AppDb {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<u32>>(7)?,
-                    row.get::<_, Option<u32>>(8)?,
+                    row.get::<_, bool>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<u32>>(9)?,
+                    row.get::<_, Option<u32>>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -823,7 +837,7 @@ impl AppDb {
 
         plans
             .into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -831,6 +845,13 @@ impl AppDb {
                     paths: serde_json::from_str(&paths_json).map_err(|e| e.to_string())?,
                     tags: serde_json::from_str(&tags_json).map_err(|e| e.to_string())?,
                     excludes: serde_json::from_str(&excludes_json).map_err(|e| e.to_string())?,
+                    exclude_if_present: exclude_if_present_json
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e: serde_json::Error| e.to_string())?
+                        .unwrap_or_default(),
+                    exclude_caches,
                     retention: retention_json
                         .as_deref()
                         .map(serde_json::from_str)
@@ -847,6 +868,8 @@ impl AppDb {
         let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
         let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
         let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
+        let exclude_if_present_json =
+            serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
         let retention_json = plan
             .retention
             .as_ref()
@@ -857,8 +880,8 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO backup_plans
-             (id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 plan.id,
                 plan.name,
@@ -866,6 +889,8 @@ impl AppDb {
                 paths_json,
                 tags_json,
                 excludes_json,
+                exclude_if_present_json,
+                plan.exclude_caches,
                 retention_json,
                 plan.limit_upload,
                 plan.limit_download,
@@ -1759,7 +1784,7 @@ impl AppDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download
+            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download
              FROM backup_plans WHERE id IN ({})",
             placeholders
         );
@@ -1775,8 +1800,10 @@ impl AppDb {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<u32>>(7)?,
-                    row.get::<_, Option<u32>>(8)?,
+                    row.get::<_, bool>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<u32>>(9)?,
+                    row.get::<_, Option<u32>>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -1784,7 +1811,7 @@ impl AppDb {
             .map_err(|e| e.to_string())?;
 
         rows.into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -1792,6 +1819,13 @@ impl AppDb {
                     paths: serde_json::from_str(&paths_json).map_err(|e: serde_json::Error| e.to_string())?,
                     tags: serde_json::from_str(&tags_json).map_err(|e: serde_json::Error| e.to_string())?,
                     excludes: serde_json::from_str(&excludes_json).map_err(|e: serde_json::Error| e.to_string())?,
+                    exclude_if_present: exclude_if_present_json
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e: serde_json::Error| e.to_string())?
+                        .unwrap_or_default(),
+                    exclude_caches,
                     retention: retention_json
                         .as_deref()
                         .map(serde_json::from_str)
@@ -1968,6 +2002,8 @@ impl AppDb {
             let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
             let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
             let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
+            let exclude_if_present_json =
+                serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
             let retention_json = plan
                 .retention
                 .as_ref()
@@ -1976,10 +2012,11 @@ impl AppDb {
                 .map_err(|e: serde_json::Error| e.to_string())?;
             tx.execute(
                 "INSERT INTO backup_plans
-                 (id, name, repo_id, paths_json, tags_json, excludes_json, retention_json, limit_upload, limit_download)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     plan.id, plan.name, plan.repo_id, paths_json, tags_json, excludes_json,
+                    exclude_if_present_json, plan.exclude_caches,
                     retention_json, plan.limit_upload, plan.limit_download,
                 ],
             )
@@ -2128,6 +2165,93 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         AppDb::init_schema(&conn).unwrap();
         AppDb::new(conn, std::path::PathBuf::new())
+    }
+
+    #[test]
+    fn save_backup_plan_round_trips_exclude_if_present_and_exclude_caches() {
+        let db = test_db();
+        let plan = BackupPlan {
+            id: "plan1".to_string(),
+            name: "Daily".to_string(),
+            repo_id: "repo1".to_string(),
+            paths: vec!["/home".to_string()],
+            tags: vec![],
+            excludes: vec!["*.log".to_string()],
+            exclude_if_present: vec![".nobackup".to_string(), "CACHEDIR.TAG".to_string()],
+            exclude_caches: true,
+            retention: None,
+            limit_upload: None,
+            limit_download: None,
+        };
+        db.save_backup_plan(&plan).unwrap();
+
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].exclude_if_present,
+            vec![".nobackup".to_string(), "CACHEDIR.TAG".to_string()]
+        );
+        assert!(plans[0].exclude_caches);
+
+        // get_plans_for_ids shares the same read path — confirm it agrees.
+        let by_id = db.get_plans_for_ids(&["plan1".to_string()]).unwrap();
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].exclude_if_present, plans[0].exclude_if_present);
+        assert!(by_id[0].exclude_caches);
+    }
+
+    #[test]
+    fn old_schema_row_reads_back_empty_exclude_if_present_and_false_exclude_caches() {
+        // Simulates a plan row inserted before this migration (NULL exclude_if_present_json,
+        // default 0 exclude_caches) to confirm the read path tolerates it.
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO backup_plans (id, name, repo_id, paths_json, tags_json, excludes_json)
+                 VALUES ('old-plan', 'Old', 'repo1', '[\"/home\"]', '[]', '[]')",
+                [],
+            )
+            .unwrap();
+        }
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].exclude_if_present.is_empty());
+        assert!(!plans[0].exclude_caches);
+    }
+
+    #[test]
+    fn import_bundle_writes_exclude_if_present_and_exclude_caches() {
+        // Exercises the actual INSERT statement import_bundle runs (VALUES ?1..?11) —
+        // a placeholder/column mismatch here would only ever surface on a real import.
+        let db = test_db();
+        let repo = ImportRepo {
+            id: "repo1".to_string(),
+            name: "Repo".to_string(),
+            path: "/backups".to_string(),
+            password_nonce: vec![],
+            password_ciphertext: vec![],
+            read_only: false,
+        };
+        let plan = BackupPlan {
+            id: "plan1".to_string(),
+            name: "Daily".to_string(),
+            repo_id: "repo1".to_string(),
+            paths: vec!["/home".to_string()],
+            tags: vec![],
+            excludes: vec!["*.log".to_string()],
+            exclude_if_present: vec![".nobackup".to_string()],
+            exclude_caches: true,
+            retention: None,
+            limit_upload: None,
+            limit_download: None,
+        };
+        db.import_bundle(&[repo], &[plan], &[]).unwrap();
+
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].exclude_if_present, vec![".nobackup".to_string()]);
+        assert!(plans[0].exclude_caches);
     }
 
     #[test]
@@ -2731,6 +2855,17 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version2, 2);
+
+        // 5. The new exclude-if-present columns were added by ALTER TABLE (not CREATE
+        // TABLE) on this migrated DB — confirm the read path actually works against
+        // that shape, since init_schema's `let _ = ...ALTER...` silently swallows
+        // failures and every other test builds its schema from CREATE TABLE instead.
+        let db = AppDb::new(conn, std::path::PathBuf::new());
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].name, "Daily");
+        assert!(plans[0].exclude_if_present.is_empty());
+        assert!(!plans[0].exclude_caches);
     }
 
     /// Covers the Quick-wins browse-cache rewrite: insert two snapshots that

@@ -111,6 +111,7 @@ pub async fn run_schedule_now(
             &app, &db, &master_key, &backup_handle, &repo_locks,
             &plan.repo_id, Some(plan.id.as_str()),
             plan.paths.clone(), plan.tags.clone(), plan.excludes,
+            plan.exclude_if_present, plan.exclude_caches,
             plan.limit_upload, plan.limit_download,
             // "Run Now" is user-initiated, same distinction the scheduler:* events
             // already draw (see scheduler.rs) — not a background scheduler tick.

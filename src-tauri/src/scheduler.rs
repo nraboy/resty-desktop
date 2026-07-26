@@ -107,6 +107,8 @@ async fn tick(app: &tauri::AppHandle) {
                 plan.paths.clone(),
                 plan.tags.clone(),
                 plan.excludes,
+                plan.exclude_if_present,
+                plan.exclude_caches,
                 plan.limit_upload,
                 plan.limit_download,
                 TaskOrigin::Scheduler,

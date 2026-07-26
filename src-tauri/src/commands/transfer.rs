@@ -73,6 +73,10 @@ struct ExportPlan {
     paths: Vec<String>,
     tags: Vec<String>,
     excludes: Vec<String>,
+    #[serde(default)]
+    exclude_if_present: Vec<String>,
+    #[serde(default)]
+    exclude_caches: bool,
     retention: Option<RetentionPolicy>,
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
@@ -214,6 +218,8 @@ pub fn export_data(
             paths: p.paths.clone(),
             tags: p.tags.clone(),
             excludes: p.excludes.clone(),
+            exclude_if_present: p.exclude_if_present.clone(),
+            exclude_caches: p.exclude_caches,
             retention: p.retention.clone(),
             limit_upload: p.limit_upload,
             limit_download: p.limit_download,
@@ -377,6 +383,8 @@ pub fn import_data(
             paths: p.paths.clone(),
             tags: p.tags.clone(),
             excludes: p.excludes.clone(),
+            exclude_if_present: p.exclude_if_present.clone(),
+            exclude_caches: p.exclude_caches,
             retention: p.retention.clone(),
             limit_upload: p.limit_upload,
             limit_download: p.limit_download,
@@ -640,6 +648,8 @@ pub fn import_backrest_config(
             paths: p.paths.clone(),
             tags: Vec::new(),
             excludes,
+            exclude_if_present: Vec::new(),
+            exclude_caches: false,
             retention: p.retention.as_ref().and_then(BackrestRetention::to_resty),
             limit_upload: None,
             limit_download: None,
@@ -684,6 +694,49 @@ pub fn import_backrest_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ExportPlan additive fields ──────────────────────────────────────────
+
+    #[test]
+    fn export_plan_round_trips_exclude_if_present_and_exclude_caches() {
+        let plan = ExportPlan {
+            id: "p1".to_string(),
+            name: "Daily".to_string(),
+            repo_id: "r1".to_string(),
+            paths: vec!["/home".to_string()],
+            tags: vec![],
+            excludes: vec!["*.log".to_string()],
+            exclude_if_present: vec![".nobackup".to_string()],
+            exclude_caches: true,
+            retention: None,
+            limit_upload: None,
+            limit_download: None,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        let back: ExportPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.exclude_if_present, vec![".nobackup".to_string()]);
+        assert!(back.exclude_caches);
+    }
+
+    #[test]
+    fn export_plan_missing_new_fields_deserializes_with_defaults() {
+        // Simulates a bundle exported before this feature — no exclude_if_present /
+        // exclude_caches keys at all. Must not fail BUNDLE_VERSION-gated import.
+        let json = r#"{
+            "id": "p1",
+            "name": "Daily",
+            "repoId": "r1",
+            "paths": ["/home"],
+            "tags": [],
+            "excludes": [],
+            "retention": null,
+            "limitUpload": null,
+            "limitDownload": null
+        }"#;
+        let plan: ExportPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.exclude_if_present.is_empty());
+        assert!(!plan.exclude_caches);
+    }
 
     // ── uniquify ────────────────────────────────────────────────────────────
 

@@ -216,6 +216,8 @@ export interface BackupPlan {
   paths: string[];
   tags: string[];
   excludes: string[];
+  excludeIfPresent: string[];
+  excludeCaches: boolean;
   retention?: RetentionPolicy;
   limitUpload?: number;
   limitDownload?: number;

@@ -82,6 +82,9 @@ export default function BackupPlanEditPage() {
   const [excludeItems, setExcludeItems] = useState<string[]>([]);
   const [excludeInput, setExcludeInput] = useState("");
   const [excludeText, setExcludeText] = useState("");
+  const [excludeIfPresent, setExcludeIfPresent] = useState<string[]>([]);
+  const [excludeIfPresentInput, setExcludeIfPresentInput] = useState("");
+  const [excludeCaches, setExcludeCaches] = useState(false);
   const [keepLast, setKeepLast] = useState("");
   const [keepDaily, setKeepDaily] = useState("");
   const [keepWeekly, setKeepWeekly] = useState("");
@@ -115,6 +118,8 @@ export default function BackupPlanEditPage() {
             setTags(plan.tags);
             setExcludeItems(plan.excludes);
             setExcludeText(plan.excludes.join("\n"));
+            setExcludeIfPresent(plan.excludeIfPresent);
+            setExcludeCaches(plan.excludeCaches);
             setKeepLast(plan.retention?.keepLast?.toString() ?? "");
             setKeepDaily(plan.retention?.keepDaily?.toString() ?? "");
             setKeepWeekly(plan.retention?.keepWeekly?.toString() ?? "");
@@ -173,6 +178,19 @@ export default function BackupPlanEditPage() {
 
   const removeExclude = useCallback(
     (p: string) => setExcludeItems((prev) => prev.filter((x) => x !== p)),
+    [],
+  );
+
+  const addExcludeIfPresent = useCallback(() => {
+    const v = excludeIfPresentInput.trim();
+    if (v && !excludeIfPresent.includes(v)) {
+      setExcludeIfPresent((prev) => [...prev, v]);
+      setExcludeIfPresentInput("");
+    }
+  }, [excludeIfPresentInput, excludeIfPresent]);
+
+  const removeExcludeIfPresent = useCallback(
+    (p: string) => setExcludeIfPresent((prev) => prev.filter((x) => x !== p)),
     [],
   );
 
@@ -242,6 +260,8 @@ export default function BackupPlanEditPage() {
         paths,
         tags,
         excludes,
+        excludeIfPresent,
+        excludeCaches,
         retention,
         limitUpload: toNum(limitUpload),
         limitDownload: toNum(limitDownload),
@@ -543,6 +563,92 @@ export default function BackupPlanEditPage() {
             />
           </>
         )}
+      </div>
+
+      {/* Exclude if present */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Exclude If Present (optional)</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          If a directory contains a file with one of these names, its contents are skipped —
+          the marker file itself is still backed up. Useful for marking temporary/scratch data
+          (e.g. a <code className="text-gray-400">.nobackup</code> file) instead of listing every
+          such directory as its own exclusion above. Also accepts restic's{" "}
+          <code className="text-gray-400">name:header</code> syntax to match only when the
+          marker file starts with given content.
+        </p>
+
+        <div className="flex gap-2 mb-2">
+          <Input
+            placeholder=".nobackup"
+            value={excludeIfPresentInput}
+            onChange={(e) => setExcludeIfPresentInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addExcludeIfPresent())}
+            className="flex-1"
+          />
+          <Button variant="secondary" size="sm" onClick={addExcludeIfPresent}>
+            Add
+          </Button>
+        </div>
+
+        {(() => {
+          const v = excludeIfPresentInput.trim();
+          if (!v) return null;
+          if (v.includes("/") || v.includes("\\")) {
+            return (
+              <p className="text-xs text-amber-400 mb-2">
+                Marker files are matched by name only — remove the path (e.g. use{" "}
+                <code className="text-amber-400">.nobackup</code> instead of{" "}
+                <code className="text-amber-400">data/.nobackup</code>).
+              </p>
+            );
+          }
+          if (v.startsWith("#")) {
+            return (
+              <p className="text-xs text-amber-400 mb-2">
+                Filenames starting with <code className="text-amber-400">#</code> are ignored,
+                same as a comment in Exclude Patterns.
+              </p>
+            );
+          }
+          return null;
+        })()}
+
+        {excludeIfPresent.length > 0 && (
+          <ul className="space-y-1.5 mt-2">
+            {excludeIfPresent.map((p) => (
+              <li
+                key={p}
+                className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
+              >
+                <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                <button
+                  onClick={() => removeExcludeIfPresent(p)}
+                  className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {excludeIfPresent.length === 0 && (
+          <p className="text-sm text-gray-600 text-center py-3">
+            No marker files. Directories containing a file added above will have their contents skipped.
+          </p>
+        )}
+
+        <label className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-800 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={excludeCaches}
+            onChange={(e) => setExcludeCaches(e.target.checked)}
+            className="rounded bg-gray-700 border-gray-600"
+          />
+          <span className="text-sm text-gray-300">
+            Also exclude cache directories (<code className="text-gray-400">CACHEDIR.TAG</code>)
+          </span>
+        </label>
       </div>
 
       {/* Retention policy */}
