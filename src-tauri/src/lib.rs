@@ -276,6 +276,7 @@ pub fn run() {
             repo::init_repo,
             repo::rename_repo,
             repo::update_repo_path,
+            repo::update_repo_read_only,
             repo::get_repo_password,
             repo::update_repo_password,
             repo::test_repo_connection,

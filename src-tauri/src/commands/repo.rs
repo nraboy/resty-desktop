@@ -93,6 +93,45 @@ pub(crate) fn apply_from_repo_password(cmd: &mut std::process::Command, password
     }
 }
 
+/// Applies a repo's password (`apply_repo_password`) and, when the repo is marked
+/// read-only, restic's own `--no-lock` — the flag that lets restic operate against a
+/// repository whose backing filesystem/mount is genuinely read-only, by skipping the
+/// lock file it would otherwise try to write. `--no-lock` is a global restic flag, so
+/// this is the one place every read-type call needs to touch; write-type calls are
+/// refused before they ever reach here (see `ensure_writable`).
+pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    apply_repo_password(cmd, &repo.password);
+    if repo.read_only {
+        cmd.arg("--no-lock");
+    }
+}
+
+/// Same as `apply_repo_flags` but for a copy/mirror source repo's `--from-*` flags —
+/// used when the *source* of a copy/mirror is read-only. The destination is never
+/// read-only (`ensure_writable` refuses it earlier), so it has no `--no-lock` counterpart.
+pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    apply_from_repo_password(cmd, &repo.password);
+    if repo.read_only {
+        cmd.arg("--no-lock");
+    }
+}
+
+/// Error returned by every write-type command when the target repository is marked
+/// read-only. Read-type operations (browse, restore, search, stats, check, diff, and
+/// being a copy/mirror *source*) are unaffected — see `apply_repo_flags`.
+pub(crate) const READ_ONLY_REPO_ERROR: &str =
+    "This repository is marked read-only; writing operations are disabled.";
+
+/// Guards every write-type command (backup, forget/retention, prune, tag, delete,
+/// unlock, and being a copy/mirror *destination*). Call immediately after resolving
+/// the `FullRepository`, before any restic process is spawned.
+pub(crate) fn ensure_writable(repo: &FullRepository) -> Result<(), String> {
+    if repo.read_only {
+        return Err(READ_ONLY_REPO_ERROR.to_string());
+    }
+    Ok(())
+}
+
 pub fn run_restic_with_path(
     repo: &FullRepository,
     args: Vec<&str>,
@@ -100,7 +139,7 @@ pub fn run_restic_with_path(
 ) -> Result<String, String> {
     let mut cmd = std::process::Command::new(restic_path);
     cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
-    apply_repo_password(&mut cmd, &repo.password);
+    apply_repo_flags(&mut cmd, repo);
     let output = cmd
         .stdin(std::process::Stdio::null())
         .no_console()
@@ -142,10 +181,11 @@ pub async fn add_repo(
     name: String,
     path: String,
     password: String,
+    read_only: bool,
 ) -> Result<(), String> {
     let key = master_key.get()?;
     let (nonce, ciphertext) = crypto::encrypt(&key, password.as_bytes())?;
-    db.add_repo(&id, &name, &path, &nonce, &ciphertext)
+    db.add_repo(&id, &name, &path, &nonce, &ciphertext, read_only)
 }
 
 #[tauri::command]
@@ -169,6 +209,15 @@ pub async fn update_repo_path(
     new_path: String,
 ) -> Result<(), String> {
     db.update_repo_path(&repo_id, &new_path)
+}
+
+#[tauri::command]
+pub async fn update_repo_read_only(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    read_only: bool,
+) -> Result<(), String> {
+    db.set_repo_read_only(&repo_id, read_only)
 }
 
 #[tauri::command]
@@ -206,12 +255,13 @@ pub async fn init_repo(
 ) -> Result<(), String> {
     validate_init_password(&password)?;
     let restic_path = super::get_restic_path(&db);
-    let dummy = FullRepository { path: path.clone(), password: password.clone() };
+    // `restic init` always creates a writable repo — read_only is always false here.
+    let dummy = FullRepository { path: path.clone(), password: password.clone(), read_only: false };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
 
     let key = master_key.get()?;
     let (nonce, ciphertext) = crypto::encrypt(&key, password.as_bytes())?;
-    db.add_repo(&id, &name, &path, &nonce, &ciphertext)
+    db.add_repo(&id, &name, &path, &nonce, &ciphertext, false)
 }
 
 /// Test an unsaved repo connection (used by the "Test Connection" button in the add modal).
@@ -221,12 +271,13 @@ pub async fn test_repo_connection(
     db: State<'_, AppDb>,
     path: String,
     password: String,
+    read_only: bool,
 ) -> Result<(), String> {
     let restic_path = super::get_restic_path(&db);
     // No saved repoId yet (the repo isn't added until the test passes) — matches
     // prune_all_repos' empty-repoId convention for the same "no single id" case.
     let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
-    let dummy = FullRepository { path, password };
+    let dummy = FullRepository { path, password, read_only };
     let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
         .await
         .map(|_| ());
@@ -369,7 +420,7 @@ pub async fn check_repo(
         let started = std::time::Instant::now();
         let mut cmd = std::process::Command::new(&restic_path);
         cmd.args(["check", "--json"]).env("RESTIC_REPOSITORY", &repo.path);
-        apply_repo_password(&mut cmd, &repo.password);
+        apply_repo_flags(&mut cmd, &repo);
         let output = cmd
             .stdin(std::process::Stdio::null())
             .no_console()
@@ -589,7 +640,9 @@ async fn run_one_prune_attempt(
     let captured_stderr = stderr_thread.join().unwrap_or_default();
 
     if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-        let unlock_repo = FullRepository { path: full.path.clone(), password: full.password.clone() };
+        // A read-only repo never reaches run_one_prune_attempt (ensure_writable refuses
+        // prune_repo/prune_all_repos first), so no lock was ever taken — no unlock needed.
+        let unlock_repo = FullRepository { path: full.path.clone(), password: full.password.clone(), read_only: false };
         let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path.to_string()).await;
         return Ok(PruneAttempt::Cancelled);
     }
@@ -654,8 +707,10 @@ pub async fn prune_all_repos(
             Ok(k) => k,
             Err(e) => break 'body Err(e),
         };
-        let repos = match db.list_repos() {
-            Ok(r) => r,
+        // Read-only repos are skipped rather than failing the whole batch — prune is a
+        // write, so there's nothing to prune on a repo that can't be written to.
+        let repos: Vec<Repository> = match db.list_repos() {
+            Ok(r) => r.into_iter().filter(|r| !r.read_only).collect(),
             Err(e) => break 'body Err(e),
         };
         let total = repos.len();
@@ -778,6 +833,9 @@ pub async fn prune_repo(
             Ok(r) => r,
             Err(e) => break 'body Err(e),
         };
+        if let Err(e) = ensure_writable(&full) {
+            break 'body Err(e);
+        }
         let restic_path = super::get_restic_path(&db);
 
         // `prune` takes restic's exclusive lock — wait for the repo to go idle first (see
@@ -927,9 +985,11 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_from_repo_password, apply_repo_password, last_nonblank_line, parse_stats_json,
-        validate_init_password, validate_restic_path,
+        apply_from_repo_flags, apply_from_repo_password, apply_repo_flags, apply_repo_password,
+        ensure_writable, last_nonblank_line, parse_stats_json, validate_init_password,
+        validate_restic_path, READ_ONLY_REPO_ERROR,
     };
+    use super::super::cache::FullRepository;
 
     // ── validate_init_password ─────────────────────────────────────────────
 
@@ -980,6 +1040,48 @@ mod tests {
         apply_from_repo_password(&mut cmd, "");
         assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
         assert!(!cmd.get_envs().any(|(k, _)| k == "RESTIC_FROM_PASSWORD"));
+    }
+
+    // ── apply_repo_flags / apply_from_repo_flags / ensure_writable ─────────
+
+    #[test]
+    fn apply_repo_flags_omits_no_lock_for_writable_repo() {
+        let mut cmd = std::process::Command::new("restic");
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false };
+        apply_repo_flags(&mut cmd, &repo);
+        assert!(!cmd.get_args().any(|a| a == "--no-lock"));
+    }
+
+    #[test]
+    fn apply_repo_flags_adds_no_lock_for_read_only_repo() {
+        let mut cmd = std::process::Command::new("restic");
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true };
+        apply_repo_flags(&mut cmd, &repo);
+        assert!(cmd.get_args().any(|a| a == "--no-lock"));
+        // Password handling is unaffected by read_only.
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_PASSWORD" && *v == Some(std::ffi::OsStr::new("hunter2"))));
+    }
+
+    #[test]
+    fn apply_from_repo_flags_adds_no_lock_for_read_only_source() {
+        let mut cmd = std::process::Command::new("restic");
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true };
+        apply_from_repo_flags(&mut cmd, &repo);
+        assert!(cmd.get_args().any(|a| a == "--no-lock"));
+        assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
+    }
+
+    #[test]
+    fn ensure_writable_ok_for_writable_repo() {
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false };
+        assert!(ensure_writable(&repo).is_ok());
+    }
+
+    #[test]
+    fn ensure_writable_rejects_read_only_repo() {
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true };
+        assert_eq!(ensure_writable(&repo).unwrap_err(), READ_ONLY_REPO_ERROR);
     }
 
     // ── last_nonblank_line / parse_stats_json ──────────────────────────────

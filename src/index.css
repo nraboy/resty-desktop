@@ -33,10 +33,13 @@
     --tw-green-900: 20 83 45;
     /* Red accent — dark mode originals */
     --tw-red-300: 252 165 165;
+    --tw-red-400: 248 113 113;
     --tw-red-700: 185 28 28;
     --tw-red-900: 127 29 29;
     /* Amber accent — dark mode originals */
     --tw-amber-300: 252 211 77;
+    --tw-amber-400: 251 191 36;
+    --tw-amber-500: 245 158 11;
     --tw-amber-700: 180 83 9;
     --tw-amber-900: 120 53 15;
   }
@@ -65,11 +68,18 @@
     --tw-green-700: 134 239 172;  /* → green-300: medium border on light bg */
     --tw-green-900: 240 253 244;  /* → green-50: very light bg */
     /* Red — dark values for contrast on light backgrounds */
-    --tw-red-300: 153 27 27;      /* → red-800: dark text on light bg */
+    --tw-red-300: 153 27 27;      /* → red-800: dark text on light bg (~7.3:1 on bg ✓) */
+    --tw-red-400: 153 27 27;      /* → red-800: same as 300 — was unmapped, rendering as a
+                                      mid-light red (~3.9:1) directly on white; used for bare
+                                      status text (DiffPage's "removed", "refresh failed") */
     --tw-red-700: 252 165 165;    /* → red-300: medium border on light bg */
     --tw-red-900: 255 241 242;    /* → red-50: very light bg */
     /* Amber — dark values for contrast on light backgrounds */
-    --tw-amber-300: 146 64 14;    /* → amber-800: dark text on light bg */
+    --tw-amber-300: 146 64 14;    /* → amber-800: dark text on light bg (~7.1:1 on bg ✓) */
+    --tw-amber-400: 146 64 14;    /* → amber-800: same as 300 — was unmapped, rendering as
+                                      pastel amber-400 (~1.6:1) directly on white; this is
+                                      what warning text with no colored box behind it uses */
+    --tw-amber-500: 146 64 14;    /* → amber-800: same as 300/400, same reason */
     --tw-amber-700: 217 119 6;    /* → amber-600 */
     --tw-amber-900: 253 230 138;  /* → amber-200: visible warm bg on white */
   }
@@ -97,9 +107,12 @@
       --tw-green-700: 134 239 172;
       --tw-green-900: 240 253 244;
       --tw-red-300: 153 27 27;
+      --tw-red-400: 153 27 27;
       --tw-red-700: 252 165 165;
       --tw-red-900: 255 241 242;
       --tw-amber-300: 146 64 14;
+      --tw-amber-400: 146 64 14;
+      --tw-amber-500: 146 64 14;
       --tw-amber-700: 217 119 6;
       --tw-amber-900: 253 230 138;
     }

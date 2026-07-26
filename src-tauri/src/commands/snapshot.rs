@@ -142,6 +142,12 @@ pub async fn delete_snapshot(
         TaskOrigin::Manual,
         None,
     );
+    // Created before this check so a read-only rejection is still reported through the
+    // task bus (matches apply_retention's/execute_backup's identical treatment).
+    if let Err(e) = super::repo::ensure_writable(&repo) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
     let mut args = vec!["forget".to_string(), snapshot_id.clone()];
     if prune {
         args.push("--prune".to_string());
@@ -184,6 +190,12 @@ pub async fn tag_snapshot(
         TaskOrigin::Manual,
         None,
     );
+    // Created before this check so a read-only rejection is still reported through the
+    // task bus (matches apply_retention's/execute_backup's identical treatment).
+    if let Err(e) = super::repo::ensure_writable(&repo) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
     // `tag` modifies snapshot metadata — exclusive lock, same as forget/prune.
     let _wg = repo_locks.write(&repo.path).await;
 
@@ -408,8 +420,6 @@ pub async fn execute_backup(
 
     let key = master_key.get()?;
     let repo = db.get_full_repo(repo_id, &key)?;
-    let restic_path = super::get_restic_path(db);
-    let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
 
     let task_ctx = OperationCtx::new(
         app.clone(),
@@ -420,6 +430,37 @@ pub async fn execute_backup(
         Some(backup_handle.current_task.clone()),
     );
     let task_progress = task_ctx.progress_emitter();
+
+    // Created before this check (rather than using `?` straight off get_full_repo) so a
+    // read-only rejection is reported through the same task-bus + backup_history +
+    // notification path as a restic-level failure (see the Err branch far below) —
+    // otherwise a scheduled run against a read-only repo would fail with no task event,
+    // no Recent Logs entry, and no notification, and scheduler.rs's `.is_ok()` check
+    // would just silently skip it. Same fix shape as fetch_and_cache_stats (repo.rs) and
+    // apply_retention already use for the identical early-return gap.
+    if let Err(e) = super::repo::ensure_writable(&repo) {
+        task_ctx.failed(e.clone());
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        use rand::Rng;
+        let history_id: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(16)
+            .map(char::from)
+            .collect();
+        let _ = db.log_backup(
+            &history_id, repo_id, plan_id, None, started_at, 0.0, 0, 0, 0, Some(e.as_str()),
+        );
+        let _ = app.emit("backup:history-updated", ());
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app.notification().builder().title("Backup failed").body(&e).show();
+        return Err(e);
+    }
+
+    let restic_path = super::get_restic_path(db);
+    let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -489,6 +530,8 @@ pub async fn execute_backup(
         cmd.args(&args)
             .env("RESTIC_REPOSITORY", &repo_path)
             .env("RESTIC_COMPRESSION", &compression_inner);
+        // ensure_writable above already refuses a read-only repo before this closure is
+        // ever built, so plain apply_repo_password (no --no-lock) is correct here.
         super::repo::apply_repo_password(&mut cmd, &repo_password);
         let mut child = cmd
             .stdin(Stdio::null())
@@ -605,7 +648,9 @@ pub async fn execute_backup(
         // CLAUDE.md's Concurrency section).
         #[allow(clippy::let_underscore_future)]
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock };
+            // ensure_writable already refused this repo if it were read-only, so it's
+            // always writable here — no --no-lock needed.
+            let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock, read_only: false };
             let _ = run_restic_with_path(&repo, vec!["unlock"], &restic_path_for_unlock);
         });
     }
@@ -772,6 +817,13 @@ pub async fn copy_snapshot(
         TaskOrigin::Manual,
         Some(copy_handle.current_task.clone()),
     );
+    // A read-only repo may be a copy *source* (restic honors --no-lock on --from-repo —
+    // see apply_from_repo_flags), but never a *destination*. Created after task_ctx so
+    // the rejection is still reported through the task bus.
+    if let Err(e) = super::repo::ensure_writable(&dest_repo) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
 
     copy_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&copy_handle.child);
@@ -780,6 +832,7 @@ pub async fn copy_snapshot(
     // Stash credentials so we can run `restic unlock` after a cancel-kill.
     let src_path_for_unlock = src_repo.path.clone();
     let src_pass_for_unlock = src_repo.password.clone();
+    let src_read_only_for_unlock = src_repo.read_only;
     let dst_path_for_unlock = dest_repo.path.clone();
     let dst_pass_for_unlock = dest_repo.password.clone();
     let restic_path_for_unlock = restic_path.clone();
@@ -798,8 +851,10 @@ pub async fn copy_snapshot(
         cmd.args(["copy", &snapshot_id])
             .env("RESTIC_REPOSITORY", &dest_repo.path)
             .env("RESTIC_FROM_REPOSITORY", &src_repo.path);
+        // ensure_writable above already refused a read-only dest, so plain
+        // apply_repo_password is correct for it; the source may be read-only.
         super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
-        super::repo::apply_from_repo_password(&mut cmd, &src_repo.password);
+        super::repo::apply_from_repo_flags(&mut cmd, &src_repo);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -860,10 +915,14 @@ pub async fn copy_snapshot(
     } else if copy_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         // The process was killed via SIGKILL and left stale locks on both repos.
         // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
+        // The dest is never read-only (ensure_writable above), but the source might be —
+        // it was opened with --no-lock and so was never locked; skip its unlock.
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
-            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
-            let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+            if !src_read_only_for_unlock {
+                let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock, read_only: false };
+                let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+            }
+            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock, read_only: false };
             let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
         })
         .await;
@@ -912,6 +971,9 @@ pub async fn mirror_repo(
     let key = master_key.get()?;
     let src_repo = db.get_full_repo(&src_repo_id, &key)?;
     let dest_repo = db.get_full_repo(&dest_repo_id, &key)?;
+    // A read-only repo may be a mirror *source* (restic honors --no-lock on --from-repo —
+    // see apply_from_repo_flags), but never a *destination*.
+    super::repo::ensure_writable(&dest_repo)?;
     let restic_path = super::get_restic_path(&db);
 
     let operation_id = new_operation_id();
@@ -938,6 +1000,7 @@ pub async fn mirror_repo(
     // from `db` after the outer command has already returned.
     let src_path_for_unlock = src_repo.path.clone();
     let src_pass_for_unlock = src_repo.password.clone();
+    let src_read_only_for_unlock = src_repo.read_only;
     let dst_path_for_unlock = dest_repo.path.clone();
     let dst_pass_for_unlock = dest_repo.password.clone();
     let restic_path_for_unlock = restic_path.clone();
@@ -1005,8 +1068,10 @@ pub async fn mirror_repo(
             cmd.args(["copy"])
                 .env("RESTIC_REPOSITORY", &dest_repo_inner.path)
                 .env("RESTIC_FROM_REPOSITORY", &src_repo_inner.path);
+            // ensure_writable above already refused a read-only dest, so plain
+            // apply_repo_password is correct for it; the source may be read-only.
             super::repo::apply_repo_password(&mut cmd, &dest_repo_inner.password);
-            super::repo::apply_from_repo_password(&mut cmd, &src_repo_inner.password);
+            super::repo::apply_from_repo_flags(&mut cmd, &src_repo_inner);
             let mut child = cmd
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1067,10 +1132,14 @@ pub async fn mirror_repo(
         } else if cancelled {
             // The process was killed via SIGKILL and left stale locks on both repos.
             // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
+            // The dest is never read-only (ensure_writable above), but the source might be —
+            // it was opened with --no-lock and so was never locked; skip its unlock.
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock };
-                let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock };
-                let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+                if !src_read_only_for_unlock {
+                    let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock, read_only: false };
+                    let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+                }
+                let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock, read_only: false };
                 let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
             })
             .await;
@@ -1123,6 +1192,14 @@ pub async fn unlock_repo(
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
     let task_ctx = OperationCtx::new(app, TaskKind::Unlock, repo_id, None, TaskOrigin::Manual, None);
+    // A read-only repo is opened with --no-lock, so it never takes a lock to begin
+    // with — there's nothing for `unlock` to remove, and the delete it would need to
+    // perform would fail against a genuinely read-only backing store anyway. Created
+    // before this check so the rejection is still reported through the task bus.
+    if let Err(e) = super::repo::ensure_writable(&repo) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
     let result = run_restic_blocking(repo, vec!["unlock".into()], restic_path).await;
     match &result {
         Ok(_) => task_ctx.finished(),
@@ -1219,6 +1296,13 @@ pub fn apply_retention(
             return Err(e);
         }
     };
+    // Defense-in-depth: a read-only repo never reaches here in practice (retention only
+    // ever runs after a successful backup, and execute_backup already refuses one), but
+    // guard explicitly so this fn is safe to call from any future call site too.
+    if let Err(e) = super::repo::ensure_writable(&repo) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
     let restic_path = super::get_restic_path(db);
 
     let args = build_retention_args(tags, paths, retention);

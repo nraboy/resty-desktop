@@ -26,6 +26,7 @@ import {
   renameRepo,
   updateRepoPassword,
   updateRepoPath,
+  updateRepoReadOnly,
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
@@ -69,12 +70,14 @@ export default function RepositoriesPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", path: "", password: "" });
   const [noPassword, setNoPassword] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   const [editTarget, setEditTarget] = useState<Repository | null>(null);
   const [editName, setEditName] = useState("");
   const [editPath, setEditPath] = useState("");
   const [editPassword, setEditPassword] = useState("");
   const [editNoPassword, setEditNoPassword] = useState(false);
+  const [editReadOnly, setEditReadOnly] = useState(false);
   const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -443,12 +446,13 @@ export default function RepositoriesPage() {
       if (modalMode === "init") {
         await initRepo(id, form.name, form.path, form.password);
       } else {
-        await addRepo(id, form.name, form.path, noPassword ? "" : form.password);
+        await addRepo(id, form.name, form.path, noPassword ? "" : form.password, readOnly);
       }
       await load();
       setModalMode(null);
       setForm({ name: "", path: "", password: "" });
       setNoPassword(false);
+      setReadOnly(false);
       if (!isRemoteRepo(form.path)) {
         refreshSnapshots(id).catch(() => {});
         refreshRepoStats(id)
@@ -490,6 +494,9 @@ export default function RepositoriesPage() {
       if (newPassword !== originalPassword) {
         await updateRepoPassword(editTarget.id, newPassword);
       }
+      if (editReadOnly !== editTarget.readOnly) {
+        await updateRepoReadOnly(editTarget.id, editReadOnly);
+      }
       await load();
       setEditTarget(null);
     } finally {
@@ -500,6 +507,7 @@ export default function RepositoriesPage() {
   const openModal = (mode: ModalMode) => {
     setForm({ name: "", path: "", password: "" });
     setNoPassword(false);
+    setReadOnly(false);
     setError("");
     setTestResult(null);
     setPathMode("local");
@@ -514,7 +522,7 @@ export default function RepositoriesPage() {
     setTesting(true);
     setTestResult(null);
     try {
-      await testRepoConnection(form.path, noPassword ? "" : form.password);
+      await testRepoConnection(form.path, noPassword ? "" : form.password, readOnly);
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -710,7 +718,17 @@ export default function RepositoriesPage() {
             >
               <div className="flex items-center gap-3">
                 <div>
-                  <p className="text-sm font-medium text-gray-100">{repo.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-gray-100">{repo.name}</p>
+                    {repo.readOnly && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                        title="Every restic call uses --no-lock; writing operations are disabled."
+                      >
+                        Read-only
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
                 </div>
               </div>
@@ -771,6 +789,7 @@ export default function RepositoriesPage() {
                       setEditPath(repo.path);
                       setEditPassword("");
                       setEditNoPassword(false);
+                      setEditReadOnly(repo.readOnly);
                       setEditTestResult(null);
                       getRepoPassword(repo.id)
                         .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
@@ -787,6 +806,7 @@ export default function RepositoriesPage() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={repos.every((r) => r.id === repo.id || r.readOnly)}
                     onClick={(e) => {
                       e.stopPropagation();
                       // Always starts a fresh picker — no re-adoption of an already-running
@@ -800,7 +820,7 @@ export default function RepositoriesPage() {
                       setMirrorFailureError("");
                     }}
                     className="text-gray-500 hover:text-purple-400"
-                    title="Mirror to another repository"
+                    title={repos.every((r) => r.id === repo.id || r.readOnly) ? "No writable destination repository available" : "Mirror to another repository"}
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -969,6 +989,14 @@ export default function RepositoriesPage() {
               onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
             />
           )}
+          <label className="flex items-center gap-2 text-sm text-gray-400">
+            <input
+              type="checkbox"
+              checked={editReadOnly}
+              onChange={(e) => { setEditReadOnly(e.target.checked); setEditTestResult(null); }}
+            />
+            Read-only repository (--no-lock)
+          </label>
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
@@ -987,7 +1015,7 @@ export default function RepositoriesPage() {
                 setEditTesting(true);
                 setEditTestResult(null);
                 try {
-                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim());
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly);
                   setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
@@ -1093,7 +1121,9 @@ export default function RepositoriesPage() {
                 >
                   <option value="">Select a repository…</option>
                   {repos
-                    .filter((r) => r.id !== mirrorSource?.id)
+                    // A read-only repo may be a mirror source (already filtered out via
+                    // mirrorSource above) but never a destination.
+                    .filter((r) => r.id !== mirrorSource?.id && !r.readOnly)
                     .map((r) => (
                       <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
                     ))}
@@ -1228,6 +1258,7 @@ export default function RepositoriesPage() {
                 setEditPath(repo.path);
                 setEditPassword("");
                 setEditNoPassword(false);
+                setEditReadOnly(repo.readOnly);
                 setEditTestResult(null);
                 getRepoPassword(repo.id)
                   .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
@@ -1236,6 +1267,9 @@ export default function RepositoriesPage() {
             },
             {
               label: "Mirror…",
+              // A read-only repo may still be a mirror *source* — but only if some other,
+              // writable repo exists to be the destination.
+              disabled: repos.every((r) => r.id === contextMenu.repo.id || r.readOnly),
               onClick: () => {
                 // Always starts a fresh picker — see the row button's identical reset above
                 // for why (no re-adoption; the panel covers a backgrounded mirror already).
@@ -1249,11 +1283,12 @@ export default function RepositoriesPage() {
             },
             {
               label: "Prune…",
-              // Prune is single-in-flight app-wide (PruneHandle's busy guard) — disable this
-              // for every repo except the one currently pruning, so a click on a *different*
-              // repo can't silently reopen the modal onto the wrong repo's live progress (the
+              // Prune is a write, so it's unavailable for a read-only repo. Otherwise: prune is
+              // single-in-flight app-wide (PruneHandle's busy guard) — disable this for every
+              // repo except the one currently pruning, so a click on a *different* repo can't
+              // silently reopen the modal onto the wrong repo's live progress (the
               // reset-on-open logic below only skips resetting pruneTarget for that same repo).
-              disabled: pruning && pruneTarget?.id !== contextMenu.repo.id,
+              disabled: contextMenu.repo.readOnly || (pruning && pruneTarget?.id !== contextMenu.repo.id),
               onClick: () => {
                 // Only reset to a fresh confirm screen when nothing is running — a
                 // still-running prune (survived a prior Hide) should reopen into its live
@@ -1353,6 +1388,19 @@ export default function RepositoriesPage() {
                 }}
               />
               No Password (--insecure-no-password)
+            </label>
+          )}
+          {modalMode === "add" && (
+            <label className="flex items-center gap-2 text-sm text-gray-400">
+              <input
+                type="checkbox"
+                checked={readOnly}
+                onChange={(e) => {
+                  setReadOnly(e.target.checked);
+                  setTestResult(null);
+                }}
+              />
+              Read-only repository (--no-lock)
             </label>
           )}
           {testResult && (

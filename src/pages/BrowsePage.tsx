@@ -229,14 +229,23 @@ export default function BrowsePage() {
         {repo && (
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <p className="text-sm text-gray-400">{repo.name}</p>
+            {repo.readOnly && (
+              <span
+                className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                title="Every restic call uses --no-lock; writing operations are disabled."
+              >
+                Read-only
+              </span>
+            )}
             <div className="flex items-center gap-1 flex-wrap">
               {tags.map((tag) => (
                 <span key={tag} className="flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 text-xs rounded bg-gray-800 text-gray-400 border border-gray-700">
                   {tag}
                   <button
                     onClick={() => handleRemoveTag(tag)}
-                    className="text-gray-600 hover:text-red-300 transition-colors leading-none"
-                    title="Remove tag"
+                    disabled={repo.readOnly}
+                    className="text-gray-600 hover:text-red-300 transition-colors leading-none disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-600"
+                    title={repo.readOnly ? "This repository is read-only" : "Remove tag"}
                   >
                     ×
                   </button>
@@ -244,8 +253,9 @@ export default function BrowsePage() {
               ))}
               <button
                 onClick={() => { setNewTag(""); setShowTagModal(true); }}
-                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500 transition-colors"
-                title="Add tag"
+                disabled={repo.readOnly}
+                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-600 disabled:hover:border-gray-700"
+                title={repo.readOnly ? "This repository is read-only" : "Add tag"}
               >
                 + tag
               </button>

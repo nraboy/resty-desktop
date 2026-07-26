@@ -148,6 +148,10 @@ export default function BackupPlansPage() {
     return r && (r.keepLast != null || r.keepDaily != null || r.keepWeekly != null || r.keepMonthly != null || r.keepYearly != null);
   };
 
+  // Backup and retention both write to the repo — unavailable once it's read-only
+  // (or was deleted out from under the plan, matching the existing "no valid repo" case).
+  const planRepoReadOnly = (plan: BackupPlan) => repos.find((r) => r.id === plan.repoId)?.readOnly ?? false;
+
   const openRetentionModal = (plan: BackupPlan) => {
     setRetentionPlan(plan);
     setRetentionError("");
@@ -407,7 +411,8 @@ export default function BackupPlansPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    title="Apply retention policy"
+                    title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : "Apply retention policy"}
+                    disabled={planRepoReadOnly(plan)}
                     onClick={() => openRetentionModal(plan)}
                     className="text-gray-500 hover:text-yellow-400"
                   >
@@ -420,7 +425,8 @@ export default function BackupPlansPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  title="Run backup now"
+                  title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : "Run backup now"}
+                  disabled={planRepoReadOnly(plan)}
                   onClick={() => openBackupModal(plan)}
                   className="text-gray-500 hover:text-green-400"
                 >
@@ -461,10 +467,11 @@ export default function BackupPlansPage() {
             { separator: true },
             {
               label: "Run Backup",
+              disabled: planRepoReadOnly(contextMenu.plan),
               onClick: () => openBackupModal(contextMenu.plan),
             },
             ...(hasRetentionRules(contextMenu.plan)
-              ? [{ label: "Apply Retention Rules", onClick: () => openRetentionModal(contextMenu.plan) }]
+              ? [{ label: "Apply Retention Rules", disabled: planRepoReadOnly(contextMenu.plan), onClick: () => openRetentionModal(contextMenu.plan) }]
               : []),
             { separator: true },
             {

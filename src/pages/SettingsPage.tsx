@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
@@ -48,6 +48,10 @@ export default function SettingsPage() {
   const [pruneRepoName, setPruneRepoName] = useState("");
   const [pruneElapsed, setPruneElapsed] = useState(0);
   const [pruneStopping, setPruneStopping] = useState(false);
+  // Loaded when the modal opens so the confirm/progress text can disclose that
+  // prune_all_repos (repo.rs) silently skips read-only repos rather than pruning them —
+  // otherwise "removes unreferenced data from every repository" would overpromise.
+  const [readOnlyRepoCount, setReadOnlyRepoCount] = useState(0);
   const pruneStartRef = useRef<number>(0);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -634,6 +638,9 @@ export default function SettingsPage() {
             // a still-running prune (survived a prior dismiss) should reopen into its live
             // progress, not a blank confirm screen.
             if (!pruning) resetPruneDisplay();
+            listRepos()
+              .then((repos) => setReadOnlyRepoCount(repos.filter((r) => r.readOnly).length))
+              .catch(() => setReadOnlyRepoCount(0));
             setPruneModalOpen(true);
           }}
         >
@@ -645,9 +652,14 @@ export default function SettingsPage() {
         {!pruneStarted ? (
           <div className="space-y-4">
             <p className="text-sm text-gray-300">
-              This permanently removes unreferenced data from every repository — pack files not
-              tied to any snapshot. It cannot be undone.
+              This permanently removes unreferenced data from every writable repository — pack
+              files not tied to any snapshot. It cannot be undone.
             </p>
+            {readOnlyRepoCount > 0 && (
+              <p className="text-sm text-amber-400">
+                {readOnlyRepoCount} read-only {readOnlyRepoCount === 1 ? "repository is" : "repositories are"} excluded and will not be pruned.
+              </p>
+            )}
             <div className="flex justify-end gap-2">
               <Button variant="secondary" onClick={() => setPruneModalOpen(false)}>Cancel</Button>
               <Button variant="danger" onClick={handlePruneAll}>Prune All</Button>
@@ -658,6 +670,11 @@ export default function SettingsPage() {
             <p className="text-sm text-gray-300">
               All {pruneTotal} {pruneTotal === 1 ? "repository has" : "repositories have"} been pruned successfully.
             </p>
+            {readOnlyRepoCount > 0 && (
+              <p className="text-xs text-gray-500">
+                {readOnlyRepoCount} read-only {readOnlyRepoCount === 1 ? "repository was" : "repositories were"} skipped.
+              </p>
+            )}
             <div className="flex items-center justify-between">
               <p className="text-xs text-gray-500">
                 {pruneElapsed < 60

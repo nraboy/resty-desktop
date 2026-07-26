@@ -35,8 +35,8 @@ export const resetApp = (): Promise<void> =>
 export const listRepos = (): Promise<Repository[]> =>
   invoke("list_repos");
 
-export const addRepo = (id: string, name: string, path: string, password: string): Promise<void> =>
-  invoke("add_repo", { id, name, path, password });
+export const addRepo = (id: string, name: string, path: string, password: string, readOnly: boolean): Promise<void> =>
+  invoke("add_repo", { id, name, path, password, readOnly });
 
 export const removeRepo = (repoId: string): Promise<void> =>
   invoke("remove_repo", { repoId });
@@ -47,6 +47,9 @@ export const renameRepo = (repoId: string, newName: string): Promise<void> =>
 export const updateRepoPath = (repoId: string, newPath: string): Promise<void> =>
   invoke("update_repo_path", { repoId, newPath });
 
+export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<void> =>
+  invoke("update_repo_read_only", { repoId, readOnly });
+
 export const getRepoPassword = (repoId: string): Promise<string> =>
   invoke("get_repo_password", { repoId });
 
@@ -56,8 +59,8 @@ export const updateRepoPassword = (repoId: string, newPassword: string): Promise
 export const initRepo = (id: string, name: string, path: string, password: string): Promise<void> =>
   invoke("init_repo", { id, name, path, password });
 
-export const testRepoConnection = (path: string, password: string): Promise<void> =>
-  invoke("test_repo_connection", { path, password });
+export const testRepoConnection = (path: string, password: string, readOnly: boolean): Promise<void> =>
+  invoke("test_repo_connection", { path, password, readOnly });
 
 export const getRepoStats = (repoId: string): Promise<ResticStats> =>
   invoke("get_repo_stats", { repoId });

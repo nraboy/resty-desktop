@@ -328,16 +328,27 @@ export default function BackupPlanEditPage() {
               className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-8"
             >
               <option value="" disabled>Select a repository…</option>
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} — {r.path}
-                </option>
-              ))}
+              {repos
+                // A backup plan can never target a read-only repo — except the plan's
+                // already-selected repo, kept visible-but-disabled below so an existing
+                // plan whose repo has since become read-only isn't silently dropped.
+                .filter((r) => !r.readOnly || r.id === repoId)
+                .map((r) => (
+                  <option key={r.id} value={r.id} disabled={r.readOnly}>
+                    {r.name} — {r.path}{r.readOnly ? " (read-only)" : ""}
+                  </option>
+                ))}
             </select>
             <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">
               ▾
             </div>
           </div>
+        )}
+        {repos.find((r) => r.id === repoId)?.readOnly && (
+          <p className="text-sm text-amber-400 mt-2">
+            This plan's repository is marked read-only — backups can't run until you either
+            select a different repository or clear the read-only flag on Repositories.
+          </p>
         )}
       </div>
 

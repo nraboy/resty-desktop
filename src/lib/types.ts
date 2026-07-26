@@ -2,6 +2,11 @@ export interface Repository {
   id: string;
   name: string;
   path: string;
+  /** When true, every restic call for this repo carries --no-lock and every
+   * write-type command (backup, forget/retention, prune, tag, delete, unlock,
+   * being a mirror/copy destination) is refused — see CLAUDE.md's Restic
+   * Integration section. A read-only repo may still be a mirror/copy *source*. */
+  readOnly: boolean;
 }
 
 const REMOTE_PREFIXES = ["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];

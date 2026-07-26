@@ -18,11 +18,14 @@ export default {
         },
         red: {
           300: "rgb(var(--tw-red-300) / <alpha-value>)",
+          400: "rgb(var(--tw-red-400) / <alpha-value>)",
           700: "rgb(var(--tw-red-700) / <alpha-value>)",
           900: "rgb(var(--tw-red-900) / <alpha-value>)",
         },
         amber: {
           300: "rgb(var(--tw-amber-300) / <alpha-value>)",
+          400: "rgb(var(--tw-amber-400) / <alpha-value>)",
+          500: "rgb(var(--tw-amber-500) / <alpha-value>)",
           700: "rgb(var(--tw-amber-700) / <alpha-value>)",
           900: "rgb(var(--tw-amber-900) / <alpha-value>)",
         },

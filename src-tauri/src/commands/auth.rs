@@ -66,12 +66,18 @@ pub async fn unlock_app(
         };
         let restic_path = super::get_restic_path(&db);
         for repo in repos {
+            // A read-only repo is opened with --no-lock (see repo::apply_repo_flags), so it
+            // never took a lock in the first place, and `restic unlock` would just fail
+            // against its read-only backing store. Nothing to clean up.
+            if repo.read_only {
+                continue;
+            }
             if let Ok(full) = db.get_full_repo(&repo.id, &key) {
                 let path = full.path.clone();
                 let pass = full.password.clone();
                 let rp = restic_path.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    let fr = FullRepository { path, password: pass };
+                    let fr = FullRepository { path, password: pass, read_only: false };
                     let _ = run_restic_with_path(&fr, vec!["unlock"], &rp);
                 })
                 .await;

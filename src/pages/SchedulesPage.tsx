@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getTrayEnabled, listSchedules, removeSchedule, toggleSchedule } from "../lib/invoke";
-import type { Schedule } from "../lib/types";
+import { getTrayEnabled, listBackupPlans, listRepos, listSchedules, removeSchedule, toggleSchedule } from "../lib/invoke";
+import type { BackupPlan, Repository, Schedule } from "../lib/types";
 import { formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
@@ -13,6 +13,11 @@ export default function SchedulesPage() {
   const [loading, setLoading] = useState(true);
   const [trayEnabled, setTrayEnabled] = useState(true);
   const [error, setError] = useState("");
+  // Loaded solely to detect a schedule whose plans target a now-read-only repo — a
+  // scheduled backup against one will fail (execute_backup's ensure_writable guard), so
+  // it's surfaced here the same way the tray-disabled warning is.
+  const [plans, setPlans] = useState<BackupPlan[]>([]);
+  const [repos, setRepos] = useState<Repository[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<Schedule | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
@@ -43,7 +48,17 @@ export default function SchedulesPage() {
   useEffect(() => {
     load();
     getTrayEnabled().then(setTrayEnabled).catch(() => {});
+    listBackupPlans().then(setPlans).catch(() => {});
+    listRepos().then(setRepos).catch(() => {});
   }, []);
+
+  // True if any of this schedule's plans target a repo that's currently marked read-only.
+  const scheduleHasReadOnlyRepo = (sched: Schedule) =>
+    sched.planIds.some((planId) => {
+      const plan = plans.find((p) => p.id === planId);
+      if (!plan) return false;
+      return repos.find((r) => r.id === plan.repoId)?.readOnly ?? false;
+    });
 
   const handleToggle = async (sched: Schedule) => {
     setToggling(sched.id);
@@ -243,6 +258,11 @@ export default function SchedulesPage() {
                   <span>Last run: {formatTimestamp(sched.lastRunAt)}</span>
                   <span>Next run: {sched.enabled ? formatTimestamp(sched.nextRunAt) : "—"}</span>
                 </div>
+                {scheduleHasReadOnlyRepo(sched) && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    One of this schedule's plans targets a read-only repository — that backup will fail.
+                  </p>
+                )}
               </div>
 
               {!selectMode && (

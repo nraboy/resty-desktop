@@ -51,6 +51,10 @@ struct ExportRepo {
     name: String,
     path: String,
     password: EncSecret,
+    /// Added after bundle v1 shipped — defaults to `false` so older exports (which
+    /// predate the read-only feature) still import cleanly as writable repos.
+    #[serde(default)]
+    read_only: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +196,7 @@ pub fn export_data(
                 name: r.name.clone(),
                 path: r.path.clone(),
                 password,
+                read_only: r.read_only,
             });
         }
     }
@@ -351,6 +356,7 @@ pub fn import_data(
             path: r.path.clone(),
             password_nonce: nonce,
             password_ciphertext: ciphertext,
+            read_only: r.read_only,
         });
     }
 
@@ -611,6 +617,8 @@ pub fn import_backrest_config(
             path: r.uri.clone(),
             password_nonce: nonce,
             password_ciphertext: ciphertext,
+            // Backrest has no read-only concept — every imported repo starts writable.
+            read_only: false,
         });
     }
 

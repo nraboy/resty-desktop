@@ -105,6 +105,12 @@ src/
   pages/
     AuthPage.tsx            # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx    # Add/open/delete repos; restic init for new repos; remote URL support;
+                            #   "Read-only repository (--no-lock)" checkbox in the add modal (next to the
+                            #   existing "No Password" checkbox) and the edit modal (dirty-checked like
+                            #   name/path/password, via updateRepoReadOnly); a "Read-only" pill badge on the
+                            #   row; read-only repos are excluded from every mirror/copy destination picker
+                            #   (never as a source) and "Prune…"/row Mirror button are disabled accordingly
+                            #   (see Restic Integration for the backend policy);
                             #   per-row and bulk stats refresh (manual-only — no auto-eviction; see Restic
                             #   Integration; "Refresh All" always includes remote repos, unlike every
                             #   automatic remote activity); spinner (statsRefreshing) and failure marker
@@ -163,9 +169,18 @@ src/
                             #   "Index Snapshot" shows a progress modal; listens for `task` events (kind "index") to
                             #   update per-row status map live; listens for snapshots:refreshed to reload list when
                             #   warmer updates cache;
-                            #   per-row and context-menu "Search Files" button → SearchPage
+                            #   per-row and context-menu "Search Files" button → SearchPage;
+                            #   a "Read-only" pill badge next to the repo name when repo.readOnly; delete, tag
+                            #   add/remove, Unlock, and bulk delete are disabled (with a tooltip) for a read-only
+                            #   repo — restore/browse/search/check/refresh stay enabled since they're reads; the
+                            #   copy-destination list (row button, context item, bulk "Copy selected") is filtered
+                            #   to writable repos only via the otherRepos memo (a read-only repo may be a copy
+                            #   *source*, never a destination — see CLAUDE.md's Restic Integration section)
     BrowsePage.tsx          # File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav;
-                            #   restore modal with strip_leading_path option; inline tag management;
+                            #   restore modal with strip_leading_path option; inline tag management (add/remove
+                            #   disabled, with a tooltip, when repo.readOnly — restore itself stays enabled since
+                            #   it writes to the local filesystem, not the repo); a "Read-only" pill badge next to
+                            #   the repo name when repo.readOnly;
                             #   "Search" button navigates to SearchPage, passing returnPath+returnStack so back
                             #   navigation can restore the current directory depth; accepts initialPath+initialPathStack
                             #   from SearchPage so "open in browser" lands at the right directory;
@@ -201,17 +216,38 @@ src/
                             #   (cancelling shows a local "Stopping…" state, then reverts to the Start Backup
                             #   view — no distinct "cancelled" UI block, matching cancel_backup's own behavior);
                             #   auto-applies retention after successful backup; per-plan Apply Retention button;
-                            #   pre-flight FDA check before running: warns if plan includes protected paths and FDA not granted (macOS only)
+                            #   pre-flight FDA check before running: warns if plan includes protected paths and FDA not granted (macOS only);
+                            #   Run Backup / Apply Retention Rules (row buttons and context items) disabled, with
+                            #   a tooltip, for any plan whose repo is currently read-only (planRepoReadOnly) —
+                            #   execute_backup would refuse it anyway (see Restic Integration), this just avoids
+                            #   the round-trip
     BackupPlanEditPage.tsx  # Create/edit plan (name, repo, paths, tags, excludes, retention, bandwidth limits);
                             #   exclude patterns: Simple tab (tag list + presets) / Expert tab (freeform textarea);
-                            #   amber FDA warning suppressed when FDA is confirmed granted (macOS only)
-    SchedulesPage.tsx       # List schedules; toggle/delete/run; amber warning when tray disabled
-    ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation
+                            #   amber FDA warning suppressed when FDA is confirmed granted (macOS only);
+                            #   the repo <select> excludes read-only repos, except the plan's own already-selected
+                            #   repo (kept visible but disabled, "(read-only)" suffix) so an existing plan whose
+                            #   repo has since become read-only isn't silently dropped from the list — shown with
+                            #   an inline amber warning below the select in that case
+    SchedulesPage.tsx       # List schedules; toggle/delete/run; amber warning when tray disabled; a second amber
+                            #   warning per schedule row when any of its plans (via planIds → BackupPlan.repoId)
+                            #   targets a read-only repo — that plan's backup will fail on every run, the rest of
+                            #   the schedule is unaffected (scheduleHasReadOnlyRepo; loads listBackupPlans +
+                            #   listRepos once on mount for this check)
+    ScheduleEditPage.tsx    # Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation;
+                            #   each plan row in the picker shows a "Read-only repo" badge when its repo is
+                            #   read-only; selecting one shows an amber warning below the picker (scoped to
+                            #   currently-*selected* plans via selectedReadOnlyPlans, not just any read-only-badged
+                            #   plan in the full list) stating that plan's backup will fail, not the whole schedule;
+                            #   "Delete Schedule" is a danger-variant Button (not a bare link) on the right of the
+                            #   Save/Cancel row, matching BackupPlanEditPage's layout
     LogsPage.tsx            # Backup history log; paginated (PAGE_SIZE=10); expandable error rows (only for a
                             #   real failure — a CANCELLED_BACKUP_ERROR entry renders a neutral "Cancelled"
                             #   glyph instead of the red error icon, and isn't expandable)
     SettingsPage.tsx        # Theme selector; tray + auto-indexing + remote-auto-refresh toggles; restic binary path;
-                            #   compression selector; default restore path; prune all repos with streaming progress;
+                            #   compression selector; default restore path; prune all repos with streaming progress
+                            #   (read-only repos are excluded — repo.rs's prune_all_repos skips them rather than
+                            #   failing the batch; the confirm/done screens fetch and display the excluded count
+                            #   via listRepos() so that's disclosed rather than silent);
                             #   import/export card (ImportExportCard);
                             #   cache management: "Clean Orphaned" (remove stale rows) + "Clear All Cache" (wipe + VACUUM);
                             #   DB size display (app_data.db + WAL) refreshes after each cache operation;
@@ -423,6 +459,7 @@ src-tauri/
 - `check_repo` runs `restic check --json`; duration measured via `Instant` (no timing in summary). Returns `CheckResult { success, errors, duration_seconds }`.
 - `restore_snapshot` streams `restic restore --json`; emits `restore:progress` events. Stderr drained on background thread. Serialized via a `busy` flag on `RestoreHandle` (same pattern as `BackupHandle`) — a concurrent attempt returns `"A restore is already in progress"`. Cancellable via `cancel_restore`; on cancel, a successful exit still wins over the cancelled flag (handles the race where Stop is clicked right as the restore finishes).
 - `unlock_app` runs `restic unlock` on all repos in background after password verified.
+- A repository can be marked **read-only** (`Repository.read_only` / `FullRepository.read_only`) for repos backed by a genuinely read-only filesystem or mount. `repo::apply_repo_flags`/`apply_from_repo_flags` (extending `apply_repo_password`/`apply_from_repo_password`) append restic's own `--no-lock` flag whenever the repo is read-only — this is the single choke point every read-type call goes through (`run_restic_with_path`, `check_repo`, `prune`), so no other call site needs to know about it. Every write-type command (`execute_backup`, `delete_snapshot`, `tag_snapshot`, `apply_retention`, `prune_repo`/`prune_all_repos`, `unlock_repo`, and `copy_snapshot`/`mirror_repo` on the **destination** side) instead calls `repo::ensure_writable(&repo)` immediately after resolving the `FullRepository` and refuses with `READ_ONLY_REPO_ERROR` — restic's own lock semantics make `--no-lock` safe only for reads, so a write path is refused outright rather than relying on restic to reject it. A read-only repo may still be a mirror/copy **source** (`apply_from_repo_flags` on the `--from-repo` side) — restic's `copy` opens the source under `--no-lock` and the destination normally, so rescuing snapshots off a read-only archive into a writable repo works. `prune_all_repos` skips read-only repos rather than failing the batch. Cancel-path `restic unlock` calls (and the `unlock_app` sweep) are skipped for a read-only repo — it was opened with `--no-lock`, so it never held a lock to clear, and the unlock's own delete would fail against a genuinely read-only backing store.
 - Stats cache (`repo_stats_cache`) is **never auto-evicted** — not after backup, forget/retention, copy, mirror, or snapshot delete. It only changes via the Refresh row/Refresh All buttons on RepositoriesPage (`refresh_repo_stats`), which is a deliberate, user-driven-only model (the previous event-driven eviction made the page feel like it "refreshed at random" — same page, different states, for reasons the user never triggered). A failed refresh leaves the last-good cached value in place. Each row shows the cached value's `cached_at` as a "Refreshed …" label (see `ResticStats.cached_at`, `repo_stats_cache.cached_at`).
 
 ## Concurrency: Per-Repository Lock Registry
@@ -768,7 +805,7 @@ the exact camelCase JSON shape) plus the shared TypeScript types keeping the two
 
 ## Persistence & Caching
 
-- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `indexed_snapshots`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`.
+- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `indexed_snapshots`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`. `repositories.read_only` (`INTEGER NOT NULL DEFAULT 0`) is an additive column (idempotent `ALTER TABLE ... ADD COLUMN`, same pattern as `backup_plans.limit_upload`/`limit_download`) — every existing repo stays writable on upgrade; see Restic Integration for what it does.
 - Browse cache is relational (v0→v1 migration): `browse_cache_files` stores the file tree keyed by `(snap, parent_path)`; `browse_cache_status` tracks index state per `(repo_id, snapshot_id)` as `pending`/`in_progress`/`complete`, plus a per-snapshot `cached_at`. Replaces the old JSON-blob `browse_cache`.
 - v1→v2 migration (storage optimization): `browse_cache_files.snapshot_id` (64-char hex, duplicated across the row and both its indexes) is interned to a small integer `snap` via a new `indexed_snapshots(id, snapshot_id UNIQUE)` table — `AppDb::intern_snapshot`/`snap_id_of` map hex↔int internally; all public `AppDb` methods still take the hex `snapshot_id`. The redundant `name` column (recomputed from `path` via `cache::name_of` on read) and the per-row `cached_at` (moved to `browse_cache_status`, one value per snapshot) were also dropped. Cache tables are disposable (rebuilt via `restic ls`), so this migration drops + recreates them rather than transforming data.
 - `list_snapshots` returns from cache only, via `AppDb::get_snapshots_vec` (rows parsed straight into `Vec<Snapshot>` — no intermediate JSON-string serialize/parse round-trip); `refresh_snapshots` calls restic and updates cache.
@@ -890,11 +927,12 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 - Import always creates **fresh copies**: new UUIDs minted Rust-side, refs remapped, names de-duplicated with a `" (imported)"` suffix; schedule timing reset (`next_run_at` recomputed via `schedule::next_fire_time`, `created_at = now`). Imported schedules are **always disabled** (`enabled = false`) regardless of their source state, so backups don't fire before the user reviews paths on the new host. All inserts run in one transaction via `AppDb::import_bundle` (all-or-nothing). Paths are imported verbatim — the import preview warns they may not exist on the new machine.
 - Dangling references are tolerated, never fatal: a plan whose repo isn't in the file (orphaned by a repo deletion) imports with `repo_id = ""` (reassign in the editor); schedule refs to absent plans are dropped. So a plan with no valid repo still round-trips with its config intact.
 - `preview_import` returns counts without a passphrase (only secrets are encrypted); it verifies the passphrase early only if one is supplied.
+- `ExportRepo.readOnly` (`#[serde(default)]`) round-trips a repo's read-only flag; the field is additive so a bundle exported before this feature still imports cleanly (`readOnly: false`), with no bundle `version` bump needed.
 
 ### Backrest import (one-way)
 
 - `preview_backrest_import`/`import_backrest_config` import a Backrest (`github.com/garethgeorge/backrest`) `config.json` as fresh copies (same fresh-UUID + `" (imported)"` dedup + `import_bundle` transaction path). No export passphrase: Backrest stores repo passwords in plaintext (`password` field, or `RESTIC_PASSWORD=` in `env`), which are re-encrypted under the local master key.
-- Mapping: repo `uri`→`path`, repo `id`→`name`; plan `repo`→`repoId`, `iexcludes` folded into `excludes`; retention oneof (`policyKeepLastN`/`policyTimeBucketed`)→`RetentionPolicy`; Backrest's per-plan embedded `schedule.cron` becomes one Resty `Schedule` per plan (disabled/`maxFrequency*` schedules dropped).
+- Mapping: repo `uri`→`path`, repo `id`→`name`; plan `repo`→`repoId`, `iexcludes` folded into `excludes`; retention oneof (`policyKeepLastN`/`policyTimeBucketed`)→`RetentionPolicy`; Backrest's per-plan embedded `schedule.cron` becomes one Resty `Schedule` per plan (disabled/`maxFrequency*` schedules dropped). Backrest has no read-only concept, so every imported repo starts writable (`readOnly: false`).
 - **Lossy by design** — silently dropped: hooks, restic `flags`/`env`, `commandPrefix`, repo `prunePolicy`/`checkPolicy`, `skipIfUnchanged`/`autoUnlock`/`autoInitialize`, `clock`, multihost/auth, hourly retention, plan tags (Backrest auto-tags), bandwidth limits. The import preview shows a generic "not everything will carry over" warning. All Backrest structs use `#[serde(default)]` so partial/older configs still parse.
 
 ## Adding a New Feature
@@ -910,20 +948,37 @@ Three modes: Dark (default), Light, System. Stored in `localStorage`; applied as
 
 All theme-sensitive colors route through CSS custom properties in `src/index.css`. Extended in `tailwind.config.js`:
 ```
-gray.50–950, blue.300/400/700/900, green.400
+gray.50–950, blue.300/400/700/900, green.300/400/700/900, red.300/400/700/900, amber.300/400/500/700/900
 ```
 `:root` = dark defaults. `html.light` and `@media (prefers-color-scheme: light) html.system` override with light palette (slate family, reversed).
 
 ### Adding a themed color
-1. Add `--tw-<color>-<shade>: <R> <G> <B>;` to `:root` and `html.light` in `src/index.css`.
+1. Add `--tw-<color>-<shade>: <R> <G> <B>;` to `:root` and `html.light` (and the `system`
+   media-query block — all three must stay in sync, `light` and `system`'s light branch use
+   identical values) in `src/index.css`.
 2. Extend `tailwind.config.js` under `theme.extend.colors`.
 3. Use `text-<color>-<shade>` / `bg-<color>-<shade>` as usual.
+4. **Verify contrast in light mode, not just that it compiles.** A shade left out of the
+   `:root`/`html.light` pair silently falls through to Tailwind's raw default value — tuned
+   for a dark background — in *every* theme, including light. This is exactly what happened
+   with `amber-400`/`amber-500`: `amber-300`/`700`/`900` were mapped, but warning text using
+   the (very common) `text-amber-400`/`text-amber-500` classes rendered as a pastel amber
+   (~1.6:1 contrast) directly on a white page background — invisible in light mode. Fixed by
+   mapping `amber-400`/`amber-500` to the same darkened accent already used for `amber-300`
+   in light mode (`146 64 14`, ~7.1:1) — the same "collapse related shades to one corrected
+   accent value" trick `blue-300`/`blue-400` already use (both map to `29 78 216` in light
+   mode). When adding a *new* shade of an already-mapped color, do the same: reuse the
+   existing light-mode value for that hue rather than leaving the shade unmapped.
 
 ### Hardcoded colors to avoid
 - `text-white` on gray backgrounds → use `text-gray-50` (remaps to near-black in light mode).
 - `hover:text-white` on interactive elements → use `hover:text-gray-50`.
 - `bg-red-700` for buttons → theme-mapped, becomes pastel pink in light mode. Use `bg-red-600 hover:bg-red-800`.
-- Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface.
+- Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface, where the surface itself (not the page background) sets the contrast context.
+- Amber/red/green/blue text used **without** a colored box behind it (a bare warning line, an
+  inline status label) must use a mapped shade (`amber-300/400/500`, `red-300/400`, `green-300/400`,
+  `blue-300/400`) — never an unmapped shade like `amber-600` or `red-500` — since that text sits
+  directly on the page background, which flips between near-black and white across themes.
 
 ## Versioning
 

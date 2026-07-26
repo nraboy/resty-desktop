@@ -119,6 +119,12 @@ This GUI wrapper for Restic was created by [Nic Raboy](https://www.nraboy.com). 
 - [PayPal](https://paypal.me/nraboy)
 - [Square Cash](https://cash.app/$nraboy)
 
+## Open Source & No Warranty
+
+Resty Desktop is free and open source software, built and maintained in the developer's spare time. It's provided as-is, without warranty of any kind — the developer is not responsible for any loss or damage to your repositories or data that may result from using it. As with any backup tool, it's a good idea to verify your backups and test restores independently.
+
+This is also a passion project rather than a supported product: there's no dedicated support channel, and the developer isn't able to offer personal, one-on-one help. Bug reports and contributions are always welcome through [GitHub Issues](https://github.com/nraboy/resty-desktop/issues) and pull requests.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

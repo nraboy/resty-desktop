@@ -42,10 +42,12 @@ pub struct BackupHistoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Repository {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,11 @@ pub struct FullRepository {
     #[zeroize(skip)]
     pub path: String,
     pub password: String,
+    /// Mirrors `Repository::read_only` — carried here so every restic call site that
+    /// already holds a `FullRepository` can apply `--no-lock` without a second DB lookup.
+    /// See `repo::apply_repo_flags`.
+    #[zeroize(skip)]
+    pub read_only: bool,
 }
 
 // ── copy cancellation handle ──────────────────────────────────────────────
@@ -436,7 +443,8 @@ impl AppDb {
                 name                TEXT NOT NULL,
                 path                TEXT NOT NULL,
                 password_nonce      BLOB NOT NULL,
-                password_ciphertext BLOB NOT NULL
+                password_ciphertext BLOB NOT NULL,
+                read_only           INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS backup_plans (
                 id              TEXT PRIMARY KEY,
@@ -523,6 +531,9 @@ impl AppDb {
         // Migrations for existing installs — silently ignored if columns already exist.
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;");
         let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
+        );
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
             "UPDATE browse_cache_status SET status = 'pending' WHERE status = 'in_progress';",
@@ -579,7 +590,7 @@ impl AppDb {
     pub fn list_repos(&self) -> Result<Vec<Repository>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, path FROM repositories ORDER BY rowid")
+            .prepare("SELECT id, name, path, read_only FROM repositories ORDER BY rowid")
             .map_err(|e| e.to_string())?;
         let repos = stmt
             .query_map([], |row| {
@@ -587,6 +598,7 @@ impl AppDb {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     path: row.get(2)?,
+                    read_only: row.get::<_, i64>(3)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -596,10 +608,10 @@ impl AppDb {
     }
 
     pub fn get_full_repo(&self, repo_id: &str, key: &[u8; 32]) -> Result<FullRepository, String> {
-        let (path, nonce, ciphertext) = {
+        let (path, nonce, ciphertext, read_only) = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT path, password_nonce, password_ciphertext
+                "SELECT path, password_nonce, password_ciphertext, read_only
                  FROM repositories WHERE id = ?1",
                 params![repo_id],
                 |row| {
@@ -607,6 +619,7 @@ impl AppDb {
                         row.get::<_, String>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)? != 0,
                     ))
                 },
             )
@@ -614,7 +627,7 @@ impl AppDb {
         };
         let password_bytes = crypto::decrypt(key, &nonce, &ciphertext)?;
         let password = String::from_utf8(password_bytes).map_err(|e| e.to_string())?;
-        Ok(FullRepository { path, password })
+        Ok(FullRepository { path, password, read_only })
     }
 
     pub fn add_repo(
@@ -624,12 +637,13 @@ impl AppDb {
         path: &str,
         nonce: &[u8],
         ciphertext: &[u8],
+        read_only: bool,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, name, path, nonce, ciphertext],
+            "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext, read_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, path, nonce, ciphertext, read_only],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -699,6 +713,16 @@ impl AppDb {
         conn.execute(
             "UPDATE repositories SET path = ?1 WHERE id = ?2",
             params![new_path, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_repo_read_only(&self, repo_id: &str, read_only: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET read_only = ?1 WHERE id = ?2",
+            params![read_only, repo_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1933,9 +1957,9 @@ impl AppDb {
 
         for r in repos {
             tx.execute(
-                "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![r.id, r.name, r.path, r.password_nonce, r.password_ciphertext],
+                "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext, read_only)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![r.id, r.name, r.path, r.password_nonce, r.password_ciphertext, r.read_only],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -1989,6 +2013,7 @@ pub struct ImportRepo {
     pub path: String,
     pub password_nonce: Vec<u8>,
     pub password_ciphertext: Vec<u8>,
+    pub read_only: bool,
 }
 
 fn timestamp() -> i64 {
@@ -2351,7 +2376,7 @@ mod tests {
 
     fn add_repo_encrypted(db: &AppDb, id: &str, name: &str, path: &str, password: &str, key: &[u8; 32]) {
         let (nonce, ct) = super::crypto::encrypt(key, password.as_bytes()).unwrap();
-        db.add_repo(id, name, path, &nonce, &ct).unwrap();
+        db.add_repo(id, name, path, &nonce, &ct, false).unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { describeCronExpr, listBackupPlans, listSchedules, removeSchedule, saveSchedule } from "../lib/invoke";
-import type { BackupPlan, Schedule, ScheduleFrequency } from "../lib/types";
+import { describeCronExpr, listBackupPlans, listRepos, listSchedules, removeSchedule, saveSchedule } from "../lib/invoke";
+import type { BackupPlan, Repository, Schedule, ScheduleFrequency } from "../lib/types";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -74,6 +74,9 @@ export default function ScheduleEditPage() {
   const isNew = scheduleId === "new";
 
   const [plans, setPlans] = useState<BackupPlan[]>([]);
+  // Loaded solely to badge a plan's repo as read-only in the picker below — a schedule
+  // has no repoId of its own (see SchedulesPage.tsx's identical scheduleHasReadOnlyRepo).
+  const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -99,11 +102,13 @@ export default function ScheduleEditPage() {
   useEffect(() => {
     const init = async () => {
       try {
-        const [allPlans, allSchedules] = await Promise.all([
+        const [allPlans, allSchedules, allRepos] = await Promise.all([
           listBackupPlans(),
           listSchedules(),
+          listRepos(),
         ]);
         setPlans(allPlans);
+        setRepos(allRepos);
         if (!isNew) {
           const existing = allSchedules.find((s) => s.id === scheduleId);
           if (existing) {
@@ -154,6 +159,13 @@ export default function ScheduleEditPage() {
       prev.includes(planId) ? prev.filter((id) => id !== planId) : [...prev, planId]
     );
   };
+
+  // Currently-selected plans whose repo is read-only — these are the ones that will
+  // actually fail if this schedule is saved as-is (see execute_backup's ensure_writable
+  // guard, snapshot.rs), not just any read-only-badged plan in the full list above.
+  const selectedReadOnlyPlans = plans.filter(
+    (plan) => selectedPlanIds.includes(plan.id) && (repos.find((r) => r.id === plan.repoId)?.readOnly ?? false)
+  );
 
   const handleSave = async () => {
     setError("");
@@ -250,7 +262,17 @@ export default function ScheduleEditPage() {
                     className="rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-900"
                   />
                   <div>
-                    <p className="text-sm text-gray-200">{plan.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm text-gray-200">{plan.name}</p>
+                      {repos.find((r) => r.id === plan.repoId)?.readOnly && (
+                        <span
+                          className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                          title="This plan's repository is read-only — scheduled backups against it will fail."
+                        >
+                          Read-only repo
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-gray-500">
                       {plan.paths.length} {plan.paths.length === 1 ? "path" : "paths"}
                     </p>
@@ -258,6 +280,14 @@ export default function ScheduleEditPage() {
                 </label>
               ))}
             </div>
+          )}
+          {selectedReadOnlyPlans.length > 0 && (
+            <p className="text-sm text-amber-400 mt-2">
+              One or more of the selected plans target a read-only repository — every time this
+              schedule runs, those plans' backups will fail (the rest of the schedule still runs
+              normally), until you either pick a different repository for them or clear their
+              read-only flag on Repositories.
+            </p>
           )}
         </div>
 
@@ -443,24 +473,19 @@ export default function ScheduleEditPage() {
 
         {/* Actions */}
         <div className="flex items-center justify-between pt-2">
-          <div>
-            {!isNew && (
-              <button
-                onClick={() => setShowDelete(true)}
-                className="text-sm text-red-300 hover:text-red-300 transition-colors"
-              >
-                Delete schedule
-              </button>
-            )}
-          </div>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => navigate("/schedules")}>
-              Cancel
-            </Button>
             <Button loading={saving} onClick={handleSave}>
               {isNew ? "Create Schedule" : "Save Changes"}
             </Button>
+            <Button variant="secondary" onClick={() => navigate("/schedules")} disabled={saving}>
+              Cancel
+            </Button>
           </div>
+          {!isNew && (
+            <Button variant="danger" onClick={() => setShowDelete(true)}>
+              Delete Schedule
+            </Button>
+          )}
         </div>
       </div>
 

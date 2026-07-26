@@ -298,6 +298,7 @@ pub async fn restore_snapshot(
 
     let repo_path = repo.path.clone();
     let repo_password = repo.password.clone();
+    let repo_read_only = repo.read_only;
     let repo_id_inner = repo_id.clone();
 
     let task_ctx = OperationCtx::new(
@@ -334,6 +335,9 @@ pub async fn restore_snapshot(
         cmd.args(["restore", &snapshot_id, "--target", &target_dir, "--json"])
             .env("RESTIC_REPOSITORY", &repo_path);
         super::repo::apply_repo_password(&mut cmd, &repo_password);
+        if repo_read_only {
+            cmd.arg("--no-lock");
+        }
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -406,10 +410,14 @@ pub async fn restore_snapshot(
         if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
             // The process was killed via SIGKILL and left a stale lock on the repo.
             // We're already on a blocking thread, so it's safe to unlock inline here —
-            // wait() above has already reaped the killed process.
-            use super::cache::FullRepository;
-            let unlock_repo = FullRepository { path: repo_path.clone(), password: repo_password.clone() };
-            let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path);
+            // wait() above has already reaped the killed process. A read-only repo was
+            // opened with --no-lock above, so no lock was ever taken — skip the unlock,
+            // which would fail against a genuinely read-only backing store anyway.
+            if !repo_read_only {
+                use super::cache::FullRepository;
+                let unlock_repo = FullRepository { path: repo_path.clone(), password: repo_password.clone(), read_only: false };
+                let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path);
+            }
             return Err("cancelled".to_string());
         }
 
@@ -582,6 +590,7 @@ pub async fn index_snapshot(
 
         let repo_path = repo.path.clone();
         let repo_pass = repo.password.clone();
+        let repo_ro = repo.read_only;
         let snap_id = snapshot_id.clone();
         let repo_id2 = repo_id.clone();
         let rp = restic_path.clone();
@@ -592,6 +601,7 @@ pub async fn index_snapshot(
             let tmp_repo = super::cache::FullRepository {
                 path: repo_path,
                 password: repo_pass,
+                read_only: repo_ro,
             };
             let db_inner = app.state::<AppDb>();
             let repo_locks_inner = app.state::<RepoLocks>();
@@ -821,6 +831,7 @@ pub async fn index_snapshots_batch(
 
                 let repo_path = repo.path.clone();
                 let repo_pass = repo.password.clone();
+                let repo_ro = repo.read_only;
                 let snap_id = snapshot_id.clone();
                 let repo_id2 = repo_id.clone();
                 let rp = restic_path.clone();
@@ -831,6 +842,7 @@ pub async fn index_snapshots_batch(
                     let tmp_repo = super::cache::FullRepository {
                         path: repo_path,
                         password: repo_pass,
+                        read_only: repo_ro,
                     };
                     let db_inner = app2.state::<AppDb>();
                     let repo_locks_inner = app2.state::<RepoLocks>();
