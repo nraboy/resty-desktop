@@ -1,5 +1,6 @@
 mod cache_warmer;
 mod commands;
+mod gpu_compat;
 mod scheduler;
 mod tasks;
 
@@ -138,6 +139,8 @@ fn activate_tray(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    gpu_compat::apply();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app);

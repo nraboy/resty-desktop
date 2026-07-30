@@ -929,6 +929,15 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   memory ceiling is unchanged from post-v0.2.1. Do not "simplify" by giving `gate` per-batch scope
   to let batches truly run in parallel; that reopens the exact incident this mutex exists to
   prevent.
+- **`gpu_compat::apply()`'s NVIDIA + Wayland detection is gated on purpose, not left
+  unconditional.** See Linux GPU Compatibility. The straightforward fix would be to always set
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` on Linux — simpler code, no detection logic to maintain —
+  but Tauri's own docs warn that doing so "disables a faster path for everyone, including users
+  on working setups," and this app has no reason to slow down Intel/AMD or X11 users to fix an
+  NVIDIA/Wayland-specific bug. Don't collapse the gate to "just always set it on Linux" without
+  revisiting that trade-off. Also don't add `WEBKIT_DISABLE_COMPOSITING_MODE` alongside the
+  other two "for completeness" — it's the most expensive of Tauri's three options and targets a
+  symptom (crash-on-resize) nothing here has actually reported.
 
 ## Import / Export
 
@@ -1014,6 +1023,16 @@ to avoid confusion; do not bump it.
 
 `src-tauri/Cargo.toml` sets `[profile.release]`: `strip = true`, `lto = true`, `codegen-units = 1` — a smaller/faster release binary at the cost of longer compile time (accepted; CI/local dev builds are unaffected since this only applies to `--release`). `opt-level` is left at the release default (`3`). `panic = "abort"` is deliberately **not** set — see Intentional Designs.
 
+## Linux GPU Compatibility
+
+`src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.
+
+The fix is **gated, not unconditional**: it only fires when both `/sys/module/nvidia` exists (the NVIDIA kernel module — proprietary or open, deliberately *not* matching `nouveau`, since this is an NVIDIA-driver bug and firing on nouveau would slow down machines that don't have it) and a Wayland session is detected (`WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland`). Tauri's docs explicitly warn that an unconditional override "disables a faster path for everyone, including users on working setups" — the gate is what keeps every other combination (X11, Intel/AMD, macOS, Windows) bit-for-bit unaffected. `apply()` is a no-op on every non-Linux target.
+
+Two vars are applied, cheapest first: `__NV_DISABLE_EXPLICIT_SYNC=1` (often fixes Error 71 with no performance cost) then `WEBKIT_DISABLE_DMABUF_RENDERER=1` (the stronger, user-verified fix — costs the faster DMA-BUF rendering path). `WEBKIT_DISABLE_COMPOSITING_MODE=1` — Tauri's third, most expensive option, for silent crash-on-resize — is deliberately **not** set; nothing in the reported symptom points to that failure mode. A variable already set by the user is never overwritten. `RESTY_DISABLE_GPU_WORKAROUND` (any non-empty value other than `0`) skips detection entirely, so an affected user can test whether a driver update has fixed things upstream, or rule the workaround out as the cause of an unrelated rendering complaint, without a rebuild. One `eprintln!` line names which variables were applied when the workaround fires, so it's visible in a bug report rather than invisible magic.
+
+The core decision logic (`should_apply`, `is_opted_out`, `is_wayland`) is a pure, `cfg`-free function unit-tested on every platform (including macOS, where this was developed) — only the real environment-reading wrapper (`apply()`'s Linux body) is `#[cfg(target_os = "linux")]`. Because the pure items have no non-test caller off Linux, they each carry `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]` with a comment — omitting it passes `npm run test:rust` but fails `npm run lint:rust` (`cargo clippy --all-targets -D warnings` builds the lib target too, where they're genuinely unreferenced off Linux). Don't "simplify" this by gating the whole module behind `#[cfg(target_os = "linux")]` — that would make the unit tests only run in CI, never on a non-Linux dev machine, which defeats the reason the pure/wrapper split exists.
+
 ## Releases
 
 `.github/workflows/release.yml` — triggered by `v*` tag; builds on ubuntu-22.04, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. Requires `permissions: contents: write`. Skipped on non-GitHub CI (`github.server_url` check).
@@ -1042,8 +1061,9 @@ npm run test:rust   # Rust tests only (cargo test)
 npm run test:all    # both
 ```
 
-Linting is deliberately narrow and **not wired into CI** — it's a local-only gate you're expected
-to run yourself after touching hook logic or Rust code, not a merge blocker. `eslint.config.js`
+Linting is deliberately narrow and **is wired into CI** — `.github/workflows/test.yml` runs
+`npm run lint:all` on `ubuntu-22.04` alongside typecheck and both test suites, so a clippy
+warning does fail the build; it's not merely a local-only gate. `eslint.config.js`
 enables only `eslint-plugin-react-hooks` (`rules-of-hooks` + `exhaustive-deps`) — no
 `typescript-eslint` rule sets, no stylistic rules — because `npm run typecheck` already covers
 type errors and stylistic linting adds churn without preventing the regressions this project

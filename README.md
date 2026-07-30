@@ -85,6 +85,24 @@ npm install
 npm run tauri dev
 ```
 
+#### NVIDIA + Wayland
+
+On NVIDIA + Wayland, Resty Desktop automatically detects that combination at launch and applies
+a known WebKitGTK compatibility workaround for you — no environment variables needed for most
+users. If you still hit a Wayland `Error 71` crash, or want to compare rendering behavior with
+the workaround disabled, set:
+
+```bash
+RESTY_DISABLE_GPU_WORKAROUND=1 resty-desktop
+```
+
+And if you're on a non-NVIDIA setup (e.g. `nouveau`) that hits the same crash, the workaround
+can be applied manually:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 resty-desktop
+```
+
 ## Building a Distributable
 
 ```bash
