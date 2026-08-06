@@ -96,8 +96,8 @@ the workaround disabled, set:
 RESTY_DISABLE_GPU_WORKAROUND=1 resty-desktop
 ```
 
-And if you're on a non-NVIDIA setup (e.g. `nouveau`) that hits the same crash, the workaround
-can be applied manually:
+If you hit a similar Wayland rendering crash on other hardware, the same workaround can be
+applied manually:
 
 ```bash
 WEBKIT_DISABLE_DMABUF_RENDERER=1 resty-desktop
