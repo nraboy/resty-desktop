@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use zeroize::Zeroize;
 
-use super::cache::{AppDb, BackupPlan, ImportRepo, MasterKey, RetentionPolicy, Schedule};
+use super::cache::{AppDb, BackupPlan, Credential, ImportRepo, MasterKey, RetentionPolicy, Schedule};
 use super::crypto;
 use super::schedule::next_fire_time;
 
@@ -55,6 +55,21 @@ struct ExportRepo {
     /// predate the read-only feature) still import cleanly as writable repos.
     #[serde(default)]
     read_only: bool,
+    /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
+    /// encrypted under the export passphrase exactly like `password`. Added after
+    /// bundle v1 shipped — `#[serde(default)]` means an older export (which predates
+    /// backend credentials) still imports cleanly with an empty list, no bundle
+    /// `version` bump needed. Cloud account keys, not just restic repo passwords, so
+    /// treat a bundle carrying these with the same care as one carrying passwords.
+    #[serde(default)]
+    credentials: Vec<ExportCredential>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportCredential {
+    key: String,
+    value: EncSecret,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -195,12 +210,21 @@ pub fn export_data(
                 let (nonce, ct) = crypto::encrypt(export_key, full.password.as_bytes())?;
                 EncSecret { nonce: B64.encode(nonce), ciphertext: B64.encode(ct) }
             };
+            let mut credentials = Vec::with_capacity(full.credentials.len());
+            for c in &full.credentials {
+                let (nonce, ct) = crypto::encrypt(export_key, c.value.as_bytes())?;
+                credentials.push(ExportCredential {
+                    key: c.key.clone(),
+                    value: EncSecret { nonce: B64.encode(nonce), ciphertext: B64.encode(ct) },
+                });
+            }
             repositories.push(ExportRepo {
                 id: r.id.clone(),
                 name: r.name.clone(),
                 path: r.path.clone(),
                 password,
                 read_only: r.read_only,
+                credentials,
             });
         }
     }
@@ -354,6 +378,18 @@ pub fn import_data(
         let mut password = decrypt_secret(ekey, &r.password)?;
         let (nonce, ciphertext) = crypto::encrypt(&key, &password)?;
         password.zeroize();
+
+        let mut credentials = Vec::with_capacity(r.credentials.len());
+        for c in &r.credentials {
+            let mut value = decrypt_secret(ekey, &c.value)?;
+            credentials.push(Credential {
+                key: c.key.clone(),
+                value: String::from_utf8(value.clone()).map_err(|e| e.to_string())?,
+            });
+            value.zeroize();
+        }
+        let (cred_nonce, cred_ciphertext) = super::cache::encode_credentials(&key, &credentials)?;
+
         let new_id = uuid::Uuid::new_v4().to_string();
         repo_id_map.insert(r.id.clone(), new_id.clone());
         repos.push(ImportRepo {
@@ -363,6 +399,8 @@ pub fn import_data(
             password_nonce: nonce,
             password_ciphertext: ciphertext,
             read_only: r.read_only,
+            credentials_nonce: cred_nonce,
+            credentials_ciphertext: cred_ciphertext,
         });
     }
 
@@ -627,6 +665,13 @@ pub fn import_backrest_config(
             password_ciphertext: ciphertext,
             // Backrest has no read-only concept — every imported repo starts writable.
             read_only: false,
+            // Backrest's `env`/`flags` (which could carry e.g. AWS_ACCESS_KEY_ID) are
+            // silently dropped, same as every other lossy field — see the doc comment
+            // above this fn. Salvaging backend credentials the way
+            // `backrest_repo_password` already does for RESTIC_PASSWORD= is a
+            // deliberately deferred follow-up, not done here.
+            credentials_nonce: None,
+            credentials_ciphertext: None,
         });
     }
 
@@ -736,6 +781,57 @@ mod tests {
         let plan: ExportPlan = serde_json::from_str(json).unwrap();
         assert!(plan.exclude_if_present.is_empty());
         assert!(!plan.exclude_caches);
+    }
+
+    // ── ExportRepo additive credentials field ───────────────────────────────
+
+    #[test]
+    fn export_repo_round_trips_credentials() {
+        let repo = ExportRepo {
+            id: "r1".to_string(),
+            name: "B2 Repo".to_string(),
+            path: "b2:bucket:path".to_string(),
+            password: EncSecret { nonce: "n".to_string(), ciphertext: "c".to_string() },
+            read_only: false,
+            credentials: vec![ExportCredential {
+                key: "B2_ACCOUNT_ID".to_string(),
+                value: EncSecret { nonce: "cn".to_string(), ciphertext: "cc".to_string() },
+            }],
+        };
+        let json = serde_json::to_string(&repo).unwrap();
+        let back: ExportRepo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.credentials.len(), 1);
+        assert_eq!(back.credentials[0].key, "B2_ACCOUNT_ID");
+        assert_eq!(back.credentials[0].value.nonce, "cn");
+    }
+
+    #[test]
+    fn export_repo_missing_credentials_field_deserializes_to_empty_vec() {
+        // Simulates a bundle exported before backend credentials existed — no
+        // "credentials" key at all. Must not fail BUNDLE_VERSION-gated import, and
+        // must not need a bundle version bump (see ExportRepo's doc comment).
+        let json = r#"{
+            "id": "r1",
+            "name": "Repo",
+            "path": "/backups",
+            "password": {"nonce": "n", "ciphertext": "c"},
+            "readOnly": false
+        }"#;
+        let repo: ExportRepo = serde_json::from_str(json).unwrap();
+        assert!(repo.credentials.is_empty());
+    }
+
+    #[test]
+    fn credential_value_encrypts_and_decrypts_like_a_password() {
+        // ExportCredential.value is an EncSecret encrypted/decrypted with the exact
+        // same export-passphrase machinery as ExportRepo.password (see export_data /
+        // import_data) — proven here by round-tripping through decrypt_secret, the
+        // same helper the password path uses.
+        let key = [3u8; 32];
+        let (nonce, ct) = super::super::crypto::encrypt(&key, b"b2-account-key-value").unwrap();
+        let enc = EncSecret { nonce: B64.encode(&nonce), ciphertext: B64.encode(&ct) };
+        let decrypted = decrypt_secret(&key, &enc).unwrap();
+        assert_eq!(decrypted, b"b2-account-key-value");
     }
 
     // ── uniquify ────────────────────────────────────────────────────────────

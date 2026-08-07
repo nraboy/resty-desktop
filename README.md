@@ -16,7 +16,8 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 ## Features
 
 - **Master password** — all repository passwords are encrypted at rest; a single master password unlocks the app on each launch
-- **Repository management** — add local or remote repositories (S3, SFTP, B2, etc.), initialize new ones, check integrity, rename, remove, or mirror to another repo
+- **Repository management** — add local or remote repositories (Amazon S3 / S3-compatible, native Backblaze B2, SFTP, and other restic-supported backends), initialize new ones, check integrity, rename, remove, or mirror to another repo
+- **Backend credentials** — optionally store credentials (e.g. S3 access keys, native B2 application keys) per remote repository, encrypted with the master password; left blank, restic falls back to your system's own credential chain (`~/.aws/credentials`, an IAM role, etc.) exactly as before. Note: restic's own documentation recommends B2's S3-compatible API over its native backend for better error handling
 - **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
 - **Schedules** — attach backup plans to a cron schedule; runs happen in the background even while the UI is closed
 - **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning

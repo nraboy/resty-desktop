@@ -64,8 +64,13 @@ src/
   lib/
     types.ts       # Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult,
                    #   BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan,
-                   #   DiffEntry, DiffResult; isRemoteRepo() helper; CANCELLED_BACKUP_ERROR sentinel (see
+                   #   DiffEntry, DiffResult, NewRepoInput (mirrors repo.rs's NewRepoInput struct);
+                   #   isRemoteRepo() helper; CANCELLED_BACKUP_ERROR sentinel (see
                    #   snapshot.rs's execute_backup) distinguishing a genuine cancel from a real failure
+    backends.ts    # detectBackend (mirrors commands/backends.rs's detect_kind — total, never persisted)
+                   #   and commonCredentialKeys (one-line hint naming common env vars for a recognized
+                   #   b2:/s3: prefix, display-only). The repository path itself is always freeform —
+                   #   there is no per-kind guided form; see RepositoriesPage.tsx below
     invoke.ts      # Typed wrappers over tauri invoke()
     activity.tsx   # ActivityProvider (mounted once in App.tsx, outlives route changes since it must keep
                    #   updating no matter which page is mounted): indexing progress, the scheduler-triggered
@@ -105,6 +110,31 @@ src/
   pages/
     AuthPage.tsx            # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx    # Add/open/delete repos; restic init for new repos; remote URL support;
+                            #   add/open modal keeps the plain Local Path / Remote URL toggle (folder
+                            #   picker vs. a freeform restic-URL text input — no per-backend guided
+                            #   sub-forms or Backend `<select>`; backend kind is only ever derived from
+                            #   the path, never chosen or stored) plus, for Remote, one universal
+                            #   optional "Credentials (optional)" key/value row list (env var name +
+                            #   value, add/remove rows) — the same shape for every backend, since
+                            #   restic's own interface is env vars regardless of which one. Left empty,
+                            #   a repo uses restic's own credential chain (env, `~/.aws/credentials`, an
+                            #   IAM role) exactly as it always has; a one-line hint
+                            #   (`lib/backends.ts`'s `commonCredentialKeys`) names common env vars (e.g.
+                            #   `B2_ACCOUNT_ID, B2_ACCOUNT_KEY`) once the typed path matches a recognized
+                            #   `b2:`/`s3:` prefix. Rust's `validate_credentials` (`backends.rs`) is the
+                            #   sole authority on required/allowed keys per detected kind — this form
+                            #   does no client-side required-field validation, so a missing/unknown key
+                            #   surfaces as a Test Connection / Save error rather than an inline warning;
+                            #   the edit modal derives backend kind from the (possibly just-edited) path
+                            #   via `detectBackend` rather than a stored field, and blocks Save with an
+                            #   inline error if editing the path would change the derived kind while
+                            #   credentials are already stored; edit-modal credential rows are prefilled
+                            #   with stored key+value pairs from `getRepoCredentials` (same threat model
+                            #   as `getRepoPassword` — values round-trip the same way the password does);
+                            #   editing one row leaves the others intact, and "Clear stored credentials"
+                            #   empties the row list (saved as an empty list → ambient mode); Test
+                            #   Connection uses the populated values directly, so it reflects the saved
+                            #   repo's actual credentials;
                             #   "Read-only repository (--no-lock)" checkbox in the add modal (next to the
                             #   existing "No Password" checkbox) and the edit modal (dirty-checked like
                             #   name/path/password, via updateRepoReadOnly); a "Read-only" pill badge on the
@@ -277,7 +307,15 @@ src-tauri/
       auth.rs        # is_app_setup, setup_master_password, unlock_app (clears stale locks), lock_app,
                      #   change_master_password, reset_app
       crypto.rs      # Argon2id key derivation, AES-GCM encrypt/decrypt
-      repo.rs        # list/add/remove/init/rename/update repos; get_repo_password; test_repo_connection;
+      backends.rs    # Backend credential registry — pure, unit-tested, no Tauri state. BackendKind
+                     #   (Local/S3/B2/Other); credential_specs() (required/optional env vars per kind);
+                     #   detect_kind(path) (total — the single source of truth for a repo's backend
+                     #   kind, never persisted, see Backend Credentials below); validate_credentials()
+                     #   (empty set always valid — ambient mode; non-empty must satisfy required keys,
+                     #   reject unknown keys for S3/B2, and reject PATH/RESTIC_* for every kind)
+      repo.rs        # list/add(NewRepoInput)/remove/init(NewRepoInput)/rename/update repos; get_repo_password;
+                     #   get_repo_credentials (key + value, mirrors getRepoPassword);
+                     #   update_repo_secrets (password and/or credentials, one transaction); test_repo_connection;
                      #   get/refresh_repo_stats; get/set_restic_path; get_restic_version; check_repo;
                      #   get/set_compression; get/set_restore_path; get/set_tray_enabled;
                      #   get/set_remote_auto_refresh; get/set_auto_indexing (default false);
@@ -471,6 +509,7 @@ src-tauri/
 - `restore_snapshot` streams `restic restore --json`; emits `restore:progress` events. Stderr drained on background thread. Serialized via a `busy` flag on `RestoreHandle` (same pattern as `BackupHandle`) — a concurrent attempt returns `"A restore is already in progress"`. Cancellable via `cancel_restore`; on cancel, a successful exit still wins over the cancelled flag (handles the race where Stop is clicked right as the restore finishes).
 - `unlock_app` runs `restic unlock` on all repos in background after password verified.
 - A repository can be marked **read-only** (`Repository.read_only` / `FullRepository.read_only`) for repos backed by a genuinely read-only filesystem or mount. `repo::apply_repo_flags`/`apply_from_repo_flags` (extending `apply_repo_password`/`apply_from_repo_password`) append restic's own `--no-lock` flag whenever the repo is read-only — this is the single choke point every read-type call goes through (`run_restic_with_path`, `check_repo`, `prune`), so no other call site needs to know about it. Every write-type command (`execute_backup`, `delete_snapshot`, `tag_snapshot`, `apply_retention`, `prune_repo`/`prune_all_repos`, `unlock_repo`, and `copy_snapshot`/`mirror_repo` on the **destination** side) instead calls `repo::ensure_writable(&repo)` immediately after resolving the `FullRepository` and refuses with `READ_ONLY_REPO_ERROR` — restic's own lock semantics make `--no-lock` safe only for reads, so a write path is refused outright rather than relying on restic to reject it. A read-only repo may still be a mirror/copy **source** (`apply_from_repo_flags` on the `--from-repo` side) — restic's `copy` opens the source under `--no-lock` and the destination normally, so rescuing snapshots off a read-only archive into a writable repo works. `prune_all_repos` skips read-only repos rather than failing the batch. Cancel-path `restic unlock` calls (and the `unlock_app` sweep) are skipped for a read-only repo — it was opened with `--no-lock`, so it never held a lock to clear, and the unlock's own delete would fail against a genuinely read-only backing store.
+- **Backend credentials.** A repository may carry per-backend credentials (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3, `B2_ACCOUNT_ID`/`B2_ACCOUNT_KEY` for native Backblaze B2), encrypted under the master key alongside the repo password (`FullRepository.credentials: Vec<Credential>`, `commands/backends.rs` for the registry). **Empty credentials is the ambient mode every pre-existing repo is in and stays in** unless the user explicitly stores credentials: with none stored, restic falls back to its own credential chain (env inherited from the app process, `~/.aws/credentials`, an IAM role) exactly as it always has — the app was setting no backend env vars at all before this feature existed, so this had to be additive-only, not a silent behavior change for existing S3 repos. `repo::apply_backend_env` sets each stored credential as an env var and is called from both `apply_repo_flags`/`apply_from_repo_flags` (covering `run_restic_with_path`/`run_restic_blocking`, `check_repo`, `run_one_prune_attempt`) — **before** `apply_repo_password`/`.augment_path()`, so an app-controlled var always wins a name collision — and from five call sites that build their `Command` inline inside a `spawn_blocking` closure (`execute_backup`, `restore_snapshot`, `copy_snapshot`, `mirror_repo`'s destination side, `run_full_index`'s two callers) rather than going through those helpers; each of those clones the whole `FullRepository` (never rebuilds one field-by-field) specifically so credentials aren't silently dropped — see `repo::unlock_quietly`'s doc comment, which replaced eight hand-built cancel-path `FullRepository { .. }` unlock literals with one helper for the same reason. A credential with an empty value is skipped rather than set as `""`, since `AWS_ACCESS_KEY_ID=""` would *break* the ambient fallback chain rather than falling through to it. `backends::validate_credentials` rejects a `PATH` or `RESTIC_*` credential key for every backend kind (the frontend's credential entry is a free-form key/value row list for every backend, not just a subset), so a hostile or accidental entry can never shadow those vars even before the apply-order defense above. Backend kind is **never stored** — `backends::detect_kind(path)` derives it from the path on every read, so it can never drift out of sync with an edited path (a path edit that changes the derived kind while credentials are stored is rejected client-side, `RepositoriesPage.tsx`). Backend credentials are process-wide env with **no `--from-` counterpart** (unlike the password, which has `RESTIC_FROM_PASSWORD`), so `repo::merge_credentials` pre-flight-checks `copy_snapshot`/`mirror_repo` for a same-key-different-value conflict between source and destination before either takes a `RepoLocks` guard or (for mirror) occupies `MirrorHandle::turn`'s FIFO lane — two repos on the same backend with different accounts genuinely cannot be used together in one restic process.
 - Stats cache (`repo_stats_cache`) is **never auto-evicted** — not after backup, forget/retention, copy, mirror, or snapshot delete. It only changes via the Refresh row/Refresh All buttons on RepositoriesPage (`refresh_repo_stats`), which is a deliberate, user-driven-only model (the previous event-driven eviction made the page feel like it "refreshed at random" — same page, different states, for reasons the user never triggered). A failed refresh leaves the last-good cached value in place. Each row shows the cached value's `cached_at` as a "Refreshed …" label (see `ResticStats.cached_at`, `repo_stats_cache.cached_at`).
 
 ## Concurrency: Per-Repository Lock Registry
@@ -809,14 +848,14 @@ the exact camelCase JSON shape) plus the shared TypeScript types keeping the two
 ## Security Architecture
 
 - Master password → Argon2id → 32-byte key; AES-GCM encrypts verification plaintext; salt+nonce+ciphertext stored in `master_key` table. Password never stored.
-- All repo passwords AES-GCM encrypted with master key in `repositories` table; decrypted on-demand via `db.get_full_repo`.
+- All repo passwords AES-GCM encrypted with master key in `repositories` table; decrypted on-demand via `db.get_full_repo`. Stored backend credentials use the identical pipeline (`FullRepository.credentials: Vec<Credential>`, encrypted in their own nullable `credentials_nonce`/`credentials_ciphertext` columns), and `getRepoCredentials` round-trips their values across IPC the same way `getRepoPassword` already does for the password — credentials are not treated as more sensitive than the password itself, so rejecting the password's threat model is the only consistent position.
 - `MasterKey` is `Mutex<Option<[u8; 32]>>` as Tauri state; `None` when locked — all restic commands fail with "App is locked".
-- `change_master_password` calls `db.rotate_master_key`, which re-encrypts all repo passwords **and** rewrites the `master_key` verification row in a single SQLite transaction (all-or-nothing — a crash can't leave passwords on the new key while the verification blob still expects the old one). The intermediate decrypted password is zeroized per row.
+- `change_master_password` calls `db.rotate_master_key`, which re-encrypts all repo passwords **and** stored backend credentials, then rewrites the `master_key` verification row, in a single SQLite transaction (all-or-nothing — a crash can't leave secrets on the new key while the verification blob still expects the old one). The intermediate decrypted plaintext is zeroized per row. Before committing, it re-reads every row's secrets back through `decode_secrets` — the same shared decrypt+parse path `get_full_repo` uses — with the *new* key; any row that fails there rolls the whole rotation back rather than silently orphaning it. This verification pass is deliberately generic (it doesn't know what "credentials" are, just that `decode_secrets` should succeed) specifically so a *future* encrypted field added to `repositories` is covered automatically without anyone remembering to extend this function by hand.
 - `reset_app` wipes all SQLite tables and clears in-memory key.
 
 ## Persistence & Caching
 
-- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `indexed_snapshots`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`. `repositories.read_only` (`INTEGER NOT NULL DEFAULT 0`) is an additive column (idempotent `ALTER TABLE ... ADD COLUMN`, same pattern as `backup_plans.limit_upload`/`limit_download`) — every existing repo stays writable on upgrade; see Restic Integration for what it does. `backup_plans.exclude_if_present_json` (nullable `TEXT`) and `exclude_caches` (`INTEGER NOT NULL DEFAULT 0`) are additive columns added the same way — a plan row from before this feature reads back as `exclude_if_present: []`, `exclude_caches: false`.
+- Single SQLite `app_data.db` in Tauri app data dir. Tables: `master_key`, `repositories`, `backup_plans`, `schedules`, `app_settings`, `snapshots_cache`, `indexed_snapshots`, `browse_cache_files`, `browse_cache_status`, `repo_stats_cache`, `backup_history`. `repositories.read_only` (`INTEGER NOT NULL DEFAULT 0`) is an additive column (idempotent `ALTER TABLE ... ADD COLUMN`, same pattern as `backup_plans.limit_upload`/`limit_download`) — every existing repo stays writable on upgrade; see Restic Integration for what it does. `repositories.credentials_nonce`/`credentials_ciphertext` (both nullable `BLOB`) are two more additive columns added the same way, for backend credentials (see Restic Integration's "Backend credentials" bullet) — **NULL on both, not an encrypted empty map, is what every pre-existing row gets**, and is exactly the ambient-mode encoding `decode_secrets`/`FullRepository.credentials` expect; no backfill runs, and no existing repo's `password_nonce`/`password_ciphertext` are ever touched by this migration. `backup_plans.exclude_if_present_json` (nullable `TEXT`) and `exclude_caches` (`INTEGER NOT NULL DEFAULT 0`) are additive columns added the same way — a plan row from before this feature reads back as `exclude_if_present: []`, `exclude_caches: false`.
 - Browse cache is relational (v0→v1 migration): `browse_cache_files` stores the file tree keyed by `(snap, parent_path)`; `browse_cache_status` tracks index state per `(repo_id, snapshot_id)` as `pending`/`in_progress`/`complete`, plus a per-snapshot `cached_at`. Replaces the old JSON-blob `browse_cache`.
 - v1→v2 migration (storage optimization): `browse_cache_files.snapshot_id` (64-char hex, duplicated across the row and both its indexes) is interned to a small integer `snap` via a new `indexed_snapshots(id, snapshot_id UNIQUE)` table — `AppDb::intern_snapshot`/`snap_id_of` map hex↔int internally; all public `AppDb` methods still take the hex `snapshot_id`. The redundant `name` column (recomputed from `path` via `cache::name_of` on read) and the per-row `cached_at` (moved to `browse_cache_status`, one value per snapshot) were also dropped. Cache tables are disposable (rebuilt via `restic ls`), so this migration drops + recreates them rather than transforming data.
 - `list_snapshots` returns from cache only, via `AppDb::get_snapshots_vec` (rows parsed straight into `Vec<Snapshot>` — no intermediate JSON-string serialize/parse round-trip); `refresh_snapshots` calls restic and updates cache.
@@ -834,6 +873,19 @@ the exact camelCase JSON shape) plus the shared TypeScript types keeping the two
 These have come up as apparent inefficiencies during codebase audits and were deliberately kept
 as-is. Don't re-flag or "fix" them without understanding why first:
 
+- **Backend credentials live in their own nullable `credentials_nonce`/`credentials_ciphertext`
+  columns, not folded into the existing `password_ciphertext` blob as a single JSON envelope.**
+  A single-envelope design (`{"password": "…", "credentials": {...}}` all under one
+  encrypt/decrypt) would make `rotate_master_key` correct with zero rotation-specific code for
+  credentials, which reads as an obvious simplification — resist it. It requires migrating every
+  existing repo's password ciphertext into the new format, and `rotate_master_key`'s own doc
+  comment already warns that a partial failure there "would lock the user out and brick every
+  repo": the envelope trades a recoverable failure mode (a credential re-encrypt bug breaks
+  credentials, which can be re-entered) for an unrecoverable one (a migration bug breaks the
+  password itself, for every repo). The separate-columns design gets the same "rotation can't
+  silently orphan a secret" guarantee a different way — a post-rotation verification pass that
+  re-reads every row through `decode_secrets` with the new key before committing (see Security
+  Architecture) — without ever touching ciphertext that already works.
 - **Sync `#[tauri::command]`s are intentionally not wrapped in `spawn_blocking`.** Tauri runs
   non-`async fn` commands (e.g. `get_restic_version`, `list_repos`) on its own thread pool, off
   the async runtime entirely — only `async fn` commands that block need `spawn_blocking`.
@@ -941,7 +993,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 
 ## Import / Export
 
-- `transfer.rs` exports a portable `.json` bundle (`version: 1` schema; also records `appVersion` from `tauri.conf.json` for debugging — informational only, ignored on import). Only repo passwords are encrypted: decrypted with the master key, re-encrypted with an Argon2id key derived from a user-supplied **export passphrase** (fresh 16-byte salt stored in the bundle; nonce+ciphertext base64). Passphrase required only when the bundle includes repositories.
+- `transfer.rs` exports a portable `.json` bundle (`version: 1` schema; also records `appVersion` from `tauri.conf.json` for debugging — informational only, ignored on import). Repo passwords and stored backend credentials are encrypted: decrypted with the master key, re-encrypted with an Argon2id key derived from a user-supplied **export passphrase** (fresh 16-byte salt stored in the bundle; nonce+ciphertext base64, one `EncSecret` per password and per credential value). Passphrase required only when the bundle includes repositories.
 - App settings, backup history, and caches are excluded. Every object carries its own `id`; plans reference `repoId` and schedules reference `planIds` by id, so the file is self-describing and safe to hand-edit.
 - Export is always a **full snapshot** — every repo, plan, and schedule, verbatim (no selection UI). The export modal is just a passphrase prompt (shown only when repos exist).
 - Import always creates **fresh copies**: new UUIDs minted Rust-side, refs remapped, names de-duplicated with a `" (imported)"` suffix; schedule timing reset (`next_run_at` recomputed via `schedule::next_fire_time`, `created_at = now`). Imported schedules are **always disabled** (`enabled = false`) regardless of their source state, so backups don't fire before the user reviews paths on the new host. All inserts run in one transaction via `AppDb::import_bundle` (all-or-nothing). Paths are imported verbatim — the import preview warns they may not exist on the new machine.
@@ -949,6 +1001,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 - `preview_import` returns counts without a passphrase (only secrets are encrypted); it verifies the passphrase early only if one is supplied.
 - `ExportRepo.readOnly` (`#[serde(default)]`) round-trips a repo's read-only flag; the field is additive so a bundle exported before this feature still imports cleanly (`readOnly: false`), with no bundle `version` bump needed.
 - `ExportPlan.excludeIfPresent`/`excludeCaches` (both `#[serde(default)]`) round-trip a plan's exclude-if-present markers and exclude-caches flag the same additive way — a bundle exported before this feature imports as `excludeIfPresent: []`, `excludeCaches: false`. Backrest has no equivalent concept, so a Backrest import always sets both to their empty/false default.
+- `ExportRepo.credentials` (`Vec<ExportCredential>`, `#[serde(default)]`) round-trips a repo's stored backend credentials the same additive way — a bundle exported before this feature imports with `credentials: []` (ambient mode), no bundle `version` bump needed. Each `ExportCredential { key, value: EncSecret }` reuses the same export-passphrase encryption as `password`. `import_backrest_config` sets `credentials_nonce`/`credentials_ciphertext` to `None` — Backrest's `env`/`flags` (which could carry e.g. `AWS_ACCESS_KEY_ID`) are silently dropped along with everything else in the lossy list below; salvaging them the way `backrest_repo_password` already does for `RESTIC_PASSWORD=` is a deliberately deferred follow-up, not implemented.
 
 ### Backrest import (one-way)
 
@@ -1048,7 +1101,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{backends,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash

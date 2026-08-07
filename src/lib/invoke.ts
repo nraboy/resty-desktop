@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { ActiveIndexBatchStatus, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -35,8 +35,8 @@ export const resetApp = (): Promise<void> =>
 export const listRepos = (): Promise<Repository[]> =>
   invoke("list_repos");
 
-export const addRepo = (id: string, name: string, path: string, password: string, readOnly: boolean): Promise<void> =>
-  invoke("add_repo", { id, name, path, password, readOnly });
+export const addRepo = (input: NewRepoInput): Promise<void> =>
+  invoke("add_repo", { input });
 
 export const removeRepo = (repoId: string): Promise<void> =>
   invoke("remove_repo", { repoId });
@@ -53,14 +53,32 @@ export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<v
 export const getRepoPassword = (repoId: string): Promise<string> =>
   invoke("get_repo_password", { repoId });
 
-export const updateRepoPassword = (repoId: string, newPassword: string): Promise<void> =>
-  invoke("update_repo_password", { repoId, newPassword });
+// Returns each stored credential's key and value — same threat model as getRepoPassword
+// (see CLAUDE.md's "Backend credentials" section). Used to populate the edit modal's
+// credential rows so Test Connection reflects the saved repo's actual credentials.
+export const getRepoCredentials = (repoId: string): Promise<[string, string][]> =>
+  invoke("get_repo_credentials", { repoId });
 
-export const initRepo = (id: string, name: string, path: string, password: string): Promise<void> =>
-  invoke("init_repo", { id, name, path, password });
+// `password`/`credentials` of `undefined` leaves that field unchanged (the edit
+// modal's "leave blank to keep current" behavior); `credentials: []` clears stored
+// credentials back to ambient mode (use restic's own credential chain).
+export const updateRepoSecrets = (
+  repoId: string,
+  password?: string,
+  credentials?: [string, string][],
+): Promise<void> =>
+  invoke("update_repo_secrets", { repoId, password, credentials });
 
-export const testRepoConnection = (path: string, password: string, readOnly: boolean): Promise<void> =>
-  invoke("test_repo_connection", { path, password, readOnly });
+export const initRepo = (input: NewRepoInput): Promise<void> =>
+  invoke("init_repo", { input });
+
+export const testRepoConnection = (
+  path: string,
+  password: string,
+  readOnly: boolean,
+  credentials: [string, string][],
+): Promise<void> =>
+  invoke("test_repo_connection", { path, password, readOnly, credentials });
 
 export const getRepoStats = (repoId: string): Promise<ResticStats> =>
   invoke("get_repo_stats", { repoId });

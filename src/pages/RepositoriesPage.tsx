@@ -11,6 +11,7 @@ import {
   cancelPrune,
   checkRepo,
   getActiveIndexBatch,
+  getRepoCredentials,
   getRepoPassword,
   getRepoStats,
   getSnapshotIndexStatus,
@@ -24,13 +25,14 @@ import {
   refreshSnapshots,
   removeRepo,
   renameRepo,
-  updateRepoPassword,
+  updateRepoSecrets,
   updateRepoPath,
   updateRepoReadOnly,
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
 import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, MIRROR_ALREADY_ACTIVE_ERROR, isRemoteRepo } from "../lib/types";
+import { commonCredentialKeys, detectBackend } from "../lib/backends";
 import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -72,12 +74,28 @@ export default function RepositoriesPage() {
   const [noPassword, setNoPassword] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
+  // Optional backend credentials for the add/open modal — a flat key/value list
+  // (e.g. ["B2_ACCOUNT_ID", "..."]) shown under the Remote URL field for any
+  // remote path, not gated on a specific backend kind. Left empty, a repo uses
+  // restic's own credential chain (env, ~/.aws/credentials, an IAM role) exactly
+  // as it always has — see CLAUDE.md's "Backend credentials" section. Rust's
+  // validate_credentials (backends.rs) is the authority on required/allowed keys
+  // per detected kind; this form does no client-side validation of its own.
+  const [credentialRows, setCredentialRows] = useState<[string, string][]>([]);
   const [editTarget, setEditTarget] = useState<Repository | null>(null);
   const [editName, setEditName] = useState("");
   const [editPath, setEditPath] = useState("");
   const [editPassword, setEditPassword] = useState("");
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
+  // Populated with stored credential values when the edit modal opens (see
+  // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
+  // Save sends whatever rows are present (blank-key rows are dropped); "Clear stored
+  // credentials" empties the list, which saves an empty list → ambient mode.
+  const [editCredentialRows, setEditCredentialRows] = useState<[string, string][]>([]);
+  // Snapshot of credentials as loaded from the server, for dirty-checking on save
+  // (skip the re-write if nothing changed — matches the password field's pattern).
+  const [editLoadedCredentials, setEditLoadedCredentials] = useState<[string, string][]>([]);
   const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -433,6 +451,28 @@ export default function RepositoriesPage() {
     }
   };
 
+  // Assembles the repository path for the add/open modal: s3/b2 build it from
+  // their own bucket/endpoint fields rather than a freely-typed path, matching
+  // detectBackend's total prefix logic on the Rust side (backends.rs).
+  // Backend credentials to submit for the add/open modal — a flat key/value list,
+  // same shape for every backend (matches restic's own env-var interface). Blank
+  // keys are dropped; a value left blank is sent as-is (Rust skips empty-valued
+  // credentials — see apply_backend_env — and validate_credentials reports a
+  // clear "missing required credential" error if that leaves a required key unset).
+  const buildAddCredentials = (): [string, string][] =>
+    credentialRows
+      .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+      .filter(([k]) => k !== "");
+
+  const resetAddForm = () => {
+    setForm({ name: "", path: "", password: "" });
+    setNoPassword(false);
+    setReadOnly(false);
+    setPathMode("local");
+    setCredentialRows([]);
+    setTestResult(null);
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!form.name || !form.path || (!noPassword && !form.password)) {
@@ -442,18 +482,18 @@ export default function RepositoriesPage() {
     setLoading(true);
     setError("");
     const id = crypto.randomUUID();
+    const path = form.path;
+    const credentials = buildAddCredentials();
     try {
       if (modalMode === "init") {
-        await initRepo(id, form.name, form.path, form.password);
+        await initRepo({ id, name: form.name, path, password: form.password, credentials });
       } else {
-        await addRepo(id, form.name, form.path, noPassword ? "" : form.password, readOnly);
+        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, credentials });
       }
       await load();
       setModalMode(null);
-      setForm({ name: "", path: "", password: "" });
-      setNoPassword(false);
-      setReadOnly(false);
-      if (!isRemoteRepo(form.path)) {
+      resetAddForm();
+      if (!isRemoteRepo(path)) {
         refreshSnapshots(id).catch(() => {});
         refreshRepoStats(id)
           .then((s) => setStatsMap((prev) => ({ ...prev, [id]: s })))
@@ -481,18 +521,48 @@ export default function RepositoriesPage() {
   const handleRename = async (e: FormEvent) => {
     e.preventDefault();
     if (!editTarget || !editName.trim() || !editPath.trim() || (!editNoPassword && !editPassword.trim())) return;
+    const trimmedPath = editPath.trim();
+    const originalKind = detectBackend(editTarget.path);
+    const newKind = detectBackend(trimmedPath);
+    // Backend kind is derived from the path (never stored — see CLAUDE.md), so a
+    // path edit that changes the backend while credentials are already stored would
+    // silently leave those credentials pointed at the wrong kind of backend. Block
+    // the save rather than guess which set (if any) still applies.
+    if (newKind !== originalKind && editCredentialRows.filter(([k]) => k.trim() !== "").length > 0) {
+      setEditTestResult({
+        ok: false,
+        message: "This path looks like a different kind of backend than the one this repo's stored credentials were entered for. Clear the stored credentials first, or create a new repository entry instead.",
+      });
+      return;
+    }
+
+    // Trim and drop rows with a blank key. A row with a key but blank value is
+    // valid (will be skipped by apply_backend_env, same as the add modal) — that's
+    // an explicit user intent, not "I didn't type one yet".
+    const newCredentials = editCredentialRows
+      .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+      .filter(([k]) => k !== "");
+
     setRenaming(true);
     try {
       if (editName.trim() !== editTarget.name) {
         await renameRepo(editTarget.id, editName.trim());
       }
-      if (editPath.trim() !== editTarget.path) {
-        await updateRepoPath(editTarget.id, editPath.trim());
+      if (trimmedPath !== editTarget.path) {
+        await updateRepoPath(editTarget.id, trimmedPath);
       }
       const newPassword = editNoPassword ? "" : editPassword.trim();
       const originalPassword = await getRepoPassword(editTarget.id);
-      if (newPassword !== originalPassword) {
-        await updateRepoPassword(editTarget.id, newPassword);
+      const passwordChanged = newPassword !== originalPassword;
+      const credentialsChanged =
+        newCredentials.length !== editLoadedCredentials.length ||
+        newCredentials.some(([k, v], i) => k !== editLoadedCredentials[i][0] || v !== editLoadedCredentials[i][1]);
+      if (passwordChanged || credentialsChanged) {
+        await updateRepoSecrets(
+          editTarget.id,
+          passwordChanged ? newPassword : undefined,
+          newCredentials
+        );
       }
       if (editReadOnly !== editTarget.readOnly) {
         await updateRepoReadOnly(editTarget.id, editReadOnly);
@@ -505,12 +575,8 @@ export default function RepositoriesPage() {
   };
 
   const openModal = (mode: ModalMode) => {
-    setForm({ name: "", path: "", password: "" });
-    setNoPassword(false);
-    setReadOnly(false);
+    resetAddForm();
     setError("");
-    setTestResult(null);
-    setPathMode("local");
     setModalMode(mode);
   };
 
@@ -522,7 +588,7 @@ export default function RepositoriesPage() {
     setTesting(true);
     setTestResult(null);
     try {
-      await testRepoConnection(form.path, noPassword ? "" : form.password, readOnly);
+      await testRepoConnection(form.path, noPassword ? "" : form.password, readOnly, buildAddCredentials());
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -791,8 +857,17 @@ export default function RepositoriesPage() {
                       setEditNoPassword(false);
                       setEditReadOnly(repo.readOnly);
                       setEditTestResult(null);
+                      setEditCredentialRows([]);
+                      setEditLoadedCredentials([]);
                       getRepoPassword(repo.id)
                         .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
+                        .catch(() => {});
+                      getRepoCredentials(repo.id)
+                        .then((creds) => {
+                          const trimmed = creds.map(([k, v]): [string, string] => [k, v]);
+                          setEditCredentialRows(trimmed);
+                          setEditLoadedCredentials(trimmed);
+                        })
                         .catch(() => {});
                     }}
                     className="text-gray-500 hover:text-blue-400"
@@ -940,16 +1015,77 @@ export default function RepositoriesPage() {
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">Path</label>
             {editTarget && isRemoteRepo(editTarget.path) ? (
-              <input
-                type="text"
-                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
-                value={editPath}
-                onChange={(e) => setEditPath(e.target.value)}
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                autoComplete="off"
-              />
+              <div className="space-y-3">
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
+                  value={editPath}
+                  onChange={(e) => setEditPath(e.target.value)}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                />
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-medium text-gray-400">Credentials (optional)</label>
+                    {editCredentialRows.length > 0 && (
+                      <button
+                        type="button"
+                        className="text-xs text-gray-500 hover:text-red-300"
+                        onClick={() => {
+                          // Empties the rows; on save, an empty list clears stored
+                          // credentials back to ambient mode (same as leaving the
+                          // add-modal credential list empty).
+                          setEditCredentialRows([]);
+                          setEditTestResult(null);
+                        }}
+                      >
+                        Clear stored credentials
+                      </button>
+                    )}
+                  </div>
+                  {commonCredentialKeys(editPath.trim() || editTarget.path) && (
+                    <p className="text-xs text-gray-500">
+                      {commonCredentialKeys(editPath.trim() || editTarget.path)}
+                    </p>
+                  )}
+                  {editCredentialRows.map(([k, v], i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500"
+                        placeholder="ENV_VAR_NAME"
+                        value={k}
+                        onChange={(e) => { setEditCredentialRows((rows) => rows.map((r, idx) => idx === i ? [e.target.value, r[1]] : r)); setEditTestResult(null); }}
+                      />
+                      <input
+                        type="password"
+                        className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
+                        placeholder="value"
+                        value={v}
+                        onChange={(e) => { setEditCredentialRows((rows) => rows.map((r, idx) => idx === i ? [r[0], e.target.value] : r)); setEditTestResult(null); }}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setEditCredentialRows((rows) => rows.filter((_, idx) => idx !== i))}
+                      >
+                        ×
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setEditCredentialRows((rows) => [...rows, ["", ""]])}
+                  >
+                    + Add credential
+                  </Button>
+                </div>
+              </div>
             ) : (
               <div className="flex items-center gap-2">
                 <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${editPath ? "text-gray-300" : "text-gray-600"}`}>
@@ -1015,7 +1151,14 @@ export default function RepositoriesPage() {
                 setEditTesting(true);
                 setEditTestResult(null);
                 try {
-                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly);
+                  // Values are populated from the saved repo (see getRepoCredentials),
+                  // so Test reflects the repo's actual credentials. A blank value is
+                  // a real "send empty" intent (will be skipped by apply_backend_env,
+                  // same as the add modal), not "I didn't type one yet".
+                  const credentials = editCredentialRows
+                    .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+                    .filter(([k]) => k !== "");
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, credentials);
                   setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
@@ -1260,8 +1403,17 @@ export default function RepositoriesPage() {
                 setEditNoPassword(false);
                 setEditReadOnly(repo.readOnly);
                 setEditTestResult(null);
+                setEditCredentialRows([]);
+                setEditLoadedCredentials([]);
                 getRepoPassword(repo.id)
                   .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
+                  .catch(() => {});
+                getRepoCredentials(repo.id)
+                  .then((creds) => {
+                    const trimmed = creds.map(([k, v]): [string, string] => [k, v]);
+                    setEditCredentialRows(trimmed);
+                    setEditLoadedCredentials(trimmed);
+                  })
                   .catch(() => {});
               },
             },
@@ -1354,18 +1506,64 @@ export default function RepositoriesPage() {
                 </Button>
               </div>
             ) : (
-              <input
-                type="text"
-                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
-                value={form.path}
-                onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
-                placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                autoComplete="off"
-                autoFocus
-              />
+              <div className="space-y-3">
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
+                  value={form.path}
+                  onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
+                  placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  autoFocus
+                />
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium text-gray-400">
+                    Credentials (optional)
+                  </label>
+                  {commonCredentialKeys(form.path) && (
+                    <p className="text-xs text-gray-500">
+                      {commonCredentialKeys(form.path)}
+                    </p>
+                  )}
+                  {credentialRows.map(([k, v], i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500"
+                        placeholder="ENV_VAR_NAME"
+                        value={k}
+                        onChange={(e) => setCredentialRows((rows) => rows.map((r, idx) => idx === i ? [e.target.value, r[1]] : r))}
+                      />
+                      <input
+                        type="password"
+                        className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
+                        placeholder="value"
+                        value={v}
+                        onChange={(e) => setCredentialRows((rows) => rows.map((r, idx) => idx === i ? [r[0], e.target.value] : r))}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setCredentialRows((rows) => rows.filter((_, idx) => idx !== i))}
+                      >
+                        ×
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setCredentialRows((rows) => [...rows, ["", ""]])}
+                  >
+                    + Add credential
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
           <Input

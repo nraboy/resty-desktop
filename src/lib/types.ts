@@ -14,6 +14,20 @@ export function isRemoteRepo(path: string): boolean {
   return REMOTE_PREFIXES.some((p) => path.startsWith(p));
 }
 
+// Input for creating a repository (addRepo/initRepo) — mirrors src-tauri's
+// NewRepoInput struct (repo.rs) field-for-field, camelCase over the wire.
+// `credentials` is a list of (envVarName, value) pairs, e.g.
+// [["B2_ACCOUNT_ID", "…"], ["B2_ACCOUNT_KEY", "…"]] — empty means "use restic's own
+// credential chain" (ambient mode; see lib/backends.ts and CLAUDE.md).
+export interface NewRepoInput {
+  id: string;
+  name: string;
+  path: string;
+  password: string;
+  readOnly?: boolean;
+  credentials?: [string, string][];
+}
+
 export interface Snapshot {
   id: string;
   short_id: string;

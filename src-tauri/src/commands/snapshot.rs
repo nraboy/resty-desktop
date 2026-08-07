@@ -527,10 +527,11 @@ pub async fn execute_backup(
         .unwrap_or(0);
 
     let app_inner = app.clone();
-    let repo_path = repo.path.clone();
-    let repo_password = repo.password.clone();
-    let repo_path_for_unlock = repo.path.clone();
-    let repo_pass_for_unlock = repo.password.clone();
+    // Clone the whole repo (not path/password field-by-field) so backend credentials
+    // ride along automatically — see repo::unlock_quietly's doc comment for why a
+    // hand-rebuilt FullRepository literal is the wrong pattern here.
+    let repo_for_spawn = repo.clone();
+    let repo_for_unlock = repo.clone();
     let restic_path_inner = restic_path.clone();
     let restic_path_for_unlock = restic_path.clone();
     let compression_inner = compression.clone();
@@ -554,11 +555,12 @@ pub async fn execute_backup(
 
         let mut cmd = std::process::Command::new(&restic_path_inner);
         cmd.args(&args)
-            .env("RESTIC_REPOSITORY", &repo_path)
+            .env("RESTIC_REPOSITORY", &repo_for_spawn.path)
             .env("RESTIC_COMPRESSION", &compression_inner);
         // ensure_writable above already refuses a read-only repo before this closure is
         // ever built, so plain apply_repo_password (no --no-lock) is correct here.
-        super::repo::apply_repo_password(&mut cmd, &repo_password);
+        super::repo::apply_backend_env(&mut cmd, &repo_for_spawn.credentials);
+        super::repo::apply_repo_password(&mut cmd, &repo_for_spawn.password);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -674,10 +676,7 @@ pub async fn execute_backup(
         // CLAUDE.md's Concurrency section).
         #[allow(clippy::let_underscore_future)]
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            // ensure_writable already refused this repo if it were read-only, so it's
-            // always writable here — no --no-lock needed.
-            let repo = FullRepository { path: repo_path_for_unlock, password: repo_pass_for_unlock, read_only: false };
-            let _ = run_restic_with_path(&repo, vec!["unlock"], &restic_path_for_unlock);
+            super::repo::unlock_quietly(&repo_for_unlock, &restic_path_for_unlock);
         });
     }
 
@@ -852,17 +851,24 @@ pub async fn copy_snapshot(
         task_ctx.failed(e.clone());
         return Err(e);
     }
+    // Backend credentials are process-wide env, and restic has no --from- counterpart
+    // for them (unlike the password) — so a conflicting value for the same key between
+    // src and dest can't be represented in one restic process. Checked before spawning,
+    // and before either repo takes a RepoLocks guard, so a doomed copy never holds one.
+    if let Err(e) = super::repo::merge_credentials(&dest_repo.credentials, &src_repo.credentials) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
 
     copy_handle.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     let child_arc = std::sync::Arc::clone(&copy_handle.child);
     let cancelled_arc = std::sync::Arc::clone(&copy_handle.cancelled);
 
-    // Stash credentials so we can run `restic unlock` after a cancel-kill.
-    let src_path_for_unlock = src_repo.path.clone();
-    let src_pass_for_unlock = src_repo.password.clone();
+    // Clone whole repos (not field-by-field) so backend credentials ride along into the
+    // post-cancel unlock — see repo::unlock_quietly's doc comment.
     let src_read_only_for_unlock = src_repo.read_only;
-    let dst_path_for_unlock = dest_repo.path.clone();
-    let dst_pass_for_unlock = dest_repo.password.clone();
+    let src_repo_for_unlock = src_repo.clone();
+    let dest_repo_for_unlock = dest_repo.clone();
     let restic_path_for_unlock = restic_path.clone();
 
     // `copy` reads from src and writes new blobs into dest, both under restic's shared
@@ -881,6 +887,9 @@ pub async fn copy_snapshot(
             .env("RESTIC_FROM_REPOSITORY", &src_repo.path);
         // ensure_writable above already refused a read-only dest, so plain
         // apply_repo_password is correct for it; the source may be read-only.
+        // merge_credentials above already confirmed dest's and src's credentials don't
+        // conflict on a shared key, so applying both independently here is safe.
+        super::repo::apply_backend_env(&mut cmd, &dest_repo.credentials);
         super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
         super::repo::apply_from_repo_flags(&mut cmd, &src_repo);
         let mut child = cmd
@@ -947,11 +956,9 @@ pub async fn copy_snapshot(
         // it was opened with --no-lock and so was never locked; skip its unlock.
         let _ = tauri::async_runtime::spawn_blocking(move || {
             if !src_read_only_for_unlock {
-                let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock, read_only: false };
-                let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+                super::repo::unlock_quietly(&src_repo_for_unlock, &restic_path_for_unlock);
             }
-            let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock, read_only: false };
-            let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+            super::repo::unlock_quietly(&dest_repo_for_unlock, &restic_path_for_unlock);
         })
         .await;
     }
@@ -1002,6 +1009,11 @@ pub async fn mirror_repo(
     // A read-only repo may be a mirror *source* (restic honors --no-lock on --from-repo —
     // see apply_from_repo_flags), but never a *destination*.
     super::repo::ensure_writable(&dest_repo)?;
+    // Checked before this run is queued/registered (see the mirror_credentials pre-flight
+    // in copy_snapshot for the same reasoning) — a doomed mirror must not occupy
+    // MirrorHandle::turn's FIFO lane or leave a `mirrors` entry that later needs
+    // deregistering.
+    super::repo::merge_credentials(&dest_repo.credentials, &src_repo.credentials)?;
     let restic_path = super::get_restic_path(&db);
 
     let operation_id = new_operation_id();
@@ -1023,14 +1035,13 @@ pub async fn mirror_repo(
         map.insert(operation_id.clone(), entry.clone());
     }
 
-    // Stash credentials so the task can run `restic unlock` after a cancel-kill, and so it
-    // doesn't need to re-resolve the master key (which may since have locked) or re-fetch
-    // from `db` after the outer command has already returned.
-    let src_path_for_unlock = src_repo.path.clone();
-    let src_pass_for_unlock = src_repo.password.clone();
+    // Stash whole repos (not path/password field-by-field) so the task can run
+    // `restic unlock` after a cancel-kill with backend credentials intact, and so it
+    // doesn't need to re-resolve the master key (which may since have locked) or
+    // re-fetch from `db` after the outer command has already returned.
     let src_read_only_for_unlock = src_repo.read_only;
-    let dst_path_for_unlock = dest_repo.path.clone();
-    let dst_pass_for_unlock = dest_repo.password.clone();
+    let src_repo_for_unlock = src_repo.clone();
+    let dest_repo_for_unlock = dest_repo.clone();
     let restic_path_for_unlock = restic_path.clone();
 
     let registry = std::sync::Arc::clone(&mirror_handle.mirrors);
@@ -1098,6 +1109,9 @@ pub async fn mirror_repo(
                 .env("RESTIC_FROM_REPOSITORY", &src_repo_inner.path);
             // ensure_writable above already refused a read-only dest, so plain
             // apply_repo_password is correct for it; the source may be read-only.
+            // merge_credentials above already confirmed dest's and src's credentials
+            // don't conflict on a shared key, so applying both independently is safe.
+            super::repo::apply_backend_env(&mut cmd, &dest_repo_inner.credentials);
             super::repo::apply_repo_password(&mut cmd, &dest_repo_inner.password);
             super::repo::apply_from_repo_flags(&mut cmd, &src_repo_inner);
             let mut child = cmd
@@ -1164,11 +1178,9 @@ pub async fn mirror_repo(
             // it was opened with --no-lock and so was never locked; skip its unlock.
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 if !src_read_only_for_unlock {
-                    let src = FullRepository { path: src_path_for_unlock, password: src_pass_for_unlock, read_only: false };
-                    let _ = run_restic_with_path(&src, vec!["unlock"], &restic_path_for_unlock);
+                    super::repo::unlock_quietly(&src_repo_for_unlock, &restic_path_for_unlock);
                 }
-                let dst = FullRepository { path: dst_path_for_unlock, password: dst_pass_for_unlock, read_only: false };
-                let _ = run_restic_with_path(&dst, vec!["unlock"], &restic_path_for_unlock);
+                super::repo::unlock_quietly(&dest_repo_for_unlock, &restic_path_for_unlock);
             })
             .await;
         }

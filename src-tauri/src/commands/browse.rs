@@ -296,9 +296,10 @@ pub async fn restore_snapshot(
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
 
+    // Clone the whole repo (not path/password/read_only field-by-field) so backend
+    // credentials ride along automatically — see repo::unlock_quietly's doc comment.
+    let repo_for_spawn = repo.clone();
     let repo_path = repo.path.clone();
-    let repo_password = repo.password.clone();
-    let repo_read_only = repo.read_only;
     let repo_id_inner = repo_id.clone();
 
     let task_ctx = OperationCtx::new(
@@ -333,11 +334,8 @@ pub async fn restore_snapshot(
 
         let mut cmd = std::process::Command::new(&restic_path);
         cmd.args(["restore", &snapshot_id, "--target", &target_dir, "--json"])
-            .env("RESTIC_REPOSITORY", &repo_path);
-        super::repo::apply_repo_password(&mut cmd, &repo_password);
-        if repo_read_only {
-            cmd.arg("--no-lock");
-        }
+            .env("RESTIC_REPOSITORY", &repo_for_spawn.path);
+        super::repo::apply_repo_flags(&mut cmd, &repo_for_spawn);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -413,10 +411,8 @@ pub async fn restore_snapshot(
             // wait() above has already reaped the killed process. A read-only repo was
             // opened with --no-lock above, so no lock was ever taken — skip the unlock,
             // which would fail against a genuinely read-only backing store anyway.
-            if !repo_read_only {
-                use super::cache::FullRepository;
-                let unlock_repo = FullRepository { path: repo_path.clone(), password: repo_password.clone(), read_only: false };
-                let _ = run_restic_with_path(&unlock_repo, vec!["unlock"], &restic_path);
+            if !repo_for_spawn.read_only {
+                super::repo::unlock_quietly(&repo_for_spawn, &restic_path);
             }
             return Err("cancelled".to_string());
         }
@@ -588,9 +584,9 @@ pub async fn index_snapshot(
             None,
         );
 
-        let repo_path = repo.path.clone();
-        let repo_pass = repo.password.clone();
-        let repo_ro = repo.read_only;
+        // Clone the whole repo (not path/password/read_only field-by-field) so
+        // backend credentials ride along — see repo::unlock_quietly's doc comment.
+        let tmp_repo = repo.clone();
         let snap_id = snapshot_id.clone();
         let repo_id2 = repo_id.clone();
         let rp = restic_path.clone();
@@ -598,11 +594,6 @@ pub async fn index_snapshot(
 
         let _permit = gate.lock().await;
         let ok = tauri::async_runtime::spawn_blocking(move || {
-            let tmp_repo = super::cache::FullRepository {
-                path: repo_path,
-                password: repo_pass,
-                read_only: repo_ro,
-            };
             let db_inner = app.state::<AppDb>();
             let repo_locks_inner = app.state::<RepoLocks>();
             run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
@@ -829,9 +820,11 @@ pub async fn index_snapshots_batch(
                     None,
                 );
 
-                let repo_path = repo.path.clone();
-                let repo_pass = repo.password.clone();
-                let repo_ro = repo.read_only;
+                // Clone the whole repo (not path/password/read_only field-by-field, and
+                // not moved out of the outer `repo` since this loop runs it once per
+                // snapshot) so backend credentials ride along — see
+                // repo::unlock_quietly's doc comment.
+                let tmp_repo = repo.clone();
                 let snap_id = snapshot_id.clone();
                 let repo_id2 = repo_id.clone();
                 let rp = restic_path.clone();
@@ -839,11 +832,6 @@ pub async fn index_snapshots_batch(
 
                 let _permit = gate.lock().await;
                 let ok = tauri::async_runtime::spawn_blocking(move || {
-                    let tmp_repo = super::cache::FullRepository {
-                        path: repo_path,
-                        password: repo_pass,
-                        read_only: repo_ro,
-                    };
                     let db_inner = app2.state::<AppDb>();
                     let repo_locks_inner = app2.state::<RepoLocks>();
                     run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()

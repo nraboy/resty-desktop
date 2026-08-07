@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod backends;
 pub mod backup_plan;
 pub mod browse;
 pub mod cache;

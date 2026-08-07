@@ -1,11 +1,29 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-use super::cache::{AppDb, FullRepository, MasterKey, PruneHandle, Repository};
+use super::backends;
+use super::cache::{AppDb, Credential, FullRepository, MasterKey, PruneHandle, Repository};
 use super::crypto;
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
 use crate::tasks::{emit_cancelling, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
+
+/// Input for creating a repository (`add_repo`/`init_repo`). A struct arg rather than
+/// six-plus positional parameters — Tauri deserializes command args from a single JSON
+/// object either way, so this is free, and it sidesteps `clippy::too_many_arguments`
+/// without an `#[allow]`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewRepoInput {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub password: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub credentials: Vec<(String, String)>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResticStats {
@@ -100,6 +118,7 @@ pub(crate) fn apply_from_repo_password(cmd: &mut std::process::Command, password
 /// this is the one place every read-type call needs to touch; write-type calls are
 /// refused before they ever reach here (see `ensure_writable`).
 pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    apply_backend_env(cmd, &repo.credentials);
     apply_repo_password(cmd, &repo.password);
     if repo.read_only {
         cmd.arg("--no-lock");
@@ -110,10 +129,72 @@ pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepos
 /// used when the *source* of a copy/mirror is read-only. The destination is never
 /// read-only (`ensure_writable` refuses it earlier), so it has no `--no-lock` counterpart.
 pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    apply_backend_env(cmd, &repo.credentials);
     apply_from_repo_password(cmd, &repo.password);
     if repo.read_only {
         cmd.arg("--no-lock");
     }
+}
+
+/// Sets each stored backend credential (e.g. `AWS_ACCESS_KEY_ID`, `B2_ACCOUNT_ID`) as
+/// an env var on `cmd`. A repo with no stored credentials (the ambient default every
+/// pre-existing repo is in) sets nothing at all here, so restic's own credential chain
+/// — inherited process env, `~/.aws/credentials`, an IAM role — is left exactly as it
+/// was. A credential with an empty value is skipped rather than set as `""`: an empty
+/// `AWS_ACCESS_KEY_ID=""` would *break* that chain rather than falling through to it.
+///
+/// Callers must apply this before `apply_repo_password`/`.augment_path()` so that
+/// those app-controlled env vars win on a name collision — `validate_credentials`
+/// (`backends.rs`) also rejects `PATH`/`RESTIC_*` credential keys outright, so this is
+/// defense in depth, not the only guard.
+pub(crate) fn apply_backend_env(cmd: &mut std::process::Command, credentials: &[Credential]) {
+    for c in credentials {
+        if !c.value.is_empty() {
+            cmd.env(&c.key, &c.value);
+        }
+    }
+}
+
+/// Merges a copy/mirror destination's and source's stored backend credentials into
+/// one set to apply to a single restic process. restic has no `--from-`-side
+/// counterpart for backend credentials (unlike the password, which has
+/// `RESTIC_FROM_PASSWORD`) — they're both applied as plain process env — so two repos
+/// that need *different* values for the same key (e.g. two B2 accounts) genuinely
+/// cannot be used together in one `copy`/`mirror` run. A shared key with an *equal*
+/// value (e.g. the same B2 account backing two buckets) is fine and merges cleanly.
+pub(crate) fn merge_credentials(
+    dest: &[Credential],
+    src: &[Credential],
+) -> Result<Vec<Credential>, String> {
+    let mut merged: Vec<Credential> = dest.to_vec();
+    for s in src {
+        match merged.iter().find(|d| d.key == s.key) {
+            Some(existing) if existing.value == s.value => {}
+            Some(_) => {
+                return Err(format!(
+                    "The source and destination repositories both set '{}' to a different \
+                     value. restic applies backend credentials as process environment \
+                     variables, so two repositories on the same backend with conflicting \
+                     credentials for the same key can't be used together in one copy/mirror run.",
+                    s.key
+                ));
+            }
+            None => merged.push(s.clone()),
+        }
+    }
+    Ok(merged)
+}
+
+/// Runs `restic unlock` for `repo` and discards the result — the cancel-path recovery
+/// mechanism used after a SIGKILL (see CLAUDE.md's Restic Integration section). Takes
+/// a full, already-resolved `FullRepository` (clone it, don't rebuild one field by
+/// field) so backend credentials and read-only status are never silently dropped the
+/// way a hand-built `FullRepository { .. }` literal could drop a field added after it
+/// was written. A read-only repo never held a lock (opened with `--no-lock`), so its
+/// unlock would only fail against a genuinely read-only backing store — callers should
+/// skip a read-only repo before calling this, matching the existing convention.
+pub(crate) fn unlock_quietly(repo: &FullRepository, restic_path: &str) {
+    let _ = run_restic_with_path(repo, vec!["unlock"], restic_path);
 }
 
 /// Error returned by every write-type command when the target repository is marked
@@ -177,15 +258,28 @@ pub fn list_repos(db: State<'_, AppDb>) -> Result<Vec<Repository>, String> {
 pub async fn add_repo(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
-    id: String,
-    name: String,
-    path: String,
-    password: String,
-    read_only: bool,
+    input: NewRepoInput,
 ) -> Result<(), String> {
+    let kind = backends::detect_kind(&input.path);
+    backends::validate_credentials(kind, &input.credentials)?;
     let key = master_key.get()?;
-    let (nonce, ciphertext) = crypto::encrypt(&key, password.as_bytes())?;
-    db.add_repo(&id, &name, &path, &nonce, &ciphertext, read_only)
+    let (nonce, ciphertext) = crypto::encrypt(&key, input.password.as_bytes())?;
+    let credentials: Vec<Credential> = input
+        .credentials
+        .into_iter()
+        .map(|(key, value)| Credential { key, value })
+        .collect();
+    let (cred_nonce, cred_ciphertext) = super::cache::encode_credentials(&key, &credentials)?;
+    db.add_repo(
+        &input.id,
+        &input.name,
+        &input.path,
+        &nonce,
+        &ciphertext,
+        input.read_only,
+        cred_nonce.as_deref(),
+        cred_ciphertext.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -231,16 +325,46 @@ pub async fn get_repo_password(
     Ok(repo.password.clone())
 }
 
+/// Returns each stored credential's key and value — see `AppDb::get_repo_credentials`'s
+/// doc comment for why this matches `get_repo_password`'s threat model rather than the
+/// earlier keys-only design.
 #[tauri::command]
-pub async fn update_repo_password(
+pub async fn get_repo_credentials(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
     repo_id: String,
-    new_password: String,
+) -> Result<Vec<(String, String)>, String> {
+    let key = master_key.get()?;
+    db.get_repo_credentials(&repo_id, &key)
+}
+
+/// Updates a repo's password and/or stored backend credentials in one transaction.
+/// `password`/`credentials` of `None` leaves that field unchanged (the edit modal's
+/// "leave blank to keep current" behavior); `Some(vec![])` for credentials clears
+/// them back to ambient mode. Validated against the path's derived backend kind
+/// before writing.
+#[tauri::command]
+pub async fn update_repo_secrets(
+    db: State<'_, AppDb>,
+    master_key: State<'_, MasterKey>,
+    repo_id: String,
+    password: Option<String>,
+    credentials: Option<Vec<(String, String)>>,
 ) -> Result<(), String> {
     let key = master_key.get()?;
-    let (nonce, ciphertext) = crypto::encrypt(&key, new_password.as_bytes())?;
-    db.update_repo_password(&repo_id, &nonce, &ciphertext)
+    if let Some(creds) = &credentials {
+        let repos = db.list_repos()?;
+        let path = repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .map(|r| r.path.clone())
+            .ok_or_else(|| "Repository not found".to_string())?;
+        backends::validate_credentials(backends::detect_kind(&path), creds)?;
+    }
+    let credentials = credentials.map(|creds| {
+        creds.into_iter().map(|(key, value)| Credential { key, value }).collect()
+    });
+    db.update_repo_secrets(&repo_id, &key, password, credentials)
 }
 
 /// Initialise a new restic repository, then persist it.
@@ -248,20 +372,39 @@ pub async fn update_repo_password(
 pub async fn init_repo(
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
-    id: String,
-    name: String,
-    path: String,
-    password: String,
+    input: NewRepoInput,
 ) -> Result<(), String> {
-    validate_init_password(&password)?;
+    validate_init_password(&input.password)?;
+    let kind = backends::detect_kind(&input.path);
+    backends::validate_credentials(kind, &input.credentials)?;
+    let credentials: Vec<Credential> = input
+        .credentials
+        .into_iter()
+        .map(|(key, value)| Credential { key, value })
+        .collect();
     let restic_path = super::get_restic_path(&db);
     // `restic init` always creates a writable repo — read_only is always false here.
-    let dummy = FullRepository { path: path.clone(), password: password.clone(), read_only: false };
+    let dummy = FullRepository {
+        path: input.path.clone(),
+        password: input.password.clone(),
+        read_only: false,
+        credentials: credentials.clone(),
+    };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
 
     let key = master_key.get()?;
-    let (nonce, ciphertext) = crypto::encrypt(&key, password.as_bytes())?;
-    db.add_repo(&id, &name, &path, &nonce, &ciphertext, false)
+    let (nonce, ciphertext) = crypto::encrypt(&key, input.password.as_bytes())?;
+    let (cred_nonce, cred_ciphertext) = super::cache::encode_credentials(&key, &credentials)?;
+    db.add_repo(
+        &input.id,
+        &input.name,
+        &input.path,
+        &nonce,
+        &ciphertext,
+        false,
+        cred_nonce.as_deref(),
+        cred_ciphertext.as_deref(),
+    )
 }
 
 /// Test an unsaved repo connection (used by the "Test Connection" button in the add modal).
@@ -272,12 +415,17 @@ pub async fn test_repo_connection(
     path: String,
     password: String,
     read_only: bool,
+    credentials: Vec<(String, String)>,
 ) -> Result<(), String> {
+    let kind = backends::detect_kind(&path);
+    backends::validate_credentials(kind, &credentials)?;
     let restic_path = super::get_restic_path(&db);
     // No saved repoId yet (the repo isn't added until the test passes) — matches
     // prune_all_repos' empty-repoId convention for the same "no single id" case.
     let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
-    let dummy = FullRepository { path, password, read_only };
+    let credentials: Vec<Credential> =
+        credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
+    let dummy = FullRepository { path, password, read_only, credentials };
     let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
         .await
         .map(|_| ());
@@ -557,6 +705,7 @@ async fn run_one_prune_attempt(
 
     let mut cmd = std::process::Command::new(restic_path);
     cmd.arg("prune").env("RESTIC_REPOSITORY", &full.path);
+    apply_backend_env(&mut cmd, &full.credentials);
     apply_repo_password(&mut cmd, &full.password);
     let mut child = cmd
         .stdin(std::process::Stdio::null())
@@ -642,8 +791,9 @@ async fn run_one_prune_attempt(
     if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         // A read-only repo never reaches run_one_prune_attempt (ensure_writable refuses
         // prune_repo/prune_all_repos first), so no lock was ever taken — no unlock needed.
-        let unlock_repo = FullRepository { path: full.path.clone(), password: full.password.clone(), read_only: false };
-        let _ = run_restic_blocking(unlock_repo, vec!["unlock".to_string()], restic_path.to_string()).await;
+        // Clone the whole repo (not a hand-rebuilt literal) so backend credentials ride
+        // along — see `unlock_quietly`'s doc comment on why that matters.
+        let _ = run_restic_blocking(full.clone(), vec!["unlock".to_string()], restic_path.to_string()).await;
         return Ok(PruneAttempt::Cancelled);
     }
 
@@ -985,11 +1135,11 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_from_repo_flags, apply_from_repo_password, apply_repo_flags, apply_repo_password,
-        ensure_writable, last_nonblank_line, parse_stats_json, validate_init_password,
-        validate_restic_path, READ_ONLY_REPO_ERROR,
+        apply_backend_env, apply_from_repo_flags, apply_from_repo_password, apply_repo_flags,
+        apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
+        parse_stats_json, validate_init_password, validate_restic_path, READ_ONLY_REPO_ERROR,
     };
-    use super::super::cache::FullRepository;
+    use super::super::cache::{Credential, FullRepository};
 
     // ── validate_init_password ─────────────────────────────────────────────
 
@@ -1047,7 +1197,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_omits_no_lock_for_writable_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(!cmd.get_args().any(|a| a == "--no-lock"));
     }
@@ -1055,7 +1205,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_adds_no_lock_for_read_only_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         // Password handling is unaffected by read_only.
@@ -1066,7 +1216,7 @@ mod tests {
     #[test]
     fn apply_from_repo_flags_adds_no_lock_for_read_only_source() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
         apply_from_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
@@ -1074,14 +1224,102 @@ mod tests {
 
     #[test]
     fn ensure_writable_ok_for_writable_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, credentials: vec![] };
         assert!(ensure_writable(&repo).is_ok());
     }
 
     #[test]
     fn ensure_writable_rejects_read_only_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
         assert_eq!(ensure_writable(&repo).unwrap_err(), READ_ONLY_REPO_ERROR);
+    }
+
+    // ── apply_backend_env ───────────────────────────────────────────────────
+
+    fn cred(key: &str, value: &str) -> Credential {
+        Credential { key: key.to_string(), value: value.to_string() }
+    }
+
+    #[test]
+    fn apply_backend_env_sets_each_credential() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(&mut cmd, &[cred("B2_ACCOUNT_ID", "id"), cred("B2_ACCOUNT_KEY", "key")]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "B2_ACCOUNT_ID" && *v == Some(std::ffi::OsStr::new("id"))));
+        assert!(envs.iter().any(|(k, v)| *k == "B2_ACCOUNT_KEY" && *v == Some(std::ffi::OsStr::new("key"))));
+    }
+
+    #[test]
+    fn apply_backend_env_sets_nothing_for_empty_slice() {
+        // The ambient-mode invariant: a repo with no stored credentials must not add
+        // any env var at all, so restic's own credential chain is untouched.
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(&mut cmd, &[]);
+        assert_eq!(cmd.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn apply_backend_env_skips_empty_valued_entries() {
+        // Setting AWS_ACCESS_KEY_ID="" would break minio-go's fallback chain rather
+        // than falling through to it — an empty-valued credential must be skipped,
+        // not set as an empty string.
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(&mut cmd, &[cred("AWS_ACCESS_KEY_ID", "")]);
+        assert_eq!(cmd.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn apply_repo_flags_applies_credentials_before_password() {
+        let mut cmd = std::process::Command::new("restic");
+        let repo = FullRepository {
+            path: "b2:bucket:path".into(),
+            password: "hunter2".into(),
+            read_only: false,
+            credentials: vec![cred("B2_ACCOUNT_ID", "id")],
+        };
+        apply_repo_flags(&mut cmd, &repo);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "B2_ACCOUNT_ID" && *v == Some(std::ffi::OsStr::new("id"))));
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_PASSWORD" && *v == Some(std::ffi::OsStr::new("hunter2"))));
+    }
+
+    // ── merge_credentials ───────────────────────────────────────────────────
+
+    #[test]
+    fn merge_credentials_merges_disjoint_sets() {
+        let dest = vec![cred("AWS_ACCESS_KEY_ID", "a")];
+        let src = vec![cred("B2_ACCOUNT_ID", "b")];
+        let mut merged = merge_credentials(&dest, &src).unwrap();
+        merged.sort_by(|a, b| a.key.cmp(&b.key));
+        let keys: Vec<&str> = merged.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["AWS_ACCESS_KEY_ID", "B2_ACCOUNT_ID"]);
+    }
+
+    #[test]
+    fn merge_credentials_allows_identical_duplicate_values() {
+        let dest = vec![cred("B2_ACCOUNT_ID", "same")];
+        let src = vec![cred("B2_ACCOUNT_ID", "same")];
+        let merged = merge_credentials(&dest, &src).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].value, "same");
+    }
+
+    #[test]
+    fn merge_credentials_errors_and_names_the_key_on_conflict() {
+        let dest = vec![cred("B2_ACCOUNT_ID", "account-a")];
+        let src = vec![cred("B2_ACCOUNT_ID", "account-b")];
+        match merge_credentials(&dest, &src) {
+            Err(err) => assert!(err.contains("B2_ACCOUNT_ID")),
+            Ok(_) => panic!("expected merge_credentials to reject a conflicting value"),
+        }
+    }
+
+    #[test]
+    fn merge_credentials_handles_empty_inputs() {
+        assert!(merge_credentials(&[], &[]).unwrap().is_empty());
+        let dest = vec![cred("K", "v")];
+        assert_eq!(merge_credentials(&dest, &[]).unwrap().len(), 1);
+        assert_eq!(merge_credentials(&[], &dest).unwrap().len(), 1);
     }
 
     // ── last_nonblank_line / parse_stats_json ──────────────────────────────

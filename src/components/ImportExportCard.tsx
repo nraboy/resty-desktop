@@ -171,8 +171,8 @@ export default function ImportExportCard() {
       <h2 className="text-sm font-medium text-gray-300 mb-1">Import &amp; Export</h2>
       <p className="text-xs text-gray-500 mb-3">
         Save a full snapshot of your repositories, backup plans, and schedules to a file, or restore
-        one on another installation. Repository passwords are encrypted with an export passphrase you
-        choose.
+        one on another installation. Repository passwords and any stored backend credentials (e.g.
+        cloud account keys) are encrypted with an export passphrase you choose.
       </p>
       <div className="flex items-center gap-3">
         <Button variant="secondary" onClick={openExport}>Export…</Button>
@@ -197,8 +197,9 @@ export default function ImportExportCard() {
             {hasRepos ? (
               <div className="space-y-3">
                 <p className="text-xs text-gray-500">
-                  Choose an export passphrase to encrypt your repository passwords. You will need it
-                  again to import.
+                  Choose an export passphrase to encrypt your repository passwords and any stored
+                  backend credentials (e.g. cloud account keys) — treat the exported file with the
+                  same care as those secrets. You will need this passphrase again to import.
                 </p>
                 <Input
                   type="password"

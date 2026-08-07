@@ -93,6 +93,16 @@ pub struct Schedule {
 
 // ── internal type (never serialised) ───────────────────────────────────────
 
+/// One backend credential (e.g. `AWS_ACCESS_KEY_ID`) carried on a `FullRepository`.
+/// A named struct rather than a `(String, String)` tuple because tuples don't
+/// implement `Zeroize` — this needs the key kept (not secret) but the value wiped.
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct Credential {
+    #[zeroize(skip)]
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct FullRepository {
     #[zeroize(skip)]
@@ -103,6 +113,71 @@ pub struct FullRepository {
     /// See `repo::apply_repo_flags`.
     #[zeroize(skip)]
     pub read_only: bool,
+    /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), decrypted
+    /// under the master key alongside `password`. Empty means "use restic's own
+    /// credential chain" (env inherited from the app process, ~/.aws/credentials, IAM
+    /// role, …) — the ambient mode every pre-existing repo is in and stays in unless the
+    /// user explicitly stores credentials. See `repo::apply_backend_env` and CLAUDE.md's
+    /// "Backend credentials" section.
+    pub credentials: Vec<Credential>,
+}
+
+/// A (nonce, ciphertext) pair for an optional encrypted blob — `None` for both means
+/// "nothing stored" (NULL in the `repositories` table), not "an encrypted empty value".
+type OptionalSecretBlob = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// One `repositories` row's raw secret columns as read from SQLite, before decryption.
+type RepoSecretRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Same as `RepoSecretRow`, with the row's id alongside — used where the caller needs
+/// to write back per-row (e.g. `rotate_master_key`'s re-encrypt loop).
+type RepoSecretRowWithId = (String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Serializes a credential list to an encrypted JSON blob, or `(None, None)` for an
+/// empty list — the ambient-mode encoding every pre-existing repo row already has.
+/// Never write an encrypted *empty* map: that would be a second, distinct encoding of
+/// "no credentials" alongside NULL, and every reader would need to handle both.
+pub(crate) fn encode_credentials(
+    key: &[u8; 32],
+    credentials: &[Credential],
+) -> Result<OptionalSecretBlob, String> {
+    if credentials.is_empty() {
+        return Ok((None, None));
+    }
+    let map: HashMap<&str, &str> =
+        credentials.iter().map(|c| (c.key.as_str(), c.value.as_str())).collect();
+    let mut json = serde_json::to_vec(&map).map_err(|e| e.to_string())?;
+    let (nonce, ciphertext) = crypto::encrypt(key, &json)?;
+    json.zeroize();
+    Ok((Some(nonce), Some(ciphertext)))
+}
+
+/// The single shared decrypt+parse path for a repo's secrets — used by both
+/// `get_full_repo` and `rotate_master_key`'s post-rotation verification pass, which
+/// is what makes that guard generic across any secret field added here in the
+/// future (see `rotate_master_key`'s doc comment).
+fn decode_secrets(
+    key: &[u8; 32],
+    password_nonce: &[u8],
+    password_ciphertext: &[u8],
+    credentials_nonce: Option<&[u8]>,
+    credentials_ciphertext: Option<&[u8]>,
+) -> Result<(String, Vec<Credential>), String> {
+    let password_bytes = crypto::decrypt(key, password_nonce, password_ciphertext)?;
+    let password = String::from_utf8(password_bytes).map_err(|e| e.to_string())?;
+
+    let credentials = match (credentials_nonce, credentials_ciphertext) {
+        (Some(cn), Some(cc)) => {
+            let mut json = crypto::decrypt(key, cn, cc)?;
+            let map: HashMap<String, String> =
+                serde_json::from_slice(&json).map_err(|e| e.to_string())?;
+            json.zeroize();
+            map.into_iter().map(|(key, value)| Credential { key, value }).collect()
+        }
+        _ => Vec::new(),
+    };
+
+    Ok((password, credentials))
 }
 
 // ── copy cancellation handle ──────────────────────────────────────────────
@@ -443,12 +518,14 @@ impl AppDb {
                 verification_ciphertext BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS repositories (
-                id                  TEXT PRIMARY KEY,
-                name                TEXT NOT NULL,
-                path                TEXT NOT NULL,
-                password_nonce      BLOB NOT NULL,
-                password_ciphertext BLOB NOT NULL,
-                read_only           INTEGER NOT NULL DEFAULT 0
+                id                     TEXT PRIMARY KEY,
+                name                   TEXT NOT NULL,
+                path                   TEXT NOT NULL,
+                password_nonce         BLOB NOT NULL,
+                password_ciphertext    BLOB NOT NULL,
+                read_only              INTEGER NOT NULL DEFAULT 0,
+                credentials_nonce      BLOB,
+                credentials_ciphertext BLOB
             );
             CREATE TABLE IF NOT EXISTS backup_plans (
                 id              TEXT PRIMARY KEY,
@@ -546,6 +623,15 @@ impl AppDb {
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
         );
+        // Additive, nullable — an existing row's password_nonce/password_ciphertext are
+        // never touched, and NULL here means "no stored credentials" (the ambient mode:
+        // use restic's own credential chain). See CLAUDE.md's "Backend credentials".
+        let _ = conn.execute_batch(
+            "ALTER TABLE repositories ADD COLUMN credentials_nonce BLOB;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE repositories ADD COLUMN credentials_ciphertext BLOB;",
+        );
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
             "UPDATE browse_cache_status SET status = 'pending' WHERE status = 'in_progress';",
@@ -620,10 +706,11 @@ impl AppDb {
     }
 
     pub fn get_full_repo(&self, repo_id: &str, key: &[u8; 32]) -> Result<FullRepository, String> {
-        let (path, nonce, ciphertext, read_only) = {
+        let (path, nonce, ciphertext, read_only, cred_nonce, cred_ciphertext) = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT path, password_nonce, password_ciphertext, read_only
+                "SELECT path, password_nonce, password_ciphertext, read_only,
+                        credentials_nonce, credentials_ciphertext
                  FROM repositories WHERE id = ?1",
                 params![repo_id],
                 |row| {
@@ -632,16 +719,24 @@ impl AppDb {
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, i64>(3)? != 0,
+                        row.get::<_, Option<Vec<u8>>>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
                     ))
                 },
             )
             .map_err(|e| format!("Repository not found: {e}"))?
         };
-        let password_bytes = crypto::decrypt(key, &nonce, &ciphertext)?;
-        let password = String::from_utf8(password_bytes).map_err(|e| e.to_string())?;
-        Ok(FullRepository { path, password, read_only })
+        let (password, credentials) = decode_secrets(
+            key,
+            &nonce,
+            &ciphertext,
+            cred_nonce.as_deref(),
+            cred_ciphertext.as_deref(),
+        )?;
+        Ok(FullRepository { path, password, read_only, credentials })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_repo(
         &self,
         id: &str,
@@ -650,12 +745,16 @@ impl AppDb {
         nonce: &[u8],
         ciphertext: &[u8],
         read_only: bool,
+        cred_nonce: Option<&[u8]>,
+        cred_ciphertext: Option<&[u8]>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext, read_only)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, name, path, nonce, ciphertext, read_only],
+            "INSERT INTO repositories
+             (id, name, path, password_nonce, password_ciphertext, read_only,
+              credentials_nonce, credentials_ciphertext)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, name, path, nonce, ciphertext, read_only, cred_nonce, cred_ciphertext],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -740,26 +839,85 @@ impl AppDb {
         Ok(())
     }
 
-    pub fn update_repo_password(
+    /// Returns each stored credential's key and value. Same threat model as
+    /// `get_repo_password` — the password already crosses IPC as plaintext for the
+    /// edit modal, and credentials use the identical pipeline (AES-GCM at rest under
+    /// the master key, decrypted on demand, masked `type="password"` input on the
+    /// frontend). Returning values here lets the edit modal (a) populate rows with
+    /// the actual secret so Test Connection reflects reality, and (b) save a no-op
+    /// edit without forcing the user to retype every value.
+    pub fn get_repo_credentials(
         &self,
         repo_id: &str,
-        nonce: &[u8],
-        ciphertext: &[u8],
+        key: &[u8; 32],
+    ) -> Result<Vec<(String, String)>, String> {
+        let full = self.get_full_repo(repo_id, key)?;
+        Ok(full.credentials.iter().map(|c| (c.key.clone(), c.value.clone())).collect())
+    }
+
+    /// Read-modify-write update of a repo's password and/or credentials, both in one
+    /// transaction so two sequential edits (e.g. from RepositoriesPage's edit modal,
+    /// which dirty-checks password and credentials independently) can never lose one
+    /// or the other. `password`/`credentials` of `None` leaves that field unchanged;
+    /// `Some` replaces it entirely (an empty `Vec` clears stored credentials back to
+    /// ambient mode).
+    pub fn update_repo_secrets(
+        &self,
+        repo_id: &str,
+        key: &[u8; 32],
+        password: Option<String>,
+        credentials: Option<Vec<Credential>>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE repositories SET password_nonce = ?1, password_ciphertext = ?2 WHERE id = ?3",
-            params![nonce, ciphertext, repo_id],
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let (cur_pw_nonce, cur_pw_ct, cur_cred_nonce, cur_cred_ct): RepoSecretRow = tx
+            .query_row(
+                "SELECT password_nonce, password_ciphertext, credentials_nonce, credentials_ciphertext
+                 FROM repositories WHERE id = ?1",
+                params![repo_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|e| format!("Repository not found: {e}"))?;
+
+        let (new_pw_nonce, new_pw_ct) = if let Some(pw) = password {
+            let mut bytes = pw.into_bytes();
+            let enc = crypto::encrypt(key, &bytes)?;
+            bytes.zeroize();
+            enc
+        } else {
+            (cur_pw_nonce, cur_pw_ct)
+        };
+
+        let (new_cred_nonce, new_cred_ct) = if let Some(creds) = credentials {
+            encode_credentials(key, &creds)?
+        } else {
+            (cur_cred_nonce, cur_cred_ct)
+        };
+
+        tx.execute(
+            "UPDATE repositories
+             SET password_nonce = ?1, password_ciphertext = ?2,
+                 credentials_nonce = ?3, credentials_ciphertext = ?4
+             WHERE id = ?5",
+            params![new_pw_nonce, new_pw_ct, new_cred_nonce, new_cred_ct, repo_id],
         )
         .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    /// Atomically rotate the master key: re-encrypt every repo password with the
-    /// new key and rewrite the verification row in a single transaction. Either all
-    /// of it commits or none of it does — so a crash can't leave repo passwords on
-    /// the new key while the verification row still expects the old password (which
-    /// would lock the user out and brick every repo).
+    /// Atomically rotate the master key: re-encrypt every repo password and every
+    /// repo's stored backend credentials with the new key, rewrite the verification
+    /// row, and finally re-read every row's secrets back through the same
+    /// `decode_secrets` path `get_full_repo` uses (with the *new* key) before
+    /// committing. Either all of it commits or none of it does — so a crash, or a
+    /// future encrypted field someone forgets to wire into this loop, can't leave
+    /// some secrets on the new key while others (or the verification row) still
+    /// expect the old one. The verification pass is what makes that guarantee hold
+    /// for fields added after this one: it doesn't know what "credentials" are, it
+    /// just proves everything `get_full_repo` would need to decrypt actually does.
     pub fn rotate_master_key(
         &self,
         old_key: &[u8; 32],
@@ -771,26 +929,47 @@ impl AppDb {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        // Re-encrypt every repo password with the new key. If any row fails to
-        // decrypt, the `?` returns and the transaction is rolled back on drop.
-        let rows: Vec<(String, Vec<u8>, Vec<u8>)> = {
+        // Re-encrypt every repo's password and stored credentials with the new key.
+        // If any row fails to decrypt, the `?` returns and the transaction is rolled
+        // back on drop.
+        let rows: Vec<RepoSecretRowWithId> = {
             let mut stmt = tx
-                .prepare("SELECT id, password_nonce, password_ciphertext FROM repositories")
+                .prepare(
+                    "SELECT id, password_nonce, password_ciphertext,
+                            credentials_nonce, credentials_ciphertext
+                     FROM repositories",
+                )
                 .map_err(|e| e.to_string())?;
             let collected = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                })
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
             collected
         };
-        for (id, nonce, ct) in rows {
-            let mut pw = crypto::decrypt(old_key, &nonce, &ct)?;
-            let (new_nonce, new_ct) = crypto::encrypt(new_key, &pw)?;
+        for (id, pw_nonce, pw_ct, cred_nonce, cred_ct) in rows {
+            let mut pw = crypto::decrypt(old_key, &pw_nonce, &pw_ct)?;
+            let (new_pw_nonce, new_pw_ct) = crypto::encrypt(new_key, &pw)?;
             pw.zeroize();
+
+            let (new_cred_nonce, new_cred_ct) = match (cred_nonce, cred_ct) {
+                (Some(cn), Some(cc)) => {
+                    let mut plaintext = crypto::decrypt(old_key, &cn, &cc)?;
+                    let re_encrypted = crypto::encrypt(new_key, &plaintext)?;
+                    plaintext.zeroize();
+                    (Some(re_encrypted.0), Some(re_encrypted.1))
+                }
+                _ => (None, None),
+            };
+
             tx.execute(
-                "UPDATE repositories SET password_nonce = ?1, password_ciphertext = ?2 WHERE id = ?3",
-                params![new_nonce, new_ct, id],
+                "UPDATE repositories
+                 SET password_nonce = ?1, password_ciphertext = ?2,
+                     credentials_nonce = ?3, credentials_ciphertext = ?4
+                 WHERE id = ?5",
+                params![new_pw_nonce, new_pw_ct, new_cred_nonce, new_cred_ct, id],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -803,6 +982,36 @@ impl AppDb {
             params![new_salt, new_verification_nonce, new_verification_ciphertext],
         )
         .map_err(|e| e.to_string())?;
+
+        // Verification pass: prove every row's secrets actually decrypt under the new
+        // key before committing anything. This is the guard against a future
+        // encrypted field being added to `repositories` without a matching re-encrypt
+        // step above — such a row would still be under the old key and would fail
+        // here, rolling the whole rotation back, rather than silently orphaning it.
+        let verify_rows: Vec<RepoSecretRow> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT password_nonce, password_ciphertext,
+                            credentials_nonce, credentials_ciphertext
+                     FROM repositories",
+                )
+                .map_err(|e| e.to_string())?;
+            let collected = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            collected
+        };
+        for (pw_nonce, pw_ct, cred_nonce, cred_ct) in verify_rows {
+            decode_secrets(
+                new_key,
+                &pw_nonce,
+                &pw_ct,
+                cred_nonce.as_deref(),
+                cred_ct.as_deref(),
+            )?;
+        }
 
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -1991,9 +2200,20 @@ impl AppDb {
 
         for r in repos {
             tx.execute(
-                "INSERT INTO repositories (id, name, path, password_nonce, password_ciphertext, read_only)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![r.id, r.name, r.path, r.password_nonce, r.password_ciphertext, r.read_only],
+                "INSERT INTO repositories
+                 (id, name, path, password_nonce, password_ciphertext, read_only,
+                  credentials_nonce, credentials_ciphertext)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    r.id,
+                    r.name,
+                    r.path,
+                    r.password_nonce,
+                    r.password_ciphertext,
+                    r.read_only,
+                    r.credentials_nonce,
+                    r.credentials_ciphertext,
+                ],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -2051,6 +2271,8 @@ pub struct ImportRepo {
     pub password_nonce: Vec<u8>,
     pub password_ciphertext: Vec<u8>,
     pub read_only: bool,
+    pub credentials_nonce: Option<Vec<u8>>,
+    pub credentials_ciphertext: Option<Vec<u8>>,
 }
 
 fn timestamp() -> i64 {
@@ -2232,6 +2454,8 @@ mod tests {
             password_nonce: vec![],
             password_ciphertext: vec![],
             read_only: false,
+            credentials_nonce: None,
+            credentials_ciphertext: None,
         };
         let plan = BackupPlan {
             id: "plan1".to_string(),
@@ -2492,6 +2716,147 @@ mod tests {
         assert!(parse_snapshot_rows("{}").is_err());
     }
 
+    // ── backend credentials ─────────────────────────────────────────────────
+
+    #[test]
+    fn credentials_round_trip_through_add_repo_and_get_full_repo() {
+        let db = test_db();
+        let key = [7u8; 32];
+        let (pw_nonce, pw_ct) = super::crypto::encrypt(&key, b"pw").unwrap();
+        let creds = vec![
+            Credential { key: "B2_ACCOUNT_ID".to_string(), value: "id".to_string() },
+            Credential { key: "B2_ACCOUNT_KEY".to_string(), value: "secret".to_string() },
+        ];
+        let (cred_nonce, cred_ct) = encode_credentials(&key, &creds).unwrap();
+        db.add_repo(
+            "r1",
+            "Repo",
+            "b2:bucket:path",
+            &pw_nonce,
+            &pw_ct,
+            false,
+            cred_nonce.as_deref(),
+            cred_ct.as_deref(),
+        )
+        .unwrap();
+
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert_eq!(full.password, "pw");
+        let mut got: Vec<(String, String)> =
+            full.credentials.iter().map(|c| (c.key.clone(), c.value.clone())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("B2_ACCOUNT_ID".to_string(), "id".to_string()),
+                ("B2_ACCOUNT_KEY".to_string(), "secret".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn null_credential_columns_read_back_as_empty_vec() {
+        // The ambient-mode invariant: a row with NULL credential columns — every
+        // pre-existing repo, and any new repo created without stored credentials —
+        // must decode to an empty credentials list, never an error or a default value.
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_encrypted(&db, "r1", "S3 Repo", "s3:s3.amazonaws.com/bucket", "pw", &key);
+
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert_eq!(full.password, "pw");
+        assert!(full.credentials.is_empty());
+    }
+
+    #[test]
+    fn update_repo_secrets_changing_password_preserves_credentials() {
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_with_credentials(
+            &db,
+            "r1",
+            "b2:bucket:path",
+            "old-pw",
+            &[("B2_ACCOUNT_ID", "id"), ("B2_ACCOUNT_KEY", "key")],
+            &key,
+        );
+
+        db.update_repo_secrets("r1", &key, Some("new-pw".to_string()), None).unwrap();
+
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert_eq!(full.password, "new-pw");
+        assert_eq!(full.credentials.len(), 2);
+    }
+
+    #[test]
+    fn update_repo_secrets_changing_credentials_preserves_password() {
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_encrypted(&db, "r1", "Repo", "b2:bucket:path", "pw", &key);
+
+        let new_creds = vec![Credential { key: "B2_ACCOUNT_ID".to_string(), value: "id".to_string() }];
+        db.update_repo_secrets("r1", &key, None, Some(new_creds)).unwrap();
+
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert_eq!(full.password, "pw");
+        assert_eq!(full.credentials.len(), 1);
+        assert_eq!(full.credentials[0].key, "B2_ACCOUNT_ID");
+    }
+
+    #[test]
+    fn update_repo_secrets_with_empty_vec_clears_credentials_to_ambient_mode() {
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_with_credentials(
+            &db,
+            "r1",
+            "b2:bucket:path",
+            "pw",
+            &[("B2_ACCOUNT_ID", "id"), ("B2_ACCOUNT_KEY", "key")],
+            &key,
+        );
+
+        db.update_repo_secrets("r1", &key, None, Some(vec![])).unwrap();
+
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert!(full.credentials.is_empty());
+    }
+
+    #[test]
+    fn get_repo_credentials_returns_values() {
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_with_credentials(
+            &db,
+            "r1",
+            "b2:bucket:path",
+            "pw",
+            &[("B2_ACCOUNT_ID", "id"), ("B2_ACCOUNT_KEY", "key")],
+            &key,
+        );
+
+        let mut creds = db.get_repo_credentials("r1", &key).unwrap();
+        creds.sort();
+        assert_eq!(
+            creds,
+            vec![
+                ("B2_ACCOUNT_ID".to_string(), "id".to_string()),
+                ("B2_ACCOUNT_KEY".to_string(), "key".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn get_repo_credentials_returns_empty_vec_for_ambient_repo() {
+        // Same invariant as the row-read path: a repo with NULL credential columns
+        // (every pre-existing repo, and any new repo saved without credentials) reads
+        // back as an empty list — never an error.
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_encrypted(&db, "r1", "S3 Repo", "s3:s3.amazonaws.com/bucket", "pw", &key);
+        assert!(db.get_repo_credentials("r1", &key).unwrap().is_empty());
+    }
+
     // ── rotate_master_key ───────────────────────────────────────────────────
 
     fn make_key(byte: u8) -> [u8; 32] {
@@ -2500,7 +2865,34 @@ mod tests {
 
     fn add_repo_encrypted(db: &AppDb, id: &str, name: &str, path: &str, password: &str, key: &[u8; 32]) {
         let (nonce, ct) = super::crypto::encrypt(key, password.as_bytes()).unwrap();
-        db.add_repo(id, name, path, &nonce, &ct, false).unwrap();
+        db.add_repo(id, name, path, &nonce, &ct, false, None, None).unwrap();
+    }
+
+    fn add_repo_with_credentials(
+        db: &AppDb,
+        id: &str,
+        path: &str,
+        password: &str,
+        credentials: &[(&str, &str)],
+        key: &[u8; 32],
+    ) {
+        let (nonce, ct) = super::crypto::encrypt(key, password.as_bytes()).unwrap();
+        let creds: Vec<Credential> = credentials
+            .iter()
+            .map(|(k, v)| Credential { key: k.to_string(), value: v.to_string() })
+            .collect();
+        let (cred_nonce, cred_ct) = encode_credentials(key, &creds).unwrap();
+        db.add_repo(
+            id,
+            "Repo",
+            path,
+            &nonce,
+            &ct,
+            false,
+            cred_nonce.as_deref(),
+            cred_ct.as_deref(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2554,6 +2946,108 @@ mod tests {
         // Original encrypted password still readable with real_key.
         let r1 = db.get_full_repo("r1", &real_key).unwrap();
         assert_eq!(r1.password, "correct-password");
+    }
+
+    #[test]
+    fn rotate_master_key_preserves_credentials() {
+        let db = test_db();
+        let old_key = make_key(1);
+        let new_key = make_key(2);
+
+        add_repo_with_credentials(
+            &db,
+            "r1",
+            "b2:my-bucket:restic",
+            "pw",
+            &[("B2_ACCOUNT_ID", "id123"), ("B2_ACCOUNT_KEY", "key456")],
+            &old_key,
+        );
+
+        let salt = [0u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        db.rotate_master_key(&old_key, &new_key, &salt, &vn, &vct).unwrap();
+
+        let r1 = db.get_full_repo("r1", &new_key).unwrap();
+        assert_eq!(r1.password, "pw");
+        let mut creds: Vec<(String, String)> =
+            r1.credentials.iter().map(|c| (c.key.clone(), c.value.clone())).collect();
+        creds.sort();
+        assert_eq!(
+            creds,
+            vec![
+                ("B2_ACCOUNT_ID".to_string(), "id123".to_string()),
+                ("B2_ACCOUNT_KEY".to_string(), "key456".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rotate_master_key_rolls_back_atomically_on_undecryptable_credentials() {
+        // A corrupted/undecryptable credentials blob must fail the whole rotation
+        // rather than commit a partial result (e.g. password re-encrypted, credentials
+        // left broken). Proven by checking the password_nonce/password_ciphertext
+        // columns are byte-for-byte unchanged afterward — nothing committed. This is
+        // the same all-or-nothing property the post-rotation verification pass exists
+        // to guarantee more generally, for any secret field `decode_secrets` covers,
+        // not just this case.
+        //
+        // Reads the raw columns directly rather than through `get_full_repo`: the
+        // corruption below is applied outside any transaction (a real
+        // UPDATE, committed immediately), so it permanently breaks the credentials
+        // blob regardless of what rotate_master_key does — decoding via
+        // `decode_secrets` would fail on the (deliberately, permanently) corrupted
+        // credentials even when the password itself was never touched.
+        let db = test_db();
+        let old_key = make_key(1);
+        let new_key = make_key(2);
+
+        add_repo_with_credentials(
+            &db,
+            "r1",
+            "b2:my-bucket:restic",
+            "pw",
+            &[("B2_ACCOUNT_ID", "id123"), ("B2_ACCOUNT_KEY", "key456")],
+            &old_key,
+        );
+
+        let before: (Vec<u8>, Vec<u8>) = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT password_nonce, password_ciphertext FROM repositories WHERE id = 'r1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+
+        // Directly corrupt the credentials blob to simulate it having been left under
+        // a key that is neither old_key nor new_key (standing in for "never
+        // re-encrypted").
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE repositories SET credentials_ciphertext = X'DEADBEEF' WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let salt = [0u8; 16];
+        let (vn, vct) = super::crypto::encrypt(&new_key, b"verified").unwrap();
+        assert!(db.rotate_master_key(&old_key, &new_key, &salt, &vn, &vct).is_err());
+
+        // Nothing committed — the password columns are exactly what they were before
+        // the rotation attempt (still under old_key, never touched).
+        let after: (Vec<u8>, Vec<u8>) = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT password_nonce, password_ciphertext FROM repositories WHERE id = 'r1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(before, after);
     }
 
     #[test]

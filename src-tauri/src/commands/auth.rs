@@ -1,8 +1,8 @@
 use tauri::{AppHandle, Manager, State};
 
-use super::cache::{AppDb, FullRepository, MasterKey};
+use super::cache::{AppDb, MasterKey};
 use super::crypto;
-use super::repo::run_restic_with_path;
+use super::repo::unlock_quietly;
 
 const VERIFICATION_PLAINTEXT: &[u8] = b"restic-gui-v1-ok";
 
@@ -73,12 +73,9 @@ pub async fn unlock_app(
                 continue;
             }
             if let Ok(full) = db.get_full_repo(&repo.id, &key) {
-                let path = full.path.clone();
-                let pass = full.password.clone();
                 let rp = restic_path.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    let fr = FullRepository { path, password: pass, read_only: false };
-                    let _ = run_restic_with_path(&fr, vec!["unlock"], &rp);
+                    unlock_quietly(&full, &rp);
                 })
                 .await;
             }
