@@ -96,6 +96,13 @@ export default function RepositoriesPage() {
   // Snapshot of credentials as loaded from the server, for dirty-checking on save
   // (skip the re-write if nothing changed — matches the password field's pattern).
   const [editLoadedCredentials, setEditLoadedCredentials] = useState<[string, string][]>([]);
+  // Guards the save path against acting on partially-loaded secret state — see
+  // openEditModal. `editSecretsError` latches until the modal is reopened. Without
+  // this, a failed/slow getRepoCredentials left editCredentialRows at its initial `[]`,
+  // and a password-only save would then send credentials: [] — which
+  // update_repo_secrets reads as "clear stored credentials" — silently destroying them.
+  const [editSecretsLoading, setEditSecretsLoading] = useState(false);
+  const [editSecretsError, setEditSecretsError] = useState(false);
   const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -521,14 +528,22 @@ export default function RepositoriesPage() {
   const handleRename = async (e: FormEvent) => {
     e.preventDefault();
     if (!editTarget || !editName.trim() || !editPath.trim() || (!editNoPassword && !editPassword.trim())) return;
+    // Never save from a modal whose stored secrets didn't load — editCredentialRows
+    // would still be at its unpopulated initial state, and sending that as
+    // `credentials` would be read by update_repo_secrets as "clear stored
+    // credentials". Save is also disabled in this state (see the Save button below);
+    // this is the belt to that braces.
+    if (editSecretsLoading || editSecretsError) return;
     const trimmedPath = editPath.trim();
     const originalKind = detectBackend(editTarget.path);
     const newKind = detectBackend(trimmedPath);
     // Backend kind is derived from the path (never stored — see CLAUDE.md), so a
-    // path edit that changes the backend while credentials are already stored would
-    // silently leave those credentials pointed at the wrong kind of backend. Block
-    // the save rather than guess which set (if any) still applies.
-    if (newKind !== originalKind && editCredentialRows.filter(([k]) => k.trim() !== "").length > 0) {
+    // path edit that changes the backend while credentials are already *stored*
+    // would silently leave those credentials pointed at the wrong kind of backend.
+    // Checked against editLoadedCredentials (what's actually stored), not the form's
+    // editCredentialRows — a repo with nothing stored yet may legitimately change
+    // path and enter new credentials for the new backend in the same save.
+    if (newKind !== originalKind && editLoadedCredentials.length > 0) {
       setEditTestResult({
         ok: false,
         message: "This path looks like a different kind of backend than the one this repo's stored credentials were entered for. Clear the stored credentials first, or create a new repository entry instead.",
@@ -561,7 +576,7 @@ export default function RepositoriesPage() {
         await updateRepoSecrets(
           editTarget.id,
           passwordChanged ? newPassword : undefined,
-          newCredentials
+          credentialsChanged ? newCredentials : undefined
         );
       }
       if (editReadOnly !== editTarget.readOnly) {
@@ -578,6 +593,44 @@ export default function RepositoriesPage() {
     resetAddForm();
     setError("");
     setModalMode(mode);
+  };
+
+  // Opens the edit modal for `repo` and loads its stored password + credentials
+  // together, not as two independent promises: the save path (handleRename)
+  // dirty-checks password and credentials against each other, so partially-loaded
+  // secret state is never safe to save from — either both are trustworthy or
+  // neither is (see editSecretsLoading/editSecretsError, and the Save button's
+  // disabled prop below).
+  const openEditModal = (repo: Repository) => {
+    setEditTarget(repo);
+    setEditName(repo.name);
+    setEditPath(repo.path);
+    setEditPassword("");
+    setEditNoPassword(false);
+    setEditReadOnly(repo.readOnly);
+    setEditTestResult(null);
+    setEditCredentialRows([]);
+    setEditLoadedCredentials([]);
+    setEditSecretsError(false);
+    setEditSecretsLoading(true);
+    Promise.all([getRepoPassword(repo.id), getRepoCredentials(repo.id)])
+      .then(([pw, creds]) => {
+        setEditPassword(pw);
+        setEditNoPassword(pw === "");
+        const rows = creds.map(([k, v]): [string, string] => [k, v]);
+        setEditCredentialRows(rows);
+        setEditLoadedCredentials(rows);
+      })
+      .catch(() => {
+        setEditSecretsError(true);
+        setEditTestResult({
+          ok: false,
+          message:
+            "Couldn't load this repository's saved password and credentials. Close and " +
+            "reopen this dialog before saving — saving now could overwrite them.",
+        });
+      })
+      .finally(() => setEditSecretsLoading(false));
   };
 
   const handleTest = async () => {
@@ -850,25 +903,7 @@ export default function RepositoriesPage() {
                     size="sm"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setEditTarget(repo);
-                      setEditName(repo.name);
-                      setEditPath(repo.path);
-                      setEditPassword("");
-                      setEditNoPassword(false);
-                      setEditReadOnly(repo.readOnly);
-                      setEditTestResult(null);
-                      setEditCredentialRows([]);
-                      setEditLoadedCredentials([]);
-                      getRepoPassword(repo.id)
-                        .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
-                        .catch(() => {});
-                      getRepoCredentials(repo.id)
-                        .then((creds) => {
-                          const trimmed = creds.map(([k, v]): [string, string] => [k, v]);
-                          setEditCredentialRows(trimmed);
-                          setEditLoadedCredentials(trimmed);
-                        })
-                        .catch(() => {});
+                      openEditModal(repo);
                     }}
                     className="text-gray-500 hover:text-blue-400"
                     title="Rename"
@@ -1173,7 +1208,7 @@ export default function RepositoriesPage() {
               <Button variant="secondary" type="button" onClick={() => setEditTarget(null)}>
                 Cancel
               </Button>
-              <Button type="submit" loading={renaming}>
+              <Button type="submit" loading={renaming} disabled={editSecretsLoading || editSecretsError}>
                 Save
               </Button>
             </div>
@@ -1395,26 +1430,7 @@ export default function RepositoriesPage() {
             {
               label: "Edit",
               onClick: () => {
-                const repo = contextMenu.repo;
-                setEditTarget(repo);
-                setEditName(repo.name);
-                setEditPath(repo.path);
-                setEditPassword("");
-                setEditNoPassword(false);
-                setEditReadOnly(repo.readOnly);
-                setEditTestResult(null);
-                setEditCredentialRows([]);
-                setEditLoadedCredentials([]);
-                getRepoPassword(repo.id)
-                  .then((pw) => { setEditPassword(pw); setEditNoPassword(pw === ""); })
-                  .catch(() => {});
-                getRepoCredentials(repo.id)
-                  .then((creds) => {
-                    const trimmed = creds.map(([k, v]): [string, string] => [k, v]);
-                    setEditCredentialRows(trimmed);
-                    setEditLoadedCredentials(trimmed);
-                  })
-                  .catch(() => {});
+                openEditModal(contextMenu.repo);
               },
             },
             {
@@ -1483,14 +1499,14 @@ export default function RepositoriesPage() {
             <div className="flex rounded-lg overflow-hidden border border-gray-700 mb-3">
               <button
                 type="button"
-                onClick={() => { setPathMode("local"); setForm((f) => ({ ...f, path: "" })); setTestResult(null); }}
+                onClick={() => { setPathMode("local"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); }}
                 className={`flex-1 py-1.5 text-sm font-medium transition-colors ${pathMode === "local" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
               >
                 Local Path
               </button>
               <button
                 type="button"
-                onClick={() => { setPathMode("remote"); setForm((f) => ({ ...f, path: "" })); setTestResult(null); }}
+                onClick={() => { setPathMode("remote"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); }}
                 className={`flex-1 py-1.5 text-sm font-medium transition-colors ${pathMode === "remote" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
               >
                 Remote URL

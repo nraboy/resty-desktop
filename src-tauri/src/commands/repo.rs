@@ -143,12 +143,20 @@ pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &Full
 /// was. A credential with an empty value is skipped rather than set as `""`: an empty
 /// `AWS_ACCESS_KEY_ID=""` would *break* that chain rather than falling through to it.
 ///
-/// Callers must apply this before `apply_repo_password`/`.augment_path()` so that
-/// those app-controlled env vars win on a name collision — `validate_credentials`
-/// (`backends.rs`) also rejects `PATH`/`RESTIC_*` credential keys outright, so this is
-/// defense in depth, not the only guard.
+/// A reserved key (`backends::is_reserved_key` — `PATH` or any `RESTIC_*` var) is
+/// skipped unconditionally, regardless of call order. Callers set `RESTIC_REPOSITORY`
+/// (and `RESTIC_FROM_REPOSITORY`, `RESTIC_COMPRESSION`) on `cmd` *before* calling this,
+/// so without this guard a stored credential of one of those names would win the
+/// collision and silently redirect the operation to a different repository.
+/// `validate_credentials` (`backends.rs`) already rejects a reserved key at entry, but
+/// that only covers rows that went through it — an imported bundle (or a hand-edited
+/// database) is a second path a row can reach the DB by, so this is the guarantee that
+/// does not depend on every ingest path remembering to validate.
 pub(crate) fn apply_backend_env(cmd: &mut std::process::Command, credentials: &[Credential]) {
     for c in credentials {
+        if backends::is_reserved_key(&c.key) {
+            continue;
+        }
         if !c.value.is_empty() {
             cmd.env(&c.key, &c.value);
         }
@@ -1266,6 +1274,51 @@ mod tests {
         let mut cmd = std::process::Command::new("restic");
         apply_backend_env(&mut cmd, &[cred("AWS_ACCESS_KEY_ID", "")]);
         assert_eq!(cmd.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn apply_backend_env_skips_reserved_keys() {
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(
+            &mut cmd,
+            &[
+                cred("PATH", "/evil"),
+                cred("RESTIC_PASSWORD", "hunter2"),
+                cred("RESTIC_REPOSITORY", "/attacker/repo"),
+            ],
+        );
+        assert_eq!(cmd.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn apply_backend_env_still_sets_non_reserved_keys_alongside_a_reserved_one() {
+        // One bad entry in the list must not discard the rest.
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(&mut cmd, &[cred("B2_ACCOUNT_ID", "id"), cred("PATH", "/evil")]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "B2_ACCOUNT_ID" && *v == Some(std::ffi::OsStr::new("id"))));
+        assert!(!envs.iter().any(|(k, _)| *k == "PATH"));
+    }
+
+    #[test]
+    fn credential_cannot_override_restic_repository() {
+        // Regression test: every real call site (run_restic_with_path, execute_backup,
+        // restore_snapshot, copy_snapshot, mirror_repo, run_one_prune_attempt) sets
+        // RESTIC_REPOSITORY on `cmd` *before* calling apply_repo_flags/apply_backend_env.
+        // A stored credential named RESTIC_REPOSITORY must not be able to win that
+        // collision and redirect the operation to a different repository.
+        let mut cmd = std::process::Command::new("restic");
+        cmd.env("RESTIC_REPOSITORY", "/real/repo");
+        let repo = FullRepository {
+            path: "/real/repo".into(),
+            password: "hunter2".into(),
+            read_only: false,
+            credentials: vec![cred("RESTIC_REPOSITORY", "/attacker/repo")],
+        };
+        apply_repo_flags(&mut cmd, &repo);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let repo_env = envs.iter().find(|(k, _)| *k == "RESTIC_REPOSITORY").unwrap();
+        assert_eq!(repo_env.1, Some(std::ffi::OsStr::new("/real/repo")));
     }
 
     #[test]

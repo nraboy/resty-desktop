@@ -388,6 +388,17 @@ pub fn import_data(
             });
             value.zeroize();
         }
+        // Bundles are documented as hand-editable, so treat their credentials as
+        // untrusted input and hold them to the same rules the add/edit forms enforce
+        // (in particular the PATH/RESTIC_* denylist — apply_backend_env also guards
+        // against those at apply time, but rejecting them here means a hand-crafted
+        // bundle fails loudly on import rather than importing a booby-trapped row).
+        // Backend kind comes from the bundle's own path via the same detect_kind
+        // every other credential entry point uses.
+        let cred_pairs: Vec<(String, String)> =
+            credentials.iter().map(|c| (c.key.clone(), c.value.clone())).collect();
+        super::backends::validate_credentials(super::backends::detect_kind(&r.path), &cred_pairs)
+            .map_err(|e| format!("Repository '{}': {e}", r.name))?;
         let (cred_nonce, cred_ciphertext) = super::cache::encode_credentials(&key, &credentials)?;
 
         let new_id = uuid::Uuid::new_v4().to_string();

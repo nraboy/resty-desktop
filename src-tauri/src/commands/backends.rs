@@ -68,25 +68,42 @@ pub fn detect_kind(path: &str) -> BackendKind {
     }
 }
 
+/// Env var names the app controls itself and a stored credential must never set:
+/// `PATH` (see `NoConsole::augment_path`) and every `RESTIC_*` var (repository,
+/// password, compression, …). Shared by `validate_credentials` — which rejects such a
+/// key at entry, the earlier and louder guard — and `repo::apply_backend_env`, which
+/// skips it at apply time so the guarantee holds even for a credential that reached
+/// the DB some other way (e.g. a hand-edited import bundle).
+pub fn is_reserved_key(key: &str) -> bool {
+    key == "PATH" || key.starts_with("RESTIC_")
+}
+
 /// Validates a proposed credential set for `kind`. An empty set is always valid —
 /// that's the "use restic's own credential chain" ambient mode (see CLAUDE.md) — so
 /// this only enforces shape once the user has actually entered something.
 ///
-/// Every kind rejects a `PATH` or `RESTIC_*` key: `apply_backend_env` runs before
-/// `apply_repo_password`/`augment_path()` specifically so those calls win on a
-/// conflict, but rejecting the key outright here means a hostile or accidental entry
-/// (e.g. from a free-form "Other" list, or a Backrest import) can never even reach
-/// that fallback.
+/// Every kind rejects a reserved (`PATH`/`RESTIC_*`) key outright — see
+/// `is_reserved_key` and `repo::apply_backend_env` for why this is defense in depth
+/// rather than the only guard — and a key listed more than once, which would
+/// otherwise resolve inconsistently (`cache::encode_credentials` keeps the last
+/// duplicate via its `HashMap`, `repo::merge_credentials` keeps the first via its
+/// `Vec::find`).
 pub fn validate_credentials(kind: BackendKind, creds: &[(String, String)]) -> Result<(), String> {
     if creds.is_empty() {
         return Ok(());
     }
 
     for (key, _) in creds {
-        if key == "PATH" || key.starts_with("RESTIC_") {
+        if is_reserved_key(key) {
             return Err(format!(
                 "'{key}' is a reserved variable and cannot be set as a backend credential"
             ));
+        }
+    }
+
+    for (i, (key, _)) in creds.iter().enumerate() {
+        if creds[..i].iter().any(|(prev, _)| prev == key) {
+            return Err(format!("'{key}' is listed more than once"));
         }
     }
 
@@ -213,5 +230,37 @@ mod tests {
                 "{kind:?} should reject RESTIC_* keys"
             );
         }
+    }
+
+    // ── is_reserved_key ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_reserved_key_matches_path_and_restic_prefix() {
+        assert!(is_reserved_key("PATH"));
+        assert!(is_reserved_key("RESTIC_PASSWORD"));
+        assert!(is_reserved_key("RESTIC_REPOSITORY"));
+        assert!(!is_reserved_key("AWS_ACCESS_KEY_ID"));
+        assert!(!is_reserved_key("B2_ACCOUNT_ID"));
+        // Guards against a `starts_with("PATH")` slip — only the exact "PATH" is reserved.
+        assert!(!is_reserved_key("PATHOLOGICAL"));
+    }
+
+    // ── duplicate keys ──────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_credentials_rejects_duplicate_keys() {
+        let creds = kv(&[("B2_ACCOUNT_ID", "one"), ("B2_ACCOUNT_ID", "two")]);
+        let err = validate_credentials(BackendKind::B2, &creds).unwrap_err();
+        assert!(err.contains("B2_ACCOUNT_ID"));
+    }
+
+    #[test]
+    fn validate_credentials_reports_duplicate_before_missing_required() {
+        // Two AWS_ACCESS_KEY_ID rows, no AWS_SECRET_ACCESS_KEY at all — the duplicate
+        // should be caught first rather than surfacing as a confusing "missing
+        // required credential" error.
+        let creds = kv(&[("AWS_ACCESS_KEY_ID", "one"), ("AWS_ACCESS_KEY_ID", "two")]);
+        let err = validate_credentials(BackendKind::S3, &creds).unwrap_err();
+        assert!(err.contains("more than once"));
     }
 }
