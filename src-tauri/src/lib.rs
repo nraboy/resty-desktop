@@ -203,11 +203,6 @@ pub fn run() {
             let conn = Connection::open(&db_path)?;
             cache::AppDb::init_schema(&conn)?;
             let app_db = cache::AppDb::new(conn, db_path);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let _ = app_db.recalculate_overdue_schedules(now);
             app.manage(app_db);
             app.manage(cache::MasterKey::new());
             app.manage(cache::CopyHandle::new());

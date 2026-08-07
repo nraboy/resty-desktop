@@ -85,3 +85,10 @@ export function formatRelative(ts: number): string {
   const plural = amount === 1 ? unit : `${unit}s`;
   return future ? `in ${amount} ${plural}` : `${amount} ${plural} ago`;
 }
+
+/** True if a Unix-seconds timestamp is set and in the past — used to flag an enabled
+ *  schedule whose next_run_at is overdue (catch-up pending, waiting for the next
+ *  scheduler tick to pick it up). */
+export function isOverdue(ts?: number): boolean {
+  return !!ts && ts <= Math.floor(Date.now() / 1000);
+}

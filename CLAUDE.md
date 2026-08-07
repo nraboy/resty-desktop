@@ -424,7 +424,9 @@ src-tauri/
                      #   registry, so multiple mirrors — including two into the same destination from different
                      #   sources — can be queued and cancelled independently; see the Operation Event Bus
                      #   section's mirror paragraph for the full design);
-                     #   rotate_master_key (atomic key rotation); recalculate_overdue_schedules;
+                     #   rotate_master_key (atomic key rotation); set_schedule_next_run (used by
+                     #   toggle_schedule to recompute next_run_at on enable, so a re-enabled schedule
+                     #   doesn't immediately fire as "missed");
                      #   get_snapshots_vec: reads snapshots_cache rows straight into Vec<Snapshot> (paths/tags JSON
                      #   columns parsed once) — no intermediate JSON-string serialization;
                      #   list_backup_history + log_backup trim, both bounded by BACKUP_HISTORY_LIMIT (1000, newest-first);
@@ -474,6 +476,13 @@ src-tauri/
                      #   minute-boundary tick still bounds how soon a newly-due schedule starts (up to ~60s after
                      #   its due instant) — this is tick granularity, not RepoLocks contention (backup and indexing
                      #   both take non-blocking read guards).
+                     #   Missed-schedule catch-up: schedules that were due while the app was closed stay "due"
+                     #   (next_run_at in the past) and are picked up by the first tick after unlock, running
+                     #   sequentially via the same busy-flag serialization as normal scheduled backups. Each missed
+                     #   schedule runs exactly once regardless of how many intervals passed (next_fire_time always
+                     #   computes forward from now, never replaying missed intervals). A failed catch-up backup is
+                     #   a normal failure — next_run_at was already advanced by record_schedule_run before the
+                     #   backup started, so the schedule fires again at its next normal time, not re-queued as a miss.
 ```
 
 ## Routes

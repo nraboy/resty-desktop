@@ -44,11 +44,6 @@ pub async fn unlock_app(
     let key = crypto::derive_key(&password, &salt)?;
     crypto::decrypt(&key, &nonce, &ciphertext)?;
     master_key.set(key)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let _ = db.recalculate_overdue_schedules(now);
 
     // Clean up any stale locks left by a previous crash or force-quit.
     // Runs in the background so unlock_app returns immediately.

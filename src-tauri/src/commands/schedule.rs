@@ -85,6 +85,24 @@ pub fn remove_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule_id:
 #[tauri::command]
 pub fn toggle_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule_id: String, enabled: bool) -> Result<(), String> {
     db.set_schedule_enabled(&schedule_id, enabled)?;
+
+    // When enabling, recompute next_run_at to the next future fire time so a
+    // re-enabled schedule waits for its next legitimate occurrence rather than
+    // immediately firing as "missed" (its next_run_at may be stale from however
+    // long it was disabled). Matches save_schedule's own next_fire_time
+    // recomputation. Best-effort — if the schedule or cron parse can't be
+    // resolved, the toggle still succeeds (the schedule may just fire once as
+    // catch-up, which is the pre-fix behavior and not worse).
+    if enabled {
+        if let Ok(schedules) = db.list_schedules() {
+            if let Some(sched) = schedules.into_iter().find(|s| s.id == schedule_id) {
+                if let Ok(next) = next_fire_time(&sched.cron_expr) {
+                    let _ = db.set_schedule_next_run(&schedule_id, Some(next));
+                }
+            }
+        }
+    }
+
     let _ = app.emit("schedules:changed", ());
     Ok(())
 }

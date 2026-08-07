@@ -63,7 +63,7 @@ import { useEffect, useRef, useState } from "react";
 import { useActivity } from "../lib/activity";
 import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
-import { formatBytes, formatRelative } from "../lib/format";
+import { formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
 
 function SectionHeading({ children }: { children: string }) {
@@ -520,7 +520,7 @@ export default function ActivityPanel() {
                     className="text-xs text-gray-500 truncate"
                     title={`${u.planNames.join(", ") || "No plans"} · ${formatRelative(u.nextRunAt)}`}
                   >
-                    {u.planNames.join(", ") || "No plans"} · {formatRelative(u.nextRunAt)}
+                    {u.planNames.join(", ") || "No plans"} · {isOverdue(u.nextRunAt) ? "Running soon" : formatRelative(u.nextRunAt)}
                   </p>
                 </div>
               ))}

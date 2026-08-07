@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import { getTrayEnabled, listBackupPlans, listRepos, listSchedules, removeSchedule, toggleSchedule } from "../lib/invoke";
 import type { BackupPlan, Repository, Schedule } from "../lib/types";
-import { formatTimestamp } from "../lib/format";
+import { formatTimestamp, isOverdue } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
@@ -50,6 +51,14 @@ export default function SchedulesPage() {
     getTrayEnabled().then(setTrayEnabled).catch(() => {});
     listBackupPlans().then(setPlans).catch(() => {});
     listRepos().then(setRepos).catch(() => {});
+  }, []);
+
+  // Auto-refresh when the scheduler advances next_run_at (e.g., a catch-up tick
+  // picking up an overdue schedule) so the page doesn't show a stale time until
+  // the user navigates away and back.
+  useEffect(() => {
+    const unlisten = listen("schedules:changed", () => { load(); });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   // True if any of this schedule's plans target a repo that's currently marked read-only.
@@ -256,7 +265,11 @@ export default function SchedulesPage() {
                 </p>
                 <div className="flex gap-4 mt-1 text-xs text-gray-600">
                   <span>Last run: {formatTimestamp(sched.lastRunAt)}</span>
-                  <span>Next run: {sched.enabled ? formatTimestamp(sched.nextRunAt) : "—"}</span>
+                  <span>Next run: {sched.enabled
+                    ? (isOverdue(sched.nextRunAt)
+                      ? <span className="text-amber-400">Overdue — running soon</span>
+                      : formatTimestamp(sched.nextRunAt))
+                    : "—"}</span>
                 </div>
                 {scheduleHasReadOnlyRepo(sched) && (
                   <p className="text-xs text-amber-400 mt-1">
