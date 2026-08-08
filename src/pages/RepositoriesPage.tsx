@@ -32,7 +32,12 @@ import {
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
 import { INDEX_BATCH_ALREADY_ACTIVE_ERROR, MIRROR_ALREADY_ACTIVE_ERROR, isRemoteRepo } from "../lib/types";
-import { commonCredentialKeys, detectBackend } from "../lib/backends";
+import {
+  commonCredentialKeys,
+  detectBackend,
+  hasBrokenRestUserinfo,
+  hasInlineRestUserinfo,
+} from "../lib/backends";
 import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -458,6 +463,14 @@ export default function RepositoriesPage() {
     }
   };
 
+  // Trims a credential row's value before submit — except RESTIC_REST_PASSWORD,
+  // where leading/trailing whitespace can be a real part of the password and
+  // trimming it would produce a silently wrong value (a confusing 401) rather than
+  // a helpful cleanup. Every other credential (AWS_*, B2_*, arbitrary Other keys)
+  // keeps the existing trim-on-submit behavior.
+  const credentialValue = (key: string, value: string) =>
+    key === "RESTIC_REST_PASSWORD" ? value : value.trim();
+
   // Assembles the repository path for the add/open modal: s3/b2 build it from
   // their own bucket/endpoint fields rather than a freely-typed path, matching
   // detectBackend's total prefix logic on the Rust side (backends.rs).
@@ -468,7 +481,7 @@ export default function RepositoriesPage() {
   // clear "missing required credential" error if that leaves a required key unset).
   const buildAddCredentials = (): [string, string][] =>
     credentialRows
-      .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+      .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
       .filter(([k]) => k !== "");
 
   const resetAddForm = () => {
@@ -489,7 +502,13 @@ export default function RepositoriesPage() {
     setLoading(true);
     setError("");
     const id = crypto.randomUUID();
-    const path = form.path;
+    // Only the remote branch is freeform text that can carry paste whitespace. A
+    // local path comes from the folder picker (pickFolder) exactly as the
+    // filesystem returned it, and a trailing space is legal in a directory name on
+    // macOS/Linux — trimming that would silently repoint the repo at a path that
+    // doesn't exist. An untrimmed remote path (e.g. a pasted " rest:https://…")
+    // would detect as "local" and silently skip credential validation entirely.
+    const path = pathMode === "remote" ? form.path.trim() : form.path;
     const credentials = buildAddCredentials();
     try {
       if (modalMode === "init") {
@@ -555,7 +574,7 @@ export default function RepositoriesPage() {
     // valid (will be skipped by apply_backend_env, same as the add modal) — that's
     // an explicit user intent, not "I didn't type one yet".
     const newCredentials = editCredentialRows
-      .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+      .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
       .filter(([k]) => k !== "");
 
     setRenaming(true);
@@ -640,8 +659,11 @@ export default function RepositoriesPage() {
     }
     setTesting(true);
     setTestResult(null);
+    // Same remote-only trim as handleSubmit — see its comment for why local paths
+    // (folder-picker sourced) must not be trimmed.
+    const testPath = pathMode === "remote" ? form.path.trim() : form.path;
     try {
-      await testRepoConnection(form.path, noPassword ? "" : form.password, readOnly, buildAddCredentials());
+      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, buildAddCredentials());
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -1061,6 +1083,19 @@ export default function RepositoriesPage() {
                   autoCorrect="off"
                   autoComplete="off"
                 />
+                {hasBrokenRestUserinfo(editPath.trim() || editTarget.path) ? (
+                  <p className="text-xs text-amber-400">
+                    A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
+                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
+                    Credentials below instead (or percent-encode them — / → %2F).
+                  </p>
+                ) : hasInlineRestUserinfo(editPath.trim() || editTarget.path) &&
+                  editCredentialRows.some(([k]) => k.trim() !== "") ? (
+                  <p className="text-xs text-gray-500">
+                    This URL already contains a username/password, so restic will use those and
+                    ignore the credentials below.
+                  </p>
+                ) : null}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-medium text-gray-400">Credentials (optional)</label>
@@ -1535,6 +1570,18 @@ export default function RepositoriesPage() {
                   autoComplete="off"
                   autoFocus
                 />
+                {hasBrokenRestUserinfo(form.path) ? (
+                  <p className="text-xs text-amber-400">
+                    A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
+                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
+                    Credentials below instead (or percent-encode them — / → %2F).
+                  </p>
+                ) : hasInlineRestUserinfo(form.path) && credentialRows.some(([k]) => k.trim() !== "") ? (
+                  <p className="text-xs text-gray-500">
+                    This URL already contains a username/password, so restic will use those and
+                    ignore the credentials below.
+                  </p>
+                ) : null}
                 <div className="space-y-2">
                   <label className="block text-xs font-medium text-gray-400">
                     Credentials (optional)

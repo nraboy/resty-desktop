@@ -1322,6 +1322,44 @@ mod tests {
     }
 
     #[test]
+    fn apply_backend_env_sets_allowlisted_rest_credentials() {
+        // The allowlist in backends::is_reserved_key must hold at apply time too —
+        // apply_backend_env filters independently of validate_credentials.
+        let mut cmd = std::process::Command::new("restic");
+        apply_backend_env(
+            &mut cmd,
+            &[cred("RESTIC_REST_USERNAME", "u"), cred("RESTIC_REST_PASSWORD", "pass/word")],
+        );
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_REST_USERNAME"
+            && *v == Some(std::ffi::OsStr::new("u"))));
+        assert!(envs.iter().any(|(k, v)| *k == "RESTIC_REST_PASSWORD"
+            && *v == Some(std::ffi::OsStr::new("pass/word"))));
+    }
+
+    #[test]
+    fn apply_backend_env_sets_rest_credentials_but_still_skips_reserved_ones() {
+        // The allowlist must not become a hole: a RESTIC_REPOSITORY row alongside a
+        // legitimate REST pair is still dropped.
+        let mut cmd = std::process::Command::new("restic");
+        cmd.env("RESTIC_REPOSITORY", "rest:https://real/");
+        let repo = FullRepository {
+            path: "rest:https://real/".into(),
+            password: "hunter2".into(),
+            read_only: false,
+            credentials: vec![
+                cred("RESTIC_REST_PASSWORD", "pass/word"),
+                cred("RESTIC_REPOSITORY", "rest:https://attacker/"),
+            ],
+        };
+        apply_repo_flags(&mut cmd, &repo);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let repo_env = envs.iter().find(|(k, _)| *k == "RESTIC_REPOSITORY").unwrap();
+        assert_eq!(repo_env.1, Some(std::ffi::OsStr::new("rest:https://real/")));
+        assert!(envs.iter().any(|(k, _)| *k == "RESTIC_REST_PASSWORD"));
+    }
+
+    #[test]
     fn apply_repo_flags_applies_credentials_before_password() {
         let mut cmd = std::process::Command::new("restic");
         let repo = FullRepository {
@@ -1373,6 +1411,24 @@ mod tests {
         let dest = vec![cred("K", "v")];
         assert_eq!(merge_credentials(&dest, &[]).unwrap().len(), 1);
         assert_eq!(merge_credentials(&[], &dest).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_credentials_rejects_two_rest_repos_with_different_passwords() {
+        // restic reads one unprefixed RESTIC_REST_PASSWORD for both sides of a copy —
+        // there is no RESTIC_FROM_ counterpart — so this pairing is genuinely impossible
+        // and must fail pre-flight rather than as a confusing restic-level 401.
+        let dest = vec![cred("RESTIC_REST_PASSWORD", "dest-pw")];
+        let src = vec![cred("RESTIC_REST_PASSWORD", "src-pw")];
+        assert!(merge_credentials(&dest, &src).is_err());
+    }
+
+    #[test]
+    fn merge_credentials_allows_rest_source_with_non_rest_destination() {
+        let dest = vec![cred("B2_ACCOUNT_ID", "id")];
+        let src = vec![cred("RESTIC_REST_PASSWORD", "pw")];
+        let merged = merge_credentials(&dest, &src).unwrap();
+        assert_eq!(merged.len(), 2);
     }
 
     // ── last_nonblank_line / parse_stats_json ──────────────────────────────
