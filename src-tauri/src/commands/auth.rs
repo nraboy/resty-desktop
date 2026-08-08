@@ -2,7 +2,7 @@ use tauri::{AppHandle, Manager, State};
 
 use super::cache::{AppDb, MasterKey};
 use super::crypto;
-use super::repo::unlock_quietly;
+use super::repo::{set_launch_at_login, unlock_quietly};
 
 const VERIFICATION_PLAINTEXT: &[u8] = b"restic-gui-v1-ok";
 
@@ -110,9 +110,17 @@ pub async fn change_master_password(
 /// Wipe all user data and return the app to first-launch state.
 #[tauri::command]
 pub fn reset_app(
+    app: AppHandle,
     db: State<'_, AppDb>,
     master_key: State<'_, MasterKey>,
 ) -> Result<(), String> {
     db.reset_all()?;
+    // Best-effort: the autostart entry lives in the OS (LaunchAgent plist / HKCU Run value /
+    // XDG .desktop), not in app_settings, so reset_all can't reach it. Left behind, the machine
+    // would keep launching the app at login with no way to turn it off from Settings — the
+    // toggle renders off once tray_enabled reverts to its false default. Failure here must not
+    // fail the reset: wiping user data is the part that matters, and set_launch_at_login is
+    // already idempotent (see its Windows guard).
+    let _ = set_launch_at_login(app, false);
     master_key.clear()
 }

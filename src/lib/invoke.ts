@@ -116,6 +116,15 @@ export const setTrayEnabled = (value: boolean): Promise<void> =>
 export const getTrayWarning = (): Promise<string> =>
   invoke("get_tray_warning");
 
+export const getLaunchAtLogin = (): Promise<boolean> =>
+  invoke("get_launch_at_login");
+
+export const setLaunchAtLogin = (value: boolean): Promise<void> =>
+  invoke("set_launch_at_login", { value });
+
+export const getLaunchAtLoginWarning = (): Promise<string> =>
+  invoke("get_launch_at_login_warning");
+
 export const getRemoteAutoRefresh = (): Promise<boolean> =>
   invoke("get_remote_auto_refresh");
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setLaunchAtLogin, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
@@ -61,6 +61,8 @@ export default function SettingsPage() {
 
   const [trayEnabled, setTrayEnabledLocal] = useState(false);
   const [trayWarning, setTrayWarning] = useState("");
+  const [launchAtLogin, setLaunchAtLoginLocal] = useState(false);
+  const [launchAtLoginWarning, setLaunchAtLoginWarning] = useState("");
   const [autoIndexing, setAutoIndexingLocal] = useState(false);
   const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
 
@@ -80,6 +82,8 @@ export default function SettingsPage() {
     getRestorePath().then(setRestorePathLocal).catch(() => {});
     getTrayEnabled().then(setTrayEnabledLocal).catch(() => {});
     getTrayWarning().then(setTrayWarning).catch(() => {});
+    getLaunchAtLogin().then(setLaunchAtLoginLocal).catch(() => {});
+    getLaunchAtLoginWarning().then(setLaunchAtLoginWarning).catch(() => {});
     getAutoIndexing().then(setAutoIndexingLocal).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
     getResticVersion()
@@ -142,6 +146,25 @@ export default function SettingsPage() {
     } catch (err: any) {
       setTrayEnabledLocal(!enabled);
       setError(String(err));
+      return;
+    }
+    // Cleared on BOTH transitions, not just the disable path: turning the tray off
+    // unregisters the login item so no orphan is left behind that Settings can no
+    // longer show; turning it on guarantees the now-interactive autostart toggle
+    // starts from off rather than inheriting a surviving OS entry.
+    //
+    // Deliberately outside the try above: by this point the tray setting is persisted
+    // and the tray icon is already created/removed, so rolling trayEnabled back on a
+    // failure here would make the UI contradict both the DB and the real tray.
+    try {
+      await setLaunchAtLogin(false);
+      setLaunchAtLoginLocal(false);
+    } catch (err: any) {
+      setError(String(err));
+      // Don't assume "off" — the OS entry may well still exist. Re-read it so the
+      // toggle keeps matching reality, which is the whole reason this setting has no
+      // app_settings row.
+      getLaunchAtLogin().then(setLaunchAtLoginLocal).catch(() => {});
     }
   };
 
@@ -356,6 +379,55 @@ export default function SettingsPage() {
             )}
             {trayWarning && (
               <p className="mt-3 text-xs text-amber-500">{trayWarning}</p>
+            )}
+          </div>
+          <div className={["pt-4 border-t border-gray-800", trayEnabled ? "" : "opacity-50"].join(" ")}>
+            <p className="text-xs text-gray-500 mb-3">
+              Start Resty Desktop automatically when you log in. The app opens to the unlock
+              screen — scheduled backups resume once you unlock it. Closing that window without
+              unlocking quits the app until your next login.
+            </p>
+            <label
+              className={[
+                "flex items-center gap-3 select-none",
+                trayEnabled ? "cursor-pointer" : "cursor-default",
+              ].join(" ")}
+            >
+              <button
+                role="switch"
+                aria-checked={trayEnabled && launchAtLogin}
+                aria-label="Start Resty Desktop at login"
+                disabled={!trayEnabled}
+                onClick={() => {
+                  const next = !launchAtLogin;
+                  setLaunchAtLoginLocal(next);
+                  setLaunchAtLogin(next).catch((err) => {
+                    setLaunchAtLoginLocal(!next);
+                    setError(String(err));
+                  });
+                }}
+                className={[
+                  "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
+                  trayEnabled && launchAtLogin ? "bg-blue-600" : "bg-gray-700",
+                  trayEnabled ? "" : "cursor-not-allowed",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                    trayEnabled && launchAtLogin ? "translate-x-4" : "translate-x-1",
+                  ].join(" ")}
+                />
+              </button>
+              <span className="text-sm text-gray-300">Start Resty Desktop at login</span>
+            </label>
+            {!trayEnabled && (
+              <p className="mt-3 text-xs text-gray-500">
+                Requires the tray setting above — without it, closing the window quits the app.
+              </p>
+            )}
+            {trayEnabled && launchAtLoginWarning && (
+              <p className="mt-3 text-xs text-amber-500">{launchAtLoginWarning}</p>
             )}
           </div>
           <div className="pt-4 border-t border-gray-800">

@@ -148,6 +148,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        // app_name must be set explicitly: it defaults to package_info().name
+        // ("Resty Desktop", with a space), and auto-launch writes the Linux Exec=
+        // line and the Windows Run value unquoted. Also becomes the autostart
+        // filename and the macOS plist Label. MacosLauncher::LaunchAgent is the
+        // crate default (no TCC Automation prompt, unlike AppleScript mode), so
+        // it's deliberately left unset here.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("resty-desktop")
+                .build(),
+        )
         .setup(|app| {
             let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit Resty Desktop")
@@ -291,6 +302,9 @@ pub fn run() {
             repo::get_tray_enabled,
             repo::set_tray_enabled,
             repo::get_tray_warning,
+            repo::get_launch_at_login,
+            repo::set_launch_at_login,
+            repo::get_launch_at_login_warning,
             repo::get_remote_auto_refresh,
             repo::set_remote_auto_refresh,
             repo::get_auto_indexing,

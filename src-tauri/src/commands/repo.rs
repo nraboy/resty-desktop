@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 use super::backends;
 use super::cache::{AppDb, Credential, FullRepository, MasterKey, PruneHandle, Repository};
@@ -1065,6 +1066,50 @@ pub fn set_tray_enabled(db: State<'_, AppDb>, value: bool) -> Result<(), String>
 pub fn get_tray_warning() -> &'static str {
     #[cfg(target_os = "linux")]
     return "System tray support on Linux depends on your desktop environment. It works on KDE and XFCE, but GNOME requires the AppIndicator extension. If the tray icon does not appear after enabling, the app will continue running as a background process — relaunch it to restore the window.";
+    #[cfg(not(target_os = "linux"))]
+    return "";
+}
+
+/// Launch-at-login state, deliberately *not* backed by an `app_settings` row like every
+/// other toggle in this file. `tauri-plugin-autostart` reads the real OS entry (macOS
+/// LaunchAgent plist / Windows HKCU Run value / Linux XDG .desktop), so this can never
+/// drift from what the OS will actually do — including when the user removes the entry
+/// outside the app. A mirrored DB row would need reconciliation on every read.
+#[tauri::command]
+pub fn get_launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_launch_at_login(app: tauri::AppHandle, value: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if value {
+        return manager.enable().map_err(|e| e.to_string());
+    }
+    // auto-launch 0.5.0 guards its disable path with `file.exists()` on macOS and Linux
+    // but NOT on Windows, where it calls RegDeleteValueW unconditionally and errors with
+    // ERROR_FILE_NOT_FOUND when the Run value isn't there. SettingsPage's handleTrayToggle
+    // clears launch-at-login on every tray toggle, so without this guard every Windows user
+    // who has never enabled autostart would see their tray toggle fail. Checking first makes
+    // this setter idempotent everywhere. If is_enabled() itself fails we skip rather than
+    // surface it — a disable we can't confirm is needed is not worth failing the caller over.
+    // (Edge case: a Run value the user switched off via Task Manager makes is_enabled() report
+    // false while the value still exists, so the guard skips deleting it — leaving a
+    // stale-but-inert registry value, which is harmless since it can't launch the app.)
+    if manager.is_enabled().unwrap_or(false) {
+        manager.disable().map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn get_launch_at_login_warning() -> &'static str {
+    #[cfg(target_os = "linux")]
+    return "Starting at login relies on your desktop environment honoring XDG autostart. \
+            GNOME, KDE, and XFCE do; a bare window manager may not. The saved entry also \
+            records the application's current location, so turn this off and on again after \
+            moving or reinstalling the app.";
     #[cfg(not(target_os = "linux"))]
     return "";
 }

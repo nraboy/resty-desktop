@@ -19,6 +19,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Memory safety | `zeroize` crate — `MasterKey` and `FullRepository` zeroize sensitive bytes on drop/replace; `FullRepository` also derives `Clone` (each clone still zeroizes independently) so one-shot restic calls can own their repo across a `spawn_blocking` boundary |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
+| Launch at login | `tauri-plugin-autostart` (`.app_name("resty-desktop")`, default `MacosLauncher::LaunchAgent`) — OS-native entry (macOS LaunchAgent plist / Windows HKCU Run value / Linux XDG `.desktop`), gated in the UI on the tray setting; no `app_settings` row, the OS entry is the sole source of truth |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag; one-shot calls run via `run_restic_blocking` (`repo.rs`), which runs on a `spawn_blocking` thread so they never occupy an async-runtime worker |
 
@@ -308,6 +309,13 @@ src/
                             #   real failure — a CANCELLED_BACKUP_ERROR entry renders a neutral "Cancelled"
                             #   glyph instead of the red error icon, and isn't expandable)
     SettingsPage.tsx        # Theme selector; tray + auto-indexing + remote-auto-refresh toggles; restic binary path;
+                            #   a launch-at-login toggle (its own pt-4 border-t row, a peer of the other toggles,
+                            #   not visually nested under tray) that's always rendered but disabled/greyed
+                            #   (checked state forced to false) unless the tray toggle is on, since without the
+                            #   tray closing the window quits the app; handleTrayToggle clears
+                            #   launch-at-login on BOTH tray transitions (not just disabling) so it never inherits
+                            #   a surviving OS entry or leaves an orphaned one; backed by the real OS autostart
+                            #   entry (no app_settings row — see Stack table's "Launch at login" row and repo.rs);
                             #   compression selector; default restore path; prune all repos with streaming progress
                             #   (read-only repos are excluded — repo.rs's prune_all_repos skips them rather than
                             #   failing the batch; the confirm/done screens fetch and display the excluded count
@@ -341,7 +349,9 @@ src-tauri/
                      #   update_repo_secrets (password and/or credentials, one transaction); test_repo_connection;
                      #   get/refresh_repo_stats; get/set_restic_path; get_restic_version; check_repo;
                      #   get/set_compression; get/set_restore_path; get/set_tray_enabled;
-                     #   get/set_remote_auto_refresh; get/set_auto_indexing (default false);
+                     #   get/set_launch_at_login (OS-native autostart entry, no app_settings row —
+                     #   see Stack table); get_launch_at_login_warning (Linux XDG-autostart caveat,
+                     #   mirrors get_tray_warning); get/set_remote_auto_refresh; get/set_auto_indexing (default false);
                      #   prune_all_repos; prune_repo; cancel_prune;
                      #   check_full_disk_access (macOS only — probes TCC.db; returns {supported, granted});
                      #   open_full_disk_access_settings (macOS only — deep-links to Privacy & Security pane);
@@ -1060,6 +1070,68 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   revisiting that trade-off. Also don't add `WEBKIT_DISABLE_COMPOSITING_MODE` alongside the
   other two "for completeness" — it's the most expensive of Tauri's three options and targets a
   symptom (crash-on-resize) nothing here has actually reported.
+- **Launch-at-login (`repo::get/set_launch_at_login`) has no `app_settings` row, unlike every
+  other Settings toggle in this file.** `tauri-plugin-autostart`'s `is_enabled()` reads the real
+  OS entry (macOS LaunchAgent plist / Windows HKCU Run value / Linux XDG `.desktop`) directly, so
+  the toggle can never drift from what the OS will actually do on next login — including when the
+  user deletes the entry outside the app. Mirroring the `tray_enabled`/`auto_indexing` pattern
+  with a DB row here would reintroduce exactly the drift the plugin's own storage already avoids,
+  and would need reconciliation logic on every read. Don't add one "for consistency" with the
+  other toggles.
+- **`.app_name("resty-desktop")` on the `tauri_plugin_autostart::Builder` must not be dropped.**
+  It defaults to `package_info().name`, which for this app is `"Resty Desktop"` — with a space —
+  and the pinned `auto-launch 0.5.0` writes both the Linux `Exec=` line and the Windows Run
+  registry value **unquoted**. Losing the explicit name reintroduces a broken/ambiguous autostart
+  entry on those two platforms.
+- **A login launch shows the window on the unlock screen; it does not launch hidden into the
+  tray.** The app always starts locked (`MasterKey` is in-memory only, no auto-unlock command
+  exists), and `scheduler.rs`'s tick silently no-ops while locked — so a hidden launch would park
+  a locked app in the tray running nothing until the user found and clicked the tray icon,
+  advertising background activity ("launch at login") the app cannot actually perform yet. A
+  visible unlock screen gets the user to unlock (and backups to actually resume) immediately, at
+  the cost of not being a silent background start. Revisiting this requires first designing an
+  auto-unlock story, which is a security decision, not a startup one.
+- **`SettingsPage.tsx`'s `handleTrayToggle` clears launch-at-login on *enabling* the tray, not
+  only on disabling it.** Clearing only on disable looks sufficient at first glance — it does stop
+  an orphaned OS entry from surviving after the tray (and thus hide-to-tray) goes away — but it
+  would let the launch-at-login toggle silently inherit whatever OS-level entry happened to
+  already exist the moment the tray is turned back on. Clearing on both transitions guarantees the
+  now-interactive toggle always starts from a known "off" state. That clear call is deliberately
+  placed *after*, not inside, the tray operation's own `try`/`catch` — by the time it runs, the
+  tray setting is already persisted and the tray icon already created/removed, so a failure here
+  must not roll `trayEnabled` back (that would make the UI contradict both the DB and the real
+  tray); it reports its own error and re-reads `is_enabled()` instead of assuming the clear
+  landed, since this setting has no `app_settings` row backing it to fall back on.
+- **`repo::set_launch_at_login`'s disable path checks `is_enabled()` before calling
+  `disable()` — this is not redundant defensiveness, do not remove it.** `auto-launch 0.5.0`
+  guards its own disable path with `file.exists()` on macOS and Linux (`if file.exists() {
+  fs::remove_file(file)?; }`) but *not* on Windows, where it calls `RegDeleteValueW`
+  unconditionally via `winreg`'s `delete_value`, which errors `ERROR_FILE_NOT_FOUND` when the
+  `Run` value isn't there. `handleTrayToggle` (`SettingsPage.tsx`) calls this setter with
+  `value: false` on *every* tray toggle, including for the overwhelming majority of users who
+  have never touched launch-at-login — so without this guard, toggling the tray at all would
+  fail on Windows for every such user. The `is_enabled()` check makes the setter idempotent on
+  all three platforms instead of relying on Windows' underlying API to already be. A failed
+  `is_enabled()` read is treated as "skip the disable" rather than propagated — a disable this
+  function can't even confirm is needed isn't worth failing the caller over.
+- **`auth::reset_app` also best-effort clears the autostart entry, not just `AppDb::reset_all`'s
+  tables.** `reset_all` wipes `app_settings` (so `tray_enabled` reverts to its `false` default),
+  but the autostart entry lives entirely outside the DB — without this, a reset would leave the
+  OS launching the app at every login into the first-launch setup screen, with the Settings
+  toggle now rendering off (`trayEnabled && launchAtLogin` is false once the tray reverts) and no
+  way to clear it short of re-enabling the tray first. The call's result is discarded (`let _ =`)
+  deliberately: wiping user data is the part of a reset that must not fail, and
+  `set_launch_at_login` is already idempotent for exactly this kind of best-effort call.
+- **The Windows `Run` registry value `auto-launch` writes is unquoted, and this cannot be fixed
+  from app code.** `auto-launch 0.5.0`'s Windows `enable()` does
+  `format!("{} {}", app_path, args.join(" "))` with no quoting. With this app's empty `args` that
+  is just a trailing space after the path, which `CreateProcess`'s space-resolution heuristic
+  does correctly resolve in practice — but it is a known-fragile shape (a binary earlier in the
+  path, e.g. `C:\Program Files\Resty.exe`, would be tried first). Writing to
+  `HKCU\...\CurrentVersion\Run` needs no elevation, but planting such a binary does, which is why
+  this is accepted rather than treated as a blocker. Not fixable without forking `auto-launch` or
+  dropping the plugin; `.app_name("resty-desktop")` already removes the space from the *entry
+  name*, which is the one part of this we control.
 
 ## Import / Export
 
