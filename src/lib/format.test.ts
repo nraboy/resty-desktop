@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative } from "./format";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, isOverdue } from "./format";
 
 describe("formatBytes", () => {
   it("returns '0 B' for zero", () => {
@@ -46,29 +46,26 @@ describe("formatSize", () => {
   });
 });
 
+// format.ts's dateTimeFormatter/dateOnlyFormatter are module-level Intl.DateTimeFormat
+// instances with no explicit timeZone or locale, so their output depends on whatever timezone
+// AND locale the process resolves at import time — both pinned (TZ/LANG/LC_ALL) via
+// vite.config.ts's test.env so these assertions are real expected strings, not the
+// toBeTruthy()/self-equality checks this file used to fall back to (which would pass for any
+// implementation, including a wrong one).
 describe("formatDate", () => {
-  it("accepts a Unix-seconds number", () => {
-    // 0 seconds = 1970-01-01T00:00:00.000Z; just verify it doesn't throw
-    // and returns a non-empty string.
-    expect(formatDate(0)).toBeTruthy();
+  it("formats a Unix-seconds timestamp", () => {
+    expect(formatDate(0)).toBe("01/01/1970, 12:00:00 AM");
   });
 
-  it("accepts an ISO string", () => {
-    expect(formatDate("2024-01-15T12:00:00Z")).toBeTruthy();
-  });
-
-  it("produces consistent output for same input", () => {
-    expect(formatDate(1705320000)).toBe(formatDate(1705320000));
+  it("formats an ISO string identically to the equivalent Unix-seconds value", () => {
+    expect(formatDate("2024-01-15T12:00:00Z")).toBe("01/15/2024, 12:00:00 PM");
+    expect(formatDate(1705320000)).toBe("01/15/2024, 12:00:00 PM");
   });
 });
 
 describe("formatDateOnly", () => {
-  it("accepts an ISO string and returns a non-empty string", () => {
-    expect(formatDateOnly("2024-01-15T12:00:00Z")).toBeTruthy();
-  });
-
-  it("produces consistent output for the same input", () => {
-    expect(formatDateOnly("2024-01-15T12:00:00Z")).toBe(formatDateOnly("2024-01-15T12:00:00Z"));
+  it("formats an ISO string as a date with no time component", () => {
+    expect(formatDateOnly("2024-01-15T12:00:00Z")).toBe("1/15/2024");
   });
 });
 
@@ -134,5 +131,39 @@ describe("formatRelative", () => {
     expect(formatRelative(now - 30)).toBe("just now");
     expect(formatRelative(now - 10 * 60)).toBe("10 mins ago");
     expect(formatRelative(now - 3600)).toBe("1 hour ago");
+  });
+});
+
+describe("isOverdue", () => {
+  const NOW = 1_700_000_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns false for undefined", () => {
+    expect(isOverdue(undefined)).toBe(false);
+  });
+
+  it("returns false for 0 (falsy — no schedule should ever read as overdue before it exists)", () => {
+    expect(isOverdue(0)).toBe(false);
+  });
+
+  it("returns false for a timestamp in the future", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW * 1000);
+    expect(isOverdue(NOW + 60)).toBe(false);
+  });
+
+  it("returns true for a timestamp in the past", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW * 1000);
+    expect(isOverdue(NOW - 60)).toBe(true);
+  });
+
+  it("returns true for exactly now (<=, not <)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW * 1000);
+    expect(isOverdue(NOW)).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { describeCronExpr, listBackupPlans, listRepos, listSchedules, removeSchedule, saveSchedule } from "../lib/invoke";
+import { parseCronToSimple, buildCronExpr } from "../lib/cron";
 import type { BackupPlan, Repository, Schedule, ScheduleFrequency } from "../lib/types";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -17,56 +18,6 @@ const DAYS_OF_WEEK = [
 ];
 
 type CronMode = "simple" | "expert";
-
-type SimpleFields = {
-  frequency: ScheduleFrequency;
-  hour: string;
-  minute: string;
-  dayOfWeek: string;
-  dayOfMonth: string;
-};
-
-function parseCronToSimple(expr: string): SimpleFields | null {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return null;
-  const [m, h, dom, , dow] = parts;
-  if (h === "*" && dom === "*" && dow === "*") {
-    return { frequency: "hourly", hour: "2", minute: m, dayOfWeek: "1", dayOfMonth: "1" };
-  }
-  if (dow !== "*" && dom === "*") {
-    return { frequency: "weekly", hour: h, minute: m, dayOfWeek: dow, dayOfMonth: "1" };
-  }
-  if (dom !== "*" && dow === "*") {
-    return { frequency: "monthly", hour: h, minute: m, dayOfWeek: "1", dayOfMonth: dom };
-  }
-  if (dom === "*" && dow === "*") {
-    return { frequency: "daily", hour: h, minute: m, dayOfWeek: "1", dayOfMonth: "1" };
-  }
-  return null;
-}
-
-function buildCronExpr(
-  frequency: ScheduleFrequency,
-  hour: string,
-  minute: string,
-  dayOfWeek: string,
-  dayOfMonth: string,
-): string {
-  const h = hour.padStart(2, "0");
-  const m = minute.padStart(2, "0");
-  switch (frequency) {
-    case "hourly":
-      return `${m} * * * *`;
-    case "daily":
-      return `${m} ${h} * * *`;
-    case "weekly":
-      return `${m} ${h} * * ${dayOfWeek}`;
-    case "monthly":
-      return `${m} ${h} ${dayOfMonth} * *`;
-    default:
-      return "";
-  }
-}
 
 export default function ScheduleEditPage() {
   const { scheduleId } = useParams<{ scheduleId: string }>();

@@ -135,11 +135,19 @@ export default function SnapshotsPage() {
     setLoading(true);
     setSelectMode(false);
     setSelectedIds(new Set());
-    listRepos().then((repos) => {
-      setAllRepos(repos);
-      const found = repos.find((r) => r.id === repoId) ?? null;
-      setRepo(found);
-    });
+    listRepos()
+      .then((repos) => {
+        setAllRepos(repos);
+        const found = repos.find((r) => r.id === repoId) ?? null;
+        setRepo(found);
+      })
+      .catch((err) => {
+        // Without this, a failed repo list leaves `repo` at its initial null and `loading`
+        // stuck true forever — `load()` (below) early-returns on `!repo` before its own
+        // setLoading(false), so the page never reaches the "Repository not found" empty state.
+        setError(String(err));
+        setLoading(false);
+      });
   }, [repoId]);
 
   const refresh = useCallback(async () => {
@@ -299,12 +307,21 @@ export default function SnapshotsPage() {
         setRestoreTarget(null);
       }
     } finally {
-      unlisten();
+      restoreUnlistenRef.current?.();
       restoreUnlistenRef.current = null;
       setRestoring(false);
       setRestoreProgress(null);
     }
   };
+
+  // Release the "restore:progress" listener if the page unmounts mid-restore — without this,
+  // navigating away leaves it registered (and calling setRestoreProgress on an unmounted
+  // component) for the rest of the restore's run, since handleRestore's own cleanup only fires
+  // once the restore itself settles.
+  useEffect(() => () => {
+    restoreUnlistenRef.current?.();
+    restoreUnlistenRef.current = null;
+  }, []);
 
   const handleMultiDelete = async () => {
     if (!repoId) return;

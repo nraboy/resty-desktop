@@ -13,12 +13,16 @@ export default function LogsPage() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  const [error, setError] = useState("");
 
   const load = async () => {
     setLoading(true);
+    setError("");
     try {
       setEntries(await listBackupHistory());
       setPage(0);
+    } catch (err: any) {
+      setError(String(err));
     } finally {
       setLoading(false);
     }
@@ -43,6 +47,10 @@ export default function LogsPage() {
         </div>
         <Button variant="secondary" onClick={load}>Refresh</Button>
       </div>
+
+      {error && (
+        <p className="text-sm text-red-300 mb-4">{error}</p>
+      )}
 
       {entries.length === 0 ? (
         <EmptyState

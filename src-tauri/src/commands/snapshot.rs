@@ -969,8 +969,15 @@ pub async fn copy_snapshot(
 pub async fn cancel_copy(app: tauri::AppHandle, copy_handle: State<'_, CopyHandle>) -> Result<(), String> {
     emit_cancelling(&app, &copy_handle.current_task);
     copy_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(ref mut child) = *copy_handle.child.lock().map_err(|e| e.to_string())? {
-        child.kill().map_err(|e| e.to_string())?;
+    // Best-effort, matching cancel_backup: by this point `cancelled` is already set and
+    // `emit_cancelling` has already fired, so the operation is genuinely cancelling regardless
+    // of what happens here. A poisoned lock or a kill() on an already-reaped child would
+    // otherwise surface as an `Err` to the frontend at exactly the moment the cancel is
+    // succeeding.
+    if let Ok(mut guard) = copy_handle.child.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
     }
     Ok(())
 }
@@ -1214,8 +1221,16 @@ pub fn cancel_mirror(
         // turn and is executing (in which case the kill below handles it) — see
         // MirrorEntry::cancel_notify's doc comment.
         entry.cancel_notify.notify_one();
-        if let Some(ref mut child) = *entry.child.lock().map_err(|e| e.to_string())? {
-            child.kill().map_err(|e| e.to_string())?;
+        // Best-effort, matching cancel_backup: `cancel`/`cancel_notify` above already mark this
+        // run as cancelling, so the operation is genuinely stopping regardless of what happens
+        // here. A poisoned lock or a kill() on an already-reaped child would otherwise surface
+        // as an `Err` to the frontend at exactly the moment the cancel is succeeding. The outer
+        // `mirrors.lock()` above is left as `?` — a failure to even look up the run means the
+        // cancel genuinely could not be dispatched, unlike this inner kill.
+        if let Ok(mut guard) = entry.child.lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
         }
     }
     Ok(())
@@ -1413,6 +1428,35 @@ pub(crate) fn log_retention_failure(
     );
     // Same event Recent Logs already listens for on every backup outcome — see
     // execute_backup's log_backup call sites above.
+    let _ = app.emit("backup:history-updated", ());
+}
+
+/// Records a schedule that failed to advance to its next run — either because its cron
+/// expression could no longer be parsed, or because the DB write recording the run itself
+/// failed — as its own `backup_history` row, the same "make it visible" treatment
+/// `log_retention_failure` gives a failed retention. Without this, `scheduler.rs`'s tick used
+/// to discard both failures via `.ok()`/`let _ =`: a cron failure nulls `next_run_at`
+/// (`list_due_schedules` filters `next_run_at IS NOT NULL`), permanently and silently retiring
+/// the schedule with nothing surfaced anywhere. A schedule has no single `repo_id` (it can span
+/// several plans across several repos), so this logs with `repo_id: ""` — the LEFT JOIN in
+/// `list_backup_history` just leaves the repo column blank for this row rather than failing;
+/// the schedule's own name is already in the error text.
+pub(crate) fn log_schedule_failure(app: &tauri::AppHandle, db: &AppDb, schedule_name: &str, error: &str) {
+    let _ = db.log_backup(
+        &uuid::Uuid::new_v4().to_string(),
+        "",
+        None,
+        None,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        0.0,
+        0,
+        0,
+        0,
+        Some(&format!("Schedule '{schedule_name}' could not be advanced: {error}")),
+    );
     let _ = app.emit("backup:history-updated", ());
 }
 

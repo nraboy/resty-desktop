@@ -67,9 +67,11 @@ export default function BrowsePage() {
 
   useEffect(() => {
     if (!repoId) return;
-    listRepos().then((repos) => {
-      setRepo(repos.find((r) => r.id === repoId) ?? null);
-    });
+    listRepos()
+      .then((repos) => {
+        setRepo(repos.find((r) => r.id === repoId) ?? null);
+      })
+      .catch((err) => setError(String(err)));
   }, [repoId]);
 
   const load = useCallback(

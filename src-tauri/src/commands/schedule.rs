@@ -56,6 +56,24 @@ pub(crate) fn describe_cron(expr: &str) -> String {
     }
 }
 
+/// An edit (`ScheduleEditPage.tsx`) always submits a fresh `Schedule` with `lastRunAt`/
+/// `createdAt` unset — it has no reason to know either, and `save_schedule`'s
+/// `INSERT OR REPLACE` would otherwise happily overwrite both with that blank state on every
+/// save. This is the one place that matters: it carries the *existing* row's `last_run_at` and
+/// `created_at` forward whenever one exists, so only a genuine creation (no `existing` row)
+/// gets to set them from the incoming value. Free function (no `AppDb`/Tauri `State`) so it's
+/// directly unit-testable.
+pub(crate) fn preserve_schedule_history(incoming: Schedule, existing: Option<Schedule>) -> Schedule {
+    match existing {
+        Some(e) => Schedule {
+            last_run_at: e.last_run_at,
+            created_at: e.created_at,
+            ..incoming
+        },
+        None => incoming,
+    }
+}
+
 // ── commands ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -69,7 +87,8 @@ pub fn save_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule: Sche
     let next_run_at = next_fire_time(&schedule.cron_expr)
         .map(Some)
         .map_err(|e| format!("Invalid cron expression: {e}"))?;
-    let s = Schedule { next_run_at, ..schedule };
+    let existing = db.get_schedule(&schedule.id)?;
+    let s = preserve_schedule_history(Schedule { next_run_at, ..schedule }, existing);
     db.save_schedule(&s)?;
     let _ = app.emit("schedules:changed", ());
     Ok(())
@@ -269,5 +288,51 @@ mod tests {
     fn test_to_7field() {
         assert_eq!(to_7field("0 0 * * *"), "0 0 0 * * * *");
         assert_eq!(to_7field("  30 12 * * *  "), "0 30 12 * * * *");
+    }
+
+    fn test_schedule(last_run_at: Option<i64>, created_at: i64) -> Schedule {
+        Schedule {
+            id: "sched-1".to_string(),
+            name: "Nightly".to_string(),
+            plan_ids: vec!["plan-1".to_string()],
+            cron_expr: "0 0 * * *".to_string(),
+            enabled: true,
+            last_run_at,
+            next_run_at: None,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn test_preserve_schedule_history_carries_forward_on_edit() {
+        // Regression for the bug where editing a schedule always submitted
+        // last_run_at: None / created_at: now(), silently wiping run history.
+        let existing = test_schedule(Some(1_700_000_000), 1_600_000_000);
+        let incoming = test_schedule(None, 9_999_999_999); // what the edit page actually sends
+        let result = preserve_schedule_history(incoming, Some(existing));
+        assert_eq!(result.last_run_at, Some(1_700_000_000));
+        assert_eq!(result.created_at, 1_600_000_000);
+    }
+
+    #[test]
+    fn test_preserve_schedule_history_passes_through_on_create() {
+        // No existing row (a brand-new schedule) — the incoming value is authoritative.
+        let incoming = test_schedule(None, 1_650_000_000);
+        let result = preserve_schedule_history(incoming, None);
+        assert_eq!(result.last_run_at, None);
+        assert_eq!(result.created_at, 1_650_000_000);
+    }
+
+    #[test]
+    fn test_preserve_schedule_history_keeps_other_fields_from_incoming() {
+        let existing = test_schedule(Some(1), 2);
+        let mut incoming = test_schedule(None, 0);
+        incoming.name = "Renamed".to_string();
+        incoming.cron_expr = "0 12 * * *".to_string();
+        incoming.enabled = false;
+        let result = preserve_schedule_history(incoming, Some(existing));
+        assert_eq!(result.name, "Renamed");
+        assert_eq!(result.cron_expr, "0 12 * * *");
+        assert!(!result.enabled);
     }
 }

@@ -2,64 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { diffSnapshots, getRestorePath, restorePath as restorePathInvoke } from "../lib/invoke";
-import type { DiffEntry, DiffResult, Snapshot } from "../lib/types";
+import type { DiffResult, Snapshot } from "../lib/types";
+import { computeChildren, type DiffChange, type TreeNode } from "../lib/difftree";
 import Button from "../components/Button";
 import EmptyState from "../components/EmptyState";
 import ContextMenu from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import Spinner from "../components/Spinner";
-
-type DiffChange = "added" | "removed" | "modified" | "mixed";
-
-interface TreeNode {
-  name: string;
-  fullPath: string;
-  isDir: boolean;
-  change: DiffChange;
-}
-
-function toSegments(path: string): string[] {
-  return path.replace(/^\//, "").split("/").filter(Boolean);
-}
-
-function computeChildren(entries: DiffEntry[], currentPath: string): TreeNode[] {
-  const currentSegments = currentPath ? currentPath.split("/").filter(Boolean) : [];
-  const depth = currentSegments.length;
-
-  type Parsed = { entry: DiffEntry; segs: string[] };
-  const groups = new Map<string, Parsed[]>();
-
-  for (const entry of entries) {
-    const segs = toSegments(entry.path);
-    if (segs.length <= depth) continue;
-    if (!currentSegments.every((seg, i) => segs[i] === seg)) continue;
-    const segment = segs[depth];
-    if (!groups.has(segment)) groups.set(segment, []);
-    groups.get(segment)!.push({ entry, segs });
-  }
-
-  const nodes: TreeNode[] = [];
-  for (const [name, parsed] of groups) {
-    const fullPath = currentPath + "/" + name;
-    const nextDepth = depth + 1;
-    const isDir = parsed.some((p) => p.segs.length > nextDepth);
-    let change: DiffChange;
-    if (!isDir) {
-      change = parsed[0].entry.change as DiffChange;
-    } else {
-      const types = new Set(parsed.map((p) => p.entry.change));
-      change = types.size === 1 ? ([...types][0] as DiffChange) : "mixed";
-    }
-    nodes.push({ name, fullPath, isDir, change });
-  }
-
-  return nodes.sort((a, b) => {
-    if (a.isDir && !b.isDir) return -1;
-    if (!a.isDir && b.isDir) return 1;
-    return a.name.localeCompare(b.name);
-  });
-}
 
 const CHANGE_STYLES: Record<DiffChange, { color: string; icon: string; label: string }> = {
   added:    { color: "text-green-400", icon: "+", label: "added"    },

@@ -933,6 +933,18 @@ pub async fn prune_all_repos(
                 PruneAttempt::Cancelled => break 'body Err("Cancelled".to_string()),
                 PruneAttempt::Failed(msg) => break 'body Err(format!("Prune failed for '{}': {}", repo.name, msg)),
             }
+
+            // Post-work emit so the final iteration reports `total of total` rather than
+            // `total - 1 of total` — the pre-work emit above only ever reports the index of
+            // the repo currently starting, never the one that just finished. Matches
+            // index_snapshots_batch's (browse.rs) already-correct pattern.
+            task_progress.emit(TaskProgress {
+                items_done: Some(i as u64 + 1),
+                items_total: Some(total as u64),
+                label: Some(repo.name.clone()),
+                repo_id: Some(repo.id.clone()),
+                ..Default::default()
+            });
         }
 
         Ok(())

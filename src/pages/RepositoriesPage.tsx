@@ -112,6 +112,7 @@ export default function RepositoriesPage() {
   const [editTesting, setEditTesting] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Repository | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -139,6 +140,9 @@ export default function RepositoriesPage() {
   const [mirrorOutcome, setMirrorOutcome] = useState<"done" | "cancelled" | "failed" | null>(null);
   // Only populated when mirrorOutcome === "failed", from the terminal task event's error field.
   const [mirrorFailureError, setMirrorFailureError] = useState("");
+  // Set the first time the current mirrorOpId is actually observed in activeMirrors — see the
+  // backstop effect below. Reset alongside every setMirrorOpId(null).
+  const mirrorSeenRef = useRef(false);
   const [contextMenu, setContextMenu] = useState<{ repo: Repository; x: number; y: number } | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
@@ -535,10 +539,13 @@ export default function RepositoriesPage() {
   const handleRemove = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError("");
     try {
       await removeRepo(deleteTarget.id);
       setDeleteTarget(null);
       await load();
+    } catch (err: any) {
+      setDeleteError(String(err));
     } finally {
       setDeleting(false);
     }
@@ -603,6 +610,14 @@ export default function RepositoriesPage() {
       }
       await load();
       setEditTarget(null);
+    } catch (err: any) {
+      // The steps above run sequentially and each can independently fail — a failure partway
+      // through leaves earlier steps already committed. Reload the list so it reflects what
+      // actually landed rather than the pre-edit state, and surface the error inline (reusing
+      // editTestResult, the modal's existing status slot) instead of failing silently. The
+      // modal stays open so the user can retry the remaining steps.
+      await load().catch(() => {});
+      setEditTestResult({ ok: false, message: String(err) });
     } finally {
       setRenaming(false);
     }
@@ -725,12 +740,29 @@ export default function RepositoriesPage() {
   // task event for an unusually fast mirror (e.g. destination already fully in sync — restic
   // copy can exit almost immediately). ActivityProvider's activeMirrors is not subject to that
   // race — it's been listening since app launch — so its entry disappearing while we're still
-  // waiting is proof the operation reached some terminal phase we missed. Defaults to "done"
-  // rather than leaving the modal stuck showing "Copying snapshots…" forever; can't distinguish
-  // success/cancel/fail in that window, but a stuck spinner is strictly worse UX than an
-  // occasional optimistic label.
+  // waiting is proof the operation reached some terminal phase we missed.
+  //
+  // Absence in activeMirrors is ambiguous on its own: mirror_repo emits its "pending" task event
+  // from *inside* the spawned task (see snapshot.rs's mirror_repo), which lands strictly after
+  // the operationId has already been returned to us here — so activeMirrors provably does not
+  // contain a just-started run for at least one render. Concluding "done" from bare absence, as
+  // this effect used to, reads that startup gap as a finish and reports success on a mirror that
+  // hasn't even begun. mirrorSeenRef closes that: the backstop only fires once the op has been
+  // *observed* running and then disappeared, never on absence alone. Accepted trade-off: a
+  // mirror fast enough to never be observed at all now leaves the modal on "Copying
+  // snapshots…" instead of resolving — worse than an instant close, but still strictly better
+  // than a false "complete", and the modal has a Hide button plus the Activity panel tracks the
+  // run independently regardless.
+  useEffect(() => {
+    if (!mirrorOpId) return;
+    if (activeMirrors.some((m) => m.operationId === mirrorOpId)) {
+      mirrorSeenRef.current = true;
+    }
+  }, [mirrorOpId, activeMirrors]);
+
   useEffect(() => {
     if (!mirrorOpId || mirrorOutcome) return;
+    if (!mirrorSeenRef.current) return;
     const stillActive = activeMirrors.some((m) => m.operationId === mirrorOpId);
     if (!stillActive) {
       setMirrorOutcome("done");
@@ -947,6 +979,7 @@ export default function RepositoriesPage() {
                       setMirrorSource(repo);
                       setMirrorDestId("");
                       setMirrorOpId(null);
+                      mirrorSeenRef.current = false;
                       setMirrorPickerError("");
                       setMirrorOutcome(null);
                       setMirrorFailureError("");
@@ -965,6 +998,7 @@ export default function RepositoriesPage() {
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeleteTarget(repo);
+                      setDeleteError("");
                     }}
                     className="text-gray-500 hover:text-red-300"
                     title="Remove"
@@ -1039,15 +1073,20 @@ export default function RepositoriesPage() {
       <Modal
         title="Remove Repository"
         open={!!deleteTarget}
-        onClose={() => !deleting && setDeleteTarget(null)}
+        onClose={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(""); } }}
       >
         <p className="text-sm text-gray-300 mb-5">
           Are you sure you want to remove{" "}
           <span className="font-semibold text-gray-50">{deleteTarget?.name}</span>?
           This only removes it from the list — the repository data on disk is not deleted.
         </p>
+        {deleteError && (
+          <div className="text-sm rounded-lg px-3 py-2 mb-4 bg-red-900/40 text-red-300 border border-red-700">
+            {deleteError}
+          </div>
+        )}
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+          <Button variant="secondary" onClick={() => { setDeleteTarget(null); setDeleteError(""); }} disabled={deleting}>
             Cancel
           </Button>
           <Button variant="danger" loading={deleting} onClick={handleRemove}>
@@ -1479,6 +1518,7 @@ export default function RepositoriesPage() {
                 setMirrorSource(contextMenu.repo);
                 setMirrorDestId("");
                 setMirrorOpId(null);
+                mirrorSeenRef.current = false;
                 setMirrorPickerError("");
                 setMirrorOutcome(null);
                 setMirrorFailureError("");
@@ -1509,7 +1549,7 @@ export default function RepositoriesPage() {
             {
               label: "Delete",
               variant: "danger",
-              onClick: () => setDeleteTarget(contextMenu.repo),
+              onClick: () => { setDeleteTarget(contextMenu.repo); setDeleteError(""); },
             },
           ] satisfies ContextMenuItemDef[]}
         />

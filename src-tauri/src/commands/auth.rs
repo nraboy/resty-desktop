@@ -7,6 +7,22 @@ use super::repo::{set_launch_at_login, unlock_quietly};
 
 const VERIFICATION_PLAINTEXT: &[u8] = b"restic-gui-v1-ok";
 
+/// Mirrors the client-side check both `AuthPage.tsx` (setup) and `SettingsPage.tsx` (rotation)
+/// already enforce. The backend previously enforced nothing here — `derive_key("")` succeeds —
+/// while `validate_init_password` (repo.rs) already rejects an empty *repo* password, leaving
+/// the master password inconsistent with its own repo-password sibling. Defense in depth only:
+/// every client already blocks a short password before this ever runs.
+const MIN_MASTER_PASSWORD_LEN: usize = 8;
+
+/// Pure — no DB/Tauri state — so it's directly unit-testable, matching
+/// `validate_init_password`'s (repo.rs) shape.
+pub(crate) fn validate_master_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_MASTER_PASSWORD_LEN {
+        return Err(format!("Master password must be at least {MIN_MASTER_PASSWORD_LEN} characters."));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn is_app_setup(db: State<'_, AppDb>) -> Result<bool, String> {
     db.has_master_key()
@@ -22,6 +38,7 @@ pub async fn setup_master_password(
     if db.has_master_key()? {
         return Err("Master password is already configured".to_string());
     }
+    validate_master_password(&password)?;
 
     let salt = crypto::random_bytes::<32>();
     let key = crypto::derive_key(&password, &salt)?;
@@ -103,6 +120,12 @@ pub async fn change_master_password(
     let old_key = crypto::derive_key(&old_password, &salt)?;
     crypto::decrypt(&old_key, &nonce, &ciphertext)
         .map_err(|_| "Current master password is incorrect".to_string())?;
+
+    // Checked only after the old-password verification above, deliberately: validating first
+    // would let a caller probe password policy without knowing the current password, and would
+    // reject a legitimate rotation attempt before telling the user their current password was
+    // wrong instead of after.
+    validate_master_password(&new_password)?;
 
     let new_salt = crypto::random_bytes::<32>();
     let new_key = crypto::derive_key(&new_password, &new_salt)?;
@@ -315,4 +338,30 @@ pub async fn try_auto_unlock(
     spawn_stale_lock_cleanup(app);
 
     Ok(AutoUnlockResult { unlocked: true, reason: String::new() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_master_password_rejects_empty() {
+        assert!(validate_master_password("").is_err());
+    }
+
+    #[test]
+    fn validate_master_password_rejects_short() {
+        assert!(validate_master_password("short1").is_err());
+        assert!(validate_master_password("1234567").is_err()); // 7 chars
+    }
+
+    #[test]
+    fn validate_master_password_accepts_min_length() {
+        assert!(validate_master_password("12345678").is_ok()); // exactly 8
+    }
+
+    #[test]
+    fn validate_master_password_accepts_longer() {
+        assert!(validate_master_password("a reasonably long passphrase").is_ok());
+    }
 }

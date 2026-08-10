@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -86,6 +86,24 @@ pub struct Schedule {
     pub last_run_at: Option<i64>,
     pub next_run_at: Option<i64>,
     pub created_at: i64,
+}
+
+type ScheduleRow = (String, String, String, String, i64, Option<i64>, Option<i64>, i64);
+
+/// Shared row→`Schedule` mapping for `list_schedules` and `get_schedule` — kept as one
+/// function so the two never drift on which column is which.
+fn row_to_schedule(row: ScheduleRow) -> Result<Schedule, String> {
+    let (id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at) = row;
+    Ok(Schedule {
+        id,
+        name,
+        plan_ids: serde_json::from_str(&plan_ids_json).map_err(|e: serde_json::Error| e.to_string())?,
+        cron_expr,
+        enabled: enabled != 0,
+        last_run_at,
+        next_run_at,
+        created_at,
+    })
 }
 
 // ── internal type (never serialised) ───────────────────────────────────────
@@ -1842,20 +1860,37 @@ impl AppDb {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
-        rows.into_iter()
-            .map(|(id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at)| {
-                Ok(Schedule {
-                    id,
-                    name,
-                    plan_ids: serde_json::from_str(&plan_ids_json).map_err(|e: serde_json::Error| e.to_string())?,
-                    cron_expr,
-                    enabled: enabled != 0,
-                    last_run_at,
-                    next_run_at,
-                    created_at,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_schedule).collect()
+    }
+
+    /// Looks up a single schedule by id, `Ok(None)` if it doesn't exist. Used by
+    /// `save_schedule` (the command) to preserve `last_run_at`/`created_at` across an edit —
+    /// see its own doc comment for why those two fields must survive a save that isn't a
+    /// fresh creation.
+    pub fn get_schedule(&self, id: &str) -> Result<Option<Schedule>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let row = conn
+            .query_row(
+                "SELECT id, name, plan_ids_json, cron_expr, enabled, last_run_at, next_run_at, created_at
+                 FROM schedules WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        row.map(row_to_schedule).transpose()
     }
 
     pub fn save_schedule(&self, s: &Schedule) -> Result<(), String> {
@@ -2477,6 +2512,51 @@ mod tests {
         // Verify repoB's status remains.
         let status_b = db.get_browse_status("repoB").unwrap();
         assert_eq!(status_b.get("snap123"), Some(&"complete".to_string()));
+    }
+
+    fn test_file_entry(path: &str) -> FileEntry {
+        FileEntry {
+            name: name_of(path),
+            path: path.to_string(),
+            entry_type: "file".to_string(),
+            size: Some(1),
+            mtime: None,
+            mode: None,
+        }
+    }
+
+    // AppDb::get's three-way return semantics — Some(non-empty), Some(empty), None — are
+    // load-bearing: `Some(vec![])` means "a real, empty directory," while `None` means "not
+    // cached, go fetch." Conflating the two would make an empty directory look like a cache
+    // miss (or vice versa). See the browse_cache_files cross-repo aliasing note this test sits
+    // near in spirit — get()'s own semantics here are a separate, narrower concern.
+    #[test]
+    fn get_returns_some_empty_vec_for_a_fully_indexed_empty_directory() {
+        let db = test_db();
+        db.set_browse_status("repoA", "snap1", "complete").unwrap();
+        // No browse_cache_files rows written at all for this snapshot/path — a genuinely
+        // empty directory, not an unindexed one.
+        let result = db.get("repoA", "snap1", None).unwrap();
+        assert_eq!(result.as_ref().map(|v| v.len()), Some(0));
+    }
+
+    #[test]
+    fn get_returns_some_for_a_partially_indexed_directory_with_rows() {
+        let db = test_db();
+        // Deliberately no "complete" status row — partial indexing, but this directory does
+        // have cached rows (e.g. a manual index that was cancelled partway through).
+        db.set("snap1", None, &[test_file_entry("a.txt")]).unwrap();
+        let result = db.get("repoA", "snap1", None).unwrap();
+        assert_eq!(result.as_ref().map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn get_returns_none_for_a_partially_indexed_directory_with_no_rows() {
+        let db = test_db();
+        // Neither a "complete" status nor any cached rows for this directory — a genuine
+        // cache miss, distinct from the fully-indexed-empty case above.
+        let result = db.get("repoA", "snap1", None).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]

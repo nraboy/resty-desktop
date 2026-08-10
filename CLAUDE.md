@@ -130,6 +130,14 @@ src/
     config.ts      # MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
     utils.ts       # needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
     theme.tsx      # ThemeProvider + useTheme(); persists to localStorage; applies dark/light/system class to <html>
+    cron.ts        # parseCronToSimple/buildCronExpr — pure Simple<->Expert cron helpers, moved out of
+                   #   ScheduleEditPage.tsx (where they were module-private) so they're directly
+                   #   unit-tested (cron.test.ts); round-tripping a parsed expression through buildCronExpr
+                   #   is not byte-identical (zero-padded, e.g. "0 2 * * *" -> "00 02 * * *") — intended,
+                   #   pinned by a test, not a bug
+    difftree.ts    # computeChildren/toSegments — pure tree-building over DiffEntry[] for DiffPage.tsx's
+                   #   directory browser, moved out the same way (where they were module-private) for the
+                   #   same reason (difftree.test.ts)
   pages/
     AuthPage.tsx            # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx    # Add/open/delete repos; restic init for new repos; remote URL support;
@@ -215,7 +223,19 @@ src/
                             #   second effect that infers "done" if activeMirrors drops the operationId first
                             #   (closes a narrow race where Tauri's async `listen()` registration can lose to
                             #   an unusually fast mirror's terminal event — activeMirrors isn't subject to
-                            #   this, since ActivityProvider has been subscribed since app launch); "Index All Snapshots"
+                            #   this, since ActivityProvider has been subscribed since app launch). The backstop
+                            #   requires seen-then-disappeared (mirrorSeenRef), not bare absence: mirror_repo
+                            #   emits its "pending" task event from *inside* the spawned task (snapshot.rs), which
+                            #   lands strictly after the operationId has already returned to the frontend, so
+                            #   activeMirrors provably doesn't contain a just-started run for at least one render
+                            #   — concluding "done" from that absence alone (the original implementation) read
+                            #   the startup gap as a finish and reported success on a mirror that hadn't even
+                            #   begun. Accepted trade-off: a mirror fast enough to never be observed at all now
+                            #   leaves the modal on "Copying snapshots…" instead of resolving, rather than
+                            #   falsely reporting complete — the modal's Hide button and the Activity panel's own
+                            #   independent tracking make that an acceptable stall, not a dead end. mirrorSeenRef
+                            #   is reset alongside every setMirrorOpId(null) (both the row button and the
+                            #   context-menu item) so it never leaks into the next mirror run; "Index All Snapshots"
                             #   opens the same dismissible progress/queued/Stop/complete modal pattern as
                             #   RepoSearchPage's own "Index All" (independent state, its own `task`
                             #   listener scoped to whichever repo the context menu targeted — deliberate
@@ -457,6 +477,11 @@ src-tauri/
                      #   all three validate snapshot_id via snapshot::validate_snapshot_id;
                      #   index_snapshot (fire-and-forget manual indexing; reports completion solely via a `task`
                      #   event, kind "index" — no legacy per-operation event, see Operation Event Bus);
+                     #   resolves everything fallible (master_key.get, get_full_repo) *before* writing the
+                     #   browse_cache_status row to "in_progress" — writing that status first and only then
+                     #   hitting a `?` would strand the snapshot in "in_progress" permanently (nothing short of
+                     #   an app restart clears it, via init_schema's in_progress -> pending reset), refusing
+                     #   every future index attempt on it;
                      #   index_snapshots_batch ("Index All": fire-and-forget, indexes snapshot_ids sequentially
                      #   one at a time in a single spawned task — bounds memory to one snapshot's file list;
                      #   emits one `task` event per snapshot, same targetId/repoId shape as index_snapshot, *plus*
@@ -489,7 +514,14 @@ src-tauri/
       backup_plan.rs # list/save/remove backup plans; sorted alphabetically by name
       schedule.rs    # list/save/remove/toggle schedules; run_schedule_now (calls log_retention_failure on a
                      #   retention error, same as forget_by_plan/scheduler.rs); describe_cron_expr;
-                     #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs
+                     #   next_fire_time() (pub(crate)) reused by scheduler.rs and transfer.rs;
+                     #   save_schedule looks up the existing row (AppDb::get_schedule) and carries its
+                     #   last_run_at/created_at forward via the pure preserve_schedule_history() helper —
+                     #   ScheduleEditPage.tsx always submits a fresh Schedule with both unset (it has no
+                     #   reason to know either), and without this the INSERT OR REPLACE in
+                     #   AppDb::save_schedule silently wiped run history on every edit; a brand-new
+                     #   schedule (no existing row) still takes its values from the incoming struct.
+                     #   import_bundle and toggle_schedule use different write paths and are unaffected.
       transfer.rs    # export_data/preview_import/import_data; portable .json bundle (readable,
                      #   only repo passwords encrypted under an export passphrase); every object has its
                      #   own id, refs by id; import mints fresh UUIDs + remaps refs, " (imported)" name dedup;
@@ -560,6 +592,13 @@ src-tauri/
                      #   minute-boundary tick still bounds how soon a newly-due schedule starts (up to ~60s after
                      #   its due instant) — this is tick granularity, not RepoLocks contention (backup and indexing
                      #   both take non-blocking read guards).
+                     #   A next_fire_time failure here deliberately still nulls next_run_at (list_due_schedules
+                     #   filters on next_run_at IS NOT NULL — leaving the old, now-past value in place would keep
+                     #   the schedule permanently due and re-fire it every tick instead of retiring it), but is no
+                     #   longer silent: log_schedule_failure (snapshot.rs, same "make it visible" treatment as
+                     #   log_retention_failure) logs a backup_history row so a schedule that stops advancing shows
+                     #   up in Logs instead of just going quiet forever. Same treatment for a failed
+                     #   record_schedule_run write itself.
                      #   Missed-schedule catch-up: schedules that were due while the app was closed stay "due"
                      #   (next_run_at in the past) and are picked up by the first tick after unlock, running
                      #   sequentially via the same busy-flag serialization as normal scheduled backups. Each missed
@@ -879,7 +918,11 @@ like `index`'s batch-level progress — reads real `progress` off the bus rather
 purely as a lifecycle signal. `reducePrune` (`activity.tsx`) is a single nullable slot, not a
 `Map`, since prune is single-in-flight app-wide (`PruneHandle`'s `busy` guard) unlike concurrent
 index batches. It covers both `prune_all_repos` (progress-bearing: `itemsDone`/`itemsTotal`/
-`label` per repo) and single-repo `prune_repo` (lifecycle-only — `itemsTotal` stays `0`, so the
+`label` per repo — emitted twice per repo, once before that repo's prune starts and once after it
+finishes, mirroring `index_snapshots_batch`'s already-correct `i + 1` pattern; the pre-work emit
+alone would report `N - 1 of N` on the batch's final repo, since it only ever names the repo
+currently *starting*, never the one that just finished) and single-repo `prune_repo`
+(lifecycle-only — `itemsTotal` stays `0`, so the
 row renders the shared `ProgressBar` component's `indeterminate` (constantly-sliding) mode
 rather than a determinate bar stuck at 0%). This is also the first case of a legacy event retired **after** its
 one remaining consumer was ported on its own, unprompted by a wider rewrite: the legacy
@@ -1207,6 +1250,18 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   this is accepted rather than treated as a blocker. Not fixable without forking `auto-launch` or
   dropping the plugin; `.app_name("resty-desktop")` already removes the space from the *entry
   name*, which is the one part of this we control.
+- **`react-router-dom` stays on the 6.x line — its two current `npm audit` advisories (an open
+  redirect via a backslash in `<Link>`/`useNavigate`, and arbitrary constructor injection via
+  `deserializeErrors()` during SSR hydration) are unreachable here and don't justify the v7
+  migration.** Both need conditions this app never creates: the SSR one needs server-side
+  rendering, which a local Tauri app doesn't do at all; the open-redirect one needs an
+  attacker-controlled navigation target, and no `navigate()`/`<Link to>` call in this codebase is
+  ever built from one — every interpolated path segment (e.g. `` `/snapshots/${repoId}` ``) comes
+  from an internal id already resolved from this app's own data (a repo, plan, or snapshot id),
+  never from a URL query param, `location.search`, or other external input. Re-flagging this from
+  a future `npm audit` run without checking reachability first would push a breaking
+  major-version migration (v7 changes routing APIs across all 13 routed pages) for zero actual
+  risk reduction.
 
 ## Import / Export
 
@@ -1318,7 +1373,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{backends,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash

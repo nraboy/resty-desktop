@@ -16,7 +16,10 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 ## Features
 
 - **Master password** — all repository passwords are encrypted at rest; a single master password unlocks the app on each launch
+- **Auto-unlock** (macOS / Windows) — an opt-in, off-by-default toggle that stores the derived unlock key (never your master password) in the OS credential manager, so the app can unlock itself at startup instead of showing the password prompt. Trade-off worth knowing: anyone with access to your unlocked desktop session can then open Resty and use every repository, since the OS credential store is scoped to your user account, not to this app specifically
 - **Repository management** — add local or remote repositories (Amazon S3 / S3-compatible, native Backblaze B2, SFTP, and other restic-supported backends), initialize new ones, check integrity, rename, remove, or mirror to another repo
+- **Read-only repositories** — mark a repository backed by a genuinely read-only filesystem or mount as read-only; the app opens it with restic's own `--no-lock` for every read, and refuses writes (backup, prune, tag, delete, retention) outright rather than relying on restic to reject them
+- **Launch at login** — optionally have the OS start the app automatically at login (uses the native macOS LaunchAgent / Windows Registry Run entry / Linux XDG `.desktop` mechanism), gated on the system tray toggle since without the tray, closing the window quits the app
 - **Backend credentials** — optionally store credentials (e.g. S3 access keys, native B2 application keys) per remote repository, encrypted with the master password; left blank, restic falls back to your system's own credential chain (`~/.aws/credentials`, an IAM role, etc.) exactly as before. Note: restic's own documentation recommends B2's S3-compatible API over its native backend for better error handling
 - **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
 - **Schedules** — attach backup plans to a cron schedule; runs happen in the background even while the UI is closed

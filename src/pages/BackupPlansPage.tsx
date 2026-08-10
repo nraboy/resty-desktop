@@ -211,8 +211,15 @@ export default function BackupPlansPage() {
     }
   };
 
-  // Clear the elapsed timer if the page unmounts mid-backup.
-  useEffect(() => stopElapsedTimer, []);
+  // Clear the elapsed timer and release the "backup:progress" listener if the page unmounts
+  // mid-backup — without the latter, the listener stays registered (and calling setProgress on
+  // an unmounted component) for the rest of the backup's run, since startBackup's own cleanup
+  // only fires once the backup itself settles.
+  useEffect(() => () => {
+    stopElapsedTimer();
+    unlistenRef.current?.();
+    unlistenRef.current = null;
+  }, []);
 
   const closeBackupModal = () => {
     if (backupRunning) return;
@@ -735,7 +742,15 @@ export default function BackupPlansPage() {
                       disabled={backupCancelling}
                       onClick={async () => {
                         setBackupCancelling(true);
-                        await cancelBackup();
+                        try {
+                          await cancelBackup();
+                        } catch {
+                          // A rejected cancel would otherwise leave backupCancelling stuck
+                          // true with "Stopping…" showing forever and Stop disabled — the
+                          // backup itself is still running untouched, so roll back rather
+                          // than stranding the user with no way to retry.
+                          setBackupCancelling(false);
+                        }
                       }}
                     >
                       {backupCancelling ? "Stopping…" : "Stop Backup"}

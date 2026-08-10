@@ -36,6 +36,9 @@ export default function SettingsPage() {
   const [compressing, setCompressing] = useState(false);
   const [compressed, setCompressed] = useState(false);
   const [dbSize, setDbSize] = useState<number | null>(null);
+  // Shared by all three Application Cache buttons below — each had a try/finally with no
+  // catch, so a failed clear/clean/compress was previously invisible.
+  const [cacheOpError, setCacheOpError] = useState("");
 
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [pruneStarted, setPruneStarted] = useState(false);
@@ -174,12 +177,15 @@ export default function SettingsPage() {
 
   const handleClearCache = async () => {
     setClearingCache(true);
+    setCacheOpError("");
     try {
       const newSize = await clearBrowseCache();
       setDbSize(newSize);
       setCacheCleared(true);
       if (cacheTimerRef.current !== null) clearTimeout(cacheTimerRef.current);
       cacheTimerRef.current = setTimeout(() => setCacheCleared(false), 2000);
+    } catch (err: any) {
+      setCacheOpError(String(err));
     } finally {
       setClearingCache(false);
     }
@@ -187,12 +193,15 @@ export default function SettingsPage() {
 
   const handleCleanCache = async () => {
     setCleaningCache(true);
+    setCacheOpError("");
     try {
       const [removed, newSize] = await cleanCache();
       setCleanedCount(removed);
       setDbSize(newSize);
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
       cleanTimerRef.current = setTimeout(() => setCleanedCount(null), 4000);
+    } catch (err: any) {
+      setCacheOpError(String(err));
     } finally {
       setCleaningCache(false);
     }
@@ -200,12 +209,15 @@ export default function SettingsPage() {
 
   const handleCompressDatabase = async () => {
     setCompressing(true);
+    setCacheOpError("");
     try {
       const newSize = await compressDatabase();
       setDbSize(newSize);
       setCompressed(true);
       if (compressTimerRef.current !== null) clearTimeout(compressTimerRef.current);
       compressTimerRef.current = setTimeout(() => setCompressed(false), 2000);
+    } catch (err: any) {
+      setCacheOpError(String(err));
     } finally {
       setCompressing(false);
     }
@@ -929,6 +941,7 @@ export default function SettingsPage() {
             </span>
           )}
         </div>
+        {cacheOpError && <p className="text-sm text-red-300 mt-3">{cacheOpError}</p>}
         {dbSize !== null && (
           <p className="text-xs text-gray-500 mt-3">Current DB Size: {formatBytes(dbSize)}</p>
         )}

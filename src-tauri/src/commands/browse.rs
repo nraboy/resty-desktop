@@ -449,8 +449,15 @@ pub async fn restore_snapshot(
 pub async fn cancel_restore(app: tauri::AppHandle, restore_handle: State<'_, RestoreHandle>) -> Result<(), String> {
     emit_cancelling(&app, &restore_handle.current_task);
     restore_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(ref mut child) = *restore_handle.child.lock().map_err(|e| e.to_string())? {
-        child.kill().map_err(|e| e.to_string())?;
+    // Best-effort, matching cancel_backup: by this point `cancelled` is already set and
+    // `emit_cancelling` has already fired, so the operation is genuinely cancelling regardless
+    // of what happens here. A poisoned lock or a kill() on an already-reaped child would
+    // otherwise surface as an `Err` to the frontend at exactly the moment the cancel is
+    // succeeding.
+    if let Ok(mut guard) = restore_handle.child.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
     }
     Ok(())
 }
@@ -564,13 +571,18 @@ pub async fn index_snapshot(
         return Ok(false);
     }
 
-    db.set_browse_status(&repo_id, &snapshot_id, "in_progress")?;
-
+    // Resolve everything fallible *before* flipping the status to "in_progress" — an early
+    // return via `?` after that write would strand the snapshot there permanently (no cleanup
+    // path reaches it short of an app restart, which resets `in_progress` -> `pending` in
+    // `init_schema`). The spawned task below already resets to "pending" on its own failure;
+    // this ordering extends the same discipline to the setup that happens before the spawn.
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
     let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
     let gate = std::sync::Arc::clone(&index_handle.gate);
+
+    db.set_browse_status(&repo_id, &snapshot_id, "in_progress")?;
 
     tauri::async_runtime::spawn(async move {
         let _guard = ManualIndexGuard::new(manual_active);

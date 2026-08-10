@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager};
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
-use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure};
+use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure, log_schedule_failure};
 use crate::tasks::TaskOrigin;
 
 // Seconds to sleep until the next wall-clock minute boundary (:00).
@@ -84,8 +84,25 @@ async fn tick(app: &tauri::AppHandle) {
         // take minutes to run; leaving the old next_run_at in place until everything
         // completes made Upcoming Tasks show a stale past time (and the schedule
         // re-eligible as "due") for the entire run instead of just the instant it fired.
-        let next = next_fire_time(&sched.cron_expr).ok();
-        let _ = db.record_schedule_run(&sched.id, now, next);
+        //
+        // A cron-parse failure here deliberately still nulls next_run_at (via `None` below) —
+        // list_due_schedules filters on next_run_at IS NOT NULL, so leaving the old (now-past)
+        // value in place would keep the schedule permanently due and re-fire it every tick
+        // instead of retiring it. What was missing was visibility: both this and a failed
+        // record_schedule_run write used to be silently discarded (`.ok()`/`let _ =`), so a
+        // schedule could stop firing forever with nothing surfaced anywhere. log_schedule_failure
+        // logs a visible backup_history row the same way log_retention_failure already does for a
+        // failed retention.
+        let next = match next_fire_time(&sched.cron_expr) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                log_schedule_failure(app, &db, &sched.name, &format!("invalid cron expression: {e}"));
+                None
+            }
+        };
+        if let Err(e) = db.record_schedule_run(&sched.id, now, next) {
+            log_schedule_failure(app, &db, &sched.name, &format!("failed to record run: {e}"));
+        }
         let _ = app.emit("schedules:changed", ());
 
         for plan in plans {
