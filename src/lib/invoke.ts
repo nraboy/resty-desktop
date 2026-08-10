@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,21 @@ export const changeMasterPassword = (oldPassword: string, newPassword: string): 
 
 export const resetApp = (): Promise<void> =>
   invoke("reset_app");
+
+export const tryAutoUnlock = (): Promise<AutoUnlockResult> =>
+  invoke("try_auto_unlock");
+
+export const getAutoUnlock = (): Promise<boolean> =>
+  invoke("get_auto_unlock");
+
+export const setAutoUnlock = (value: boolean): Promise<void> =>
+  invoke("set_auto_unlock", { value });
+
+export const getAutoUnlockSupported = (): Promise<boolean> =>
+  invoke("get_auto_unlock_supported");
+
+export const autoUnlockNeedsPromptWarning = (): Promise<boolean> =>
+  invoke("auto_unlock_needs_prompt_warning");
 
 // ── repos ─────────────────────────────────────────────────────────────────
 

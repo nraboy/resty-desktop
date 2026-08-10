@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setCompression as saveCompression, setLaunchAtLogin, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setLaunchAtLogin, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
@@ -63,6 +63,8 @@ export default function SettingsPage() {
   const [trayWarning, setTrayWarning] = useState("");
   const [launchAtLogin, setLaunchAtLoginLocal] = useState(false);
   const [launchAtLoginWarning, setLaunchAtLoginWarning] = useState("");
+  const [autoUnlock, setAutoUnlockLocal] = useState(false);
+  const [autoUnlockSupported, setAutoUnlockSupported] = useState(false);
   const [autoIndexing, setAutoIndexingLocal] = useState(false);
   const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
 
@@ -84,6 +86,8 @@ export default function SettingsPage() {
     getTrayWarning().then(setTrayWarning).catch(() => {});
     getLaunchAtLogin().then(setLaunchAtLoginLocal).catch(() => {});
     getLaunchAtLoginWarning().then(setLaunchAtLoginWarning).catch(() => {});
+    getAutoUnlock().then(setAutoUnlockLocal).catch(() => {});
+    getAutoUnlockSupported().then(setAutoUnlockSupported).catch(() => {});
     getAutoIndexing().then(setAutoIndexingLocal).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
     getResticVersion()
@@ -430,6 +434,49 @@ export default function SettingsPage() {
               <p className="mt-3 text-xs text-amber-500">{launchAtLoginWarning}</p>
             )}
           </div>
+          {autoUnlockSupported && (
+            <div className="pt-4 border-t border-gray-800">
+              <p className="text-xs text-gray-500 mb-3">
+                Your master key is stored in your system's credential manager so Resty can unlock
+                itself at startup — including scheduled backups after a login launch. Anyone who
+                can log into this computer will be able to use your repositories without the
+                master password.
+              </p>
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <button
+                  role="switch"
+                  aria-checked={autoUnlock}
+                  aria-label="Unlock automatically at startup"
+                  onClick={() => {
+                    const next = !autoUnlock;
+                    setAutoUnlockLocal(next);
+                    setAutoUnlock(next).catch((err) => {
+                      // Disabling always clears the row server-side even if the keychain
+                      // delete itself failed (see set_auto_unlock's doc comment in auth.rs)
+                      // — so a failed disable must keep the toggle OFF to match reality.
+                      // Only a failed enable leaves the row untouched and needs reverting.
+                      if (next) {
+                        setAutoUnlockLocal(false);
+                      }
+                      setError(String(err));
+                    });
+                  }}
+                  className={[
+                    "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900",
+                    autoUnlock ? "bg-blue-600" : "bg-gray-700",
+                  ].join(" ")}
+                >
+                  <span
+                    className={[
+                      "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                      autoUnlock ? "translate-x-4" : "translate-x-1",
+                    ].join(" ")}
+                  />
+                </button>
+                <span className="text-sm text-gray-300">Unlock automatically at startup</span>
+              </label>
+            </div>
+          )}
           <div className="pt-4 border-t border-gray-800">
             <p className="text-xs text-gray-500 mb-3">
               When enabled, the background cache warmer pre-indexes file listings for every snapshot so

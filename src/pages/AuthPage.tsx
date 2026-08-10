@@ -11,9 +11,13 @@ interface Props {
   onReset?: () => void;
   openResetModal?: boolean;
   onResetModalOpened?: () => void;
+  /** Explains why the user landed here instead of being auto-unlocked (e.g. a denied keychain
+   * read, or a stale saved key that was just cleared). Only ever shown in "unlock" mode —
+   * App.tsx maps the machine-readable reason code from try_auto_unlock into this display copy. */
+  notice?: string;
 }
 
-export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openResetModal, onResetModalOpened }: Props) {
+export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openResetModal, onResetModalOpened, notice }: Props) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
@@ -102,6 +106,10 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
               : "Enter your master password to unlock."}
           </p>
         </div>
+
+        {!isSetup && notice && (
+          <p className="mb-4 text-sm text-amber-300">{notice}</p>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input

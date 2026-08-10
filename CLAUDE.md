@@ -20,6 +20,7 @@ A cross-platform desktop client for the Restic CLI backup tool.
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | Launch at login | `tauri-plugin-autostart` (`.app_name("resty-desktop")`, default `MacosLauncher::LaunchAgent`) — OS-native entry (macOS LaunchAgent plist / Windows HKCU Run value / Linux XDG `.desktop`), gated in the UI on the tray setting; no `app_settings` row, the OS entry is the sole source of truth |
+| Auto-unlock | `keyring` 3 (macOS `apple-native` / Windows `windows-native`, target-scoped deps — not built on Linux, and the toggle is not rendered there) — opt-in, defaults off, stores the *derived* 32-byte master key (never the password) in the OS credential manager so the app can unlock itself at startup; see Security Architecture and Intentional Designs |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json` flag; one-shot calls run via `run_restic_blocking` (`repo.rs`), which runs on a `spawn_blocking` thread so they never occupy an async-runtime worker |
 
@@ -27,7 +28,20 @@ A cross-platform desktop client for the Restic CLI backup tool.
 
 ```
 src/
-  App.tsx          # Router + layout shell; auth state machine (loading/setup/locked/unlocked);
+  App.tsx          # Router + layout shell; auth state machine (loading/setup/locked/unlocked/
+                   #   updateNotice); the mount effect tries auto-unlock before ever rendering the
+                   #   password screen — runAutoUnlock() (shared with the "updateNotice" screen's
+                   #   Continue button) calls tryAutoUnlock(), landing on "unlocked" or "locked"
+                   #   with a reason code ("" | "denied" | "stale") mapped to AuthPage's `notice`
+                   #   prop via AUTO_UNLOCK_NOTICES; "updateNotice" (macOS only, gated on
+                   #   autoUnlockNeedsPromptWarning()) warns about the incoming keychain permission
+                   #   dialog before triggering it; startupRanRef guards the whole startup sequence
+                   #   against React StrictMode's dev-only double-invoke of effects, so
+                   #   tryAutoUnlock() — and the real keychain prompt it can cause — only ever
+                   #   fires once per launch even in `npm run tauri dev` (no effect in production,
+                   #   where StrictMode's double-invoke doesn't happen); a `menu:lock-app` listener
+                   #   (while unlocked) calls lockApp() and returns to "locked" without touching
+                   #   the keychain, since locking is a session action, not a settings change;
                    #   ErrorBoundary catches render errors; restic version warning banner on unlock
   main.tsx         # React entry; suppresses context menu globally
   index.css        # Tailwind directives + global styles
@@ -323,21 +337,58 @@ src/
                             #   import/export card (ImportExportCard);
                             #   cache management: "Clean Orphaned" (remove stale rows) + "Clear All Cache" (wipe + VACUUM);
                             #   DB size display (app_data.db + WAL) refreshes after each cache operation;
-                            #   Full Disk Access card (macOS only): green when granted, amber with instructions + Re-check when not
+                            #   Full Disk Access card (macOS only): green when granted, amber with instructions + Re-check when not;
+                            #   an "Unlock automatically at startup" toggle directly below launch-at-login, shown
+                            #   only when getAutoUnlockSupported() is true (macOS/Windows — never rendered on
+                            #   Linux) and deliberately **not** gated on tray/launch-at-login the way that toggle
+                            #   is gated on tray (see CLAUDE.md's Intentional Designs for why); on a failed
+                            #   disable the toggle stays off rather than reverting, since set_auto_unlock always
+                            #   clears the row server-side even when the underlying keychain delete fails
 
 src-tauri/
   src/
     main.rs        # Calls restic_gui_lib::run()
     lib.rs         # Tauri builder; registers all commands; manages AppDb, MasterKey, CopyHandle, MirrorHandle,
                    #   BackupHandle, PruneHandle, RestoreHandle, IndexHandle, RepoLocks as state; native menu bar (auth-aware, skipped on Linux) with
-                   #   Import/Export and Help items; system tray created lazily after unlock (activate_tray);
+                   #   Import/Export and Help items, plus a "Lock Now" item (unlocked-only, emits
+                   #   menu:lock-app) built alongside "Settings" — MenuState is still constructed on
+                   #   Linux even though the menu bar itself isn't attached there, so lock_app exists
+                   #   as an inert object on that platform, never rendered, and involves no keychain
+                   #   code either way; system tray created lazily after unlock (activate_tray);
                    #   TRAY_GEN counter avoids ID collisions; window close → hide-to-tray if tray_enabled, else exit;
                    #   RunEvent::Reopen (macOS only)
     commands/
       mod.rs         # get_restic_path(); NoConsole trait: no_console() + augment_path() for Finder-launched PATH
-      auth.rs        # is_app_setup, setup_master_password, unlock_app (clears stale locks), lock_app,
-                     #   change_master_password, reset_app
+      auth.rs        # is_app_setup, setup_master_password, unlock_app (clears stale locks via the
+                     #   shared spawn_stale_lock_cleanup, also used by try_auto_unlock), lock_app,
+                     #   change_master_password (re-stores the auto-unlock key under the new
+                     #   derivation, best-effort — never turns a successful rotation into a
+                     #   reported failure over one keychain hiccup; see keychain.rs), reset_app
+                     #   (also best-effort deletes the keychain entry); try_auto_unlock (checks the
+                     #   auto_unlock row before ever touching the keychain, verifies a found key via
+                     #   crypto::decrypt before trusting it, self-heals a failed-verification key by
+                     #   deleting the entry and clearing the row), get/set_auto_unlock (set_auto_unlock
+                     #   stores-before-write on enable, deletes-before-clear on disable — the row is
+                     #   always accurate even when the underlying keychain call fails),
+                     #   get_auto_unlock_supported, auto_unlock_needs_prompt_warning (macOS-only,
+                     #   version-string heuristic — see keychain.rs and Intentional Designs)
       crypto.rs      # Argon2id key derivation, AES-GCM encrypt/decrypt
+      keychain.rs    # Auto-unlock's OS credential-manager access (macOS `apple-native` / Windows
+                     #   `windows-native`, target-scoped deps — see Stack table). Stores the
+                     #   *derived* 32-byte master key under one fixed service/account pair, never
+                     #   the master password. `LoadOutcome` is a deliberate three-way enum, not
+                     #   `Result<Option<_>>`: `Missing` (keyring::Error::NoEntry — safe to clear the
+                     #   row) vs. `Unreadable` (a denied dialog, corrupt data, any other failure —
+                     #   proves nothing, so the entry and row are left untouched) are never
+                     #   conflated, so a single denied macOS permission dialog can't destroy the
+                     #   user's setup. All four public functions (`is_supported`/`store_key`/
+                     #   `load_key`/`delete_key`) are defined on every platform — the Linux/other
+                     #   build is a total no-op stub (`is_supported() → false`, `load_key() →
+                     #   Missing`, no dbus/secret-service contact ever) rather than `#[cfg]`-ed away,
+                     #   so callers and `lib.rs`'s `invoke_handler!` stay platform-independent.
+                     #   Every base64 string and decoded byte buffer touching the key is zeroized on
+                     #   every path. `KEYCHAIN_LOCK` (macOS/Windows only) serializes access per the
+                     #   crate's own thread-safety warning.
       backends.rs    # Backend credential registry — pure, unit-tested, no Tauri state. BackendKind
                      #   (Local/S3/B2/Other); credential_specs() (required/optional env vars per kind);
                      #   detect_kind(path) (total — the single source of truth for a repo's backend
@@ -895,6 +946,7 @@ the exact camelCase JSON shape) plus the shared TypeScript types keeping the two
 - `MasterKey` is `Mutex<Option<[u8; 32]>>` as Tauri state; `None` when locked — all restic commands fail with "App is locked".
 - `change_master_password` calls `db.rotate_master_key`, which re-encrypts all repo passwords **and** stored backend credentials, then rewrites the `master_key` verification row, in a single SQLite transaction (all-or-nothing — a crash can't leave secrets on the new key while the verification blob still expects the old one). The intermediate decrypted plaintext is zeroized per row. Before committing, it re-reads every row's secrets back through `decode_secrets` — the same shared decrypt+parse path `get_full_repo` uses — with the *new* key; any row that fails there rolls the whole rotation back rather than silently orphaning it. This verification pass is deliberately generic (it doesn't know what "credentials" are, just that `decode_secrets` should succeed) specifically so a *future* encrypted field added to `repositories` is covered automatically without anyone remembering to extend this function by hand.
 - `reset_app` wipes all SQLite tables and clears in-memory key.
+- **Auto-unlock** (`commands/keychain.rs`, wired through `auth.rs`'s `try_auto_unlock`/`set_auto_unlock`) is an opt-in, default-off toggle that stores the *derived* 32-byte master key — never the master password — in the OS credential manager (macOS Keychain / Windows Credential Manager; not offered on Linux, see Intentional Designs). Storing the derived key rather than the password preserves the "password is never stored" invariant above (a reused master password lifted from a keychain could unlock things outside this app; the derived key is worthless anywhere else), gives up no security (the key *is* the decryption capability), and skips the deliberately-slow Argon2 derivation at startup. The salt stays in the database, so the stored key leaks nothing about the password. A key read from the keychain is never trusted blindly — `try_auto_unlock` runs it through the exact same `crypto::decrypt` verification `unlock_app` performs against the `master_key` row's own ciphertext before calling `master_key.set`; a failed verification (stale key — e.g. the DB was reset or restored from another machine) deletes the keychain entry and clears the toggle as a self-heal. `keychain::LoadOutcome` is a deliberate three-way enum, not `Result<Option<_>>`: only `keyring::Error::NoEntry` is treated as "safe to delete/clear" (`Missing`); every other failure (a denied macOS permission dialog, a cancelled prompt, a transient platform error, corrupt stored data) maps to `Unreadable` and is guaranteed *not* to delete the entry or clear the toggle — a stored value can only be judged unusable by successfully decoding and failing verification, never by merely failing to read. `change_master_password` re-stores the key under the new derivation after rotation commits (never before, so a keychain failure can't affect the database), and on a failed re-store leaves the entry and toggle untouched rather than clearing them, for the identical "don't destroy on an unproven failure" reason. `reset_app` deletes the entry (best-effort, matching its existing `set_launch_at_login(app, false)` call) since it lives outside the DB and `reset_all` can't reach it. **Trade-off users must understand, stated directly in the Settings copy:** with this on, anyone with access to the unlocked desktop session can open Resty and use every repository — Windows Credential Manager is scoped to the *user account*, not the application, so any process running as that user can read the stored key; macOS's per-app ACL is the stronger of the two.
 
 ## Persistence & Caching
 
@@ -1077,7 +1129,25 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   user deletes the entry outside the app. Mirroring the `tray_enabled`/`auto_indexing` pattern
   with a DB row here would reintroduce exactly the drift the plugin's own storage already avoids,
   and would need reconciliation logic on every read. Don't add one "for consistency" with the
-  other toggles.
+  other toggles. **Auto-unlock (`auth::get/set_auto_unlock`) deliberately does the opposite** and
+  keeps its own `app_settings` row (`auto_unlock`) as the toggle's display state, even though it
+  is exactly the kind of "reads the real backing store" toggle this bullet argues against
+  mirroring with a DB row. The difference is that reading the real backing store here means a
+  keychain read, which — unlike an autostart file/registry check — is neither cheap nor silent:
+  on macOS it can raise a permission dialog. Deriving display state from it would prompt the user
+  every time Settings mounts. The row is UI state only; the keychain remains the sole store of
+  the secret itself, and `try_auto_unlock`/`set_auto_unlock` are written so the row never claims a
+  state the keychain doesn't actually back (see Security Architecture).
+- **The auto-unlock toggle is deliberately *not* gated on launch-at-login or the tray setting,
+  unlike launch-at-login's own gating on the tray.** The tray → launch-at-login gate exists for a
+  hard functional reason: without the tray, closing the window quits the app, so launch-at-login
+  genuinely doesn't work without it. Auto-unlock has no such dependency — it benefits a user who
+  opens Resty manually exactly as much as one whose OS opens it. Gating it would also create a
+  destructive cascade: `SettingsPage.tsx`'s `handleTrayToggle` force-clears launch-at-login on
+  *both* tray transitions (see the bullet below), and anything hanging off launch-at-login
+  inherits that — so toggling the tray would reach two levels down and delete the user's keychain
+  entry as a side effect of an unrelated setting. Leaving auto-unlock ungated means nothing to
+  inherit, and `handleTrayToggle` needed no changes to support this feature.
 - **`.app_name("resty-desktop")` on the `tauri_plugin_autostart::Builder` must not be dropped.**
   It defaults to `package_info().name`, which for this app is `"Resty Desktop"` — with a space —
   and the pinned `auto-launch 0.5.0` writes both the Linux `Exec=` line and the Windows Run
@@ -1090,7 +1160,12 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   advertising background activity ("launch at login") the app cannot actually perform yet. A
   visible unlock screen gets the user to unlock (and backups to actually resume) immediately, at
   the cost of not being a silent background start. Revisiting this requires first designing an
-  auto-unlock story, which is a security decision, not a startup one.
+  auto-unlock story, which is a security decision, not a startup one. **That story is now the
+  opt-in, default-off auto-unlock toggle** (see Security Architecture) — a login launch still
+  always shows the window (there is no silent/hidden launch path even with auto-unlock on), but
+  `try_auto_unlock` now runs before the unlock screen renders, so a user who has opted in sees
+  the repository list directly rather than the password prompt, and scheduled backups resume
+  without anyone finding and clicking anything. A user who hasn't opted in sees no change at all.
 - **`SettingsPage.tsx`'s `handleTrayToggle` clears launch-at-login on *enabling* the tray, not
   only on disabling it.** Clearing only on disable looks sufficient at first glance — it does stop
   an orphaned OS entry from surviving after the tray (and thus hide-to-tray) goes away — but it

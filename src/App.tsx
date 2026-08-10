@@ -1,10 +1,11 @@
-import { useEffect, useState, Component, type ReactNode, type ErrorInfo } from "react";
+import { useCallback, useEffect, useRef, useState, Component, type ReactNode, type ErrorInfo } from "react";
 import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { ThemeProvider } from "./lib/theme";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
+import Button from "./components/Button";
 import { ActivityProvider } from "./lib/activity";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import SnapshotsPage from "./pages/SnapshotsPage";
@@ -19,9 +20,16 @@ import LogsPage from "./pages/LogsPage";
 import SearchPage from "./pages/SearchPage";
 import RepoSearchPage from "./pages/RepoSearchPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
 import type { TaskEvent } from "./lib/types";
+
+// Reason codes returned by try_auto_unlock, mapped to display copy here — the Rust side only
+// ever returns a machine-readable code (see AutoUnlockResult in lib/types.ts), never English.
+const AUTO_UNLOCK_NOTICES: Record<string, string> = {
+  denied: "Automatic unlock couldn't access your keychain. Enter your master password to continue.",
+  stale: "Your saved key is no longer valid and has been removed. Enter your master password to continue.",
+};
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -85,18 +93,64 @@ function MenuEventHandler() {
   return null;
 }
 
-type AuthState = "loading" | "setup" | "locked" | "unlocked";
+type AuthState = "loading" | "setup" | "locked" | "unlocked" | "updateNotice";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [menuResetTriggered, setMenuResetTriggered] = useState(false);
   const [showVersionWarning, setShowVersionWarning] = useState(false);
+  const [autoUnlockReason, setAutoUnlockReason] = useState("");
+  // Guards the startup effect below against React StrictMode's deliberate double-invoke of
+  // effects in development — without this, tryAutoUnlock() (and the real macOS keychain
+  // authorization it can trigger) would fire twice per dev-mode launch. Refs survive
+  // StrictMode's simulated mount/cleanup/remount cycle (only the effect body re-runs), so this
+  // reliably limits the startup sequence to one real attempt. No effect in production, where
+  // React only invokes effects once.
+  const startupRanRef = useRef(false);
+
+  // Shared by the mount effect below and the "updateNotice" screen's Continue button, so both
+  // paths land on the exact same success/failure handling.
+  const runAutoUnlock = useCallback(() => {
+    tryAutoUnlock()
+      .then((result) => {
+        if (result.unlocked) {
+          setAutoUnlockReason("");
+          setAuthState("unlocked");
+        } else {
+          setAutoUnlockReason(result.reason);
+          setAuthState("locked");
+        }
+      })
+      .catch(() => {
+        // try_auto_unlock itself is designed to never reject (see its doc comment in
+        // auth.rs) — this only catches something unexpected, e.g. the IPC call failing
+        // outright. Fail safe to the manual unlock screen either way.
+        setAutoUnlockReason("denied");
+        setAuthState("locked");
+      });
+  }, []);
 
   useEffect(() => {
+    if (startupRanRef.current) return;
+    startupRanRef.current = true;
     isAppSetup()
-      .then((setup) => setAuthState(setup ? "locked" : "setup"))
+      .then((setup) => {
+        if (!setup) {
+          setAuthState("setup");
+          return;
+        }
+        autoUnlockNeedsPromptWarning()
+          .then((needsWarning) => {
+            if (needsWarning) {
+              setAuthState("updateNotice");
+            } else {
+              runAutoUnlock();
+            }
+          })
+          .catch(() => runAutoUnlock());
+      })
       .catch(() => setAuthState("setup"));
-  }, []);
+  }, [runAutoUnlock]);
 
   useEffect(() => {
     if (authState === "loading") return;
@@ -116,6 +170,18 @@ export default function App() {
   useEffect(() => {
     if (authState !== "locked") return;
     const unlisten = listen("menu:reset-app", () => setMenuResetTriggered(true));
+    return () => { unlisten.then((fn) => fn()); };
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== "unlocked") return;
+    // Locking is a session action, not a settings change — it never touches the keychain, so
+    // an auto-unlock user lands right back in the unlocked app on next launch, which is correct.
+    const unlisten = listen("menu:lock-app", () => {
+      lockApp()
+        .then(() => { setAutoUnlockReason(""); setAuthState("locked"); })
+        .catch(() => {});
+    });
     return () => { unlisten.then((fn) => fn()); };
   }, [authState]);
 
@@ -146,6 +212,21 @@ export default function App() {
           <p className="text-gray-500 text-sm">Loading…</p>
         </div>
       )}
+      {authState === "updateNotice" && (
+        <div className="flex items-center justify-center h-screen w-screen bg-gray-950">
+          <div className="w-full max-w-sm px-6 text-center">
+            <h1 className="text-xl font-semibold text-gray-100 mb-2">Resty Desktop was updated</h1>
+            <p className="text-sm text-gray-400 mb-6">
+              macOS will ask for permission to read your saved key. Choose{" "}
+              <span className="font-semibold text-gray-200">Always Allow</span> so you aren't
+              asked again until the next update.
+            </p>
+            <Button onClick={runAutoUnlock} className="w-full justify-center">
+              Continue
+            </Button>
+          </div>
+        </div>
+      )}
       {authState === "setup" && (
         <AuthPage
           mode="setup"
@@ -156,7 +237,8 @@ export default function App() {
       {authState === "locked" && (
         <AuthPage
           mode="unlock"
-          onSuccess={() => setAuthState("unlocked")}
+          notice={AUTO_UNLOCK_NOTICES[autoUnlockReason]}
+          onSuccess={() => { setAutoUnlockReason(""); setAuthState("unlocked"); }}
           onSubmit={(password) => unlockApp(password)}
           onReset={() => setAuthState("setup")}
           openResetModal={menuResetTriggered}

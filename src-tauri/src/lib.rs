@@ -15,6 +15,7 @@ struct MenuState {
     app_submenu: tauri::menu::Submenu<tauri::Wry>,
     file_submenu: tauri::menu::Submenu<tauri::Wry>,
     settings: tauri::menu::MenuItem<tauri::Wry>,
+    lock_app: tauri::menu::MenuItem<tauri::Wry>,
     new_repository: tauri::menu::MenuItem<tauri::Wry>,
     new_backup_plan: tauri::menu::MenuItem<tauri::Wry>,
     reset_app: tauri::menu::MenuItem<tauri::Wry>,
@@ -40,6 +41,7 @@ fn show_window(app: &tauri::AppHandle) {
 #[tauri::command]
 fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> Result<(), String> {
     let _ = menu_state.app_submenu.remove(&menu_state.settings);
+    let _ = menu_state.app_submenu.remove(&menu_state.lock_app);
     let _ = menu_state.file_submenu.remove(&menu_state.new_repository);
     let _ = menu_state.file_submenu.remove(&menu_state.new_backup_plan);
     let _ = menu_state.file_submenu.remove(&menu_state.reset_app);
@@ -48,6 +50,9 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     let _ = menu_state.file_submenu.remove(&menu_state.export_item);
 
     if unlocked {
+        // prepend inserts at index 0 each call, so prepending in this order — lock_app first,
+        // then settings — yields the intended top-to-bottom layout: Settings, Lock Now, … Quit.
+        menu_state.app_submenu.prepend(&menu_state.lock_app).map_err(|e| e.to_string())?;
         menu_state.app_submenu.prepend(&menu_state.settings).map_err(|e| e.to_string())?;
         menu_state.file_submenu.append(&menu_state.new_repository).map_err(|e| e.to_string())?;
         menu_state.file_submenu.append(&menu_state.new_backup_plan).map_err(|e| e.to_string())?;
@@ -161,6 +166,7 @@ pub fn run() {
         )
         .setup(|app| {
             let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+            let lock_app_item = MenuItemBuilder::with_id("lock_app", "Lock Now").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit Resty Desktop")
                 .accelerator("CmdOrCtrl+Q")
                 .build(app)?;
@@ -201,6 +207,7 @@ pub fn run() {
                 app_submenu,
                 file_submenu,
                 settings,
+                lock_app: lock_app_item,
                 new_repository: new_repo,
                 new_backup_plan,
                 reset_app: reset_app_item,
@@ -262,6 +269,7 @@ pub fn run() {
                 "new_repository" => { app.emit("menu:new-repository", ()).ok(); }
                 "new_backup_plan" => { app.emit("menu:new-backup-plan", ()).ok(); }
                 "settings" => { app.emit("menu:settings", ()).ok(); }
+                "lock_app" => { app.emit("menu:lock-app", ()).ok(); }
                 "reset_app" => { app.emit("menu:reset-app", ()).ok(); }
                 "import" => { app.emit("menu:import", ()).ok(); }
                 "export" => { app.emit("menu:export", ()).ok(); }
@@ -278,6 +286,11 @@ pub fn run() {
             auth::lock_app,
             auth::change_master_password,
             auth::reset_app,
+            auth::try_auto_unlock,
+            auth::get_auto_unlock,
+            auth::set_auto_unlock,
+            auth::get_auto_unlock_supported,
+            auth::auto_unlock_needs_prompt_warning,
             // repos
             repo::list_repos,
             repo::add_repo,

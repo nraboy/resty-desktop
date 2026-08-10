@@ -9,6 +9,14 @@ export interface Repository {
   readOnly: boolean;
 }
 
+// Result of an auto-unlock attempt at startup (try_auto_unlock, auth.rs). `reason` is a
+// machine-readable code ("" | "denied" | "stale") — AuthPage.tsx owns the actual display copy,
+// see App.tsx's mapping.
+export interface AutoUnlockResult {
+  unlocked: boolean;
+  reason: string;
+}
+
 const REMOTE_PREFIXES = ["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
 export function isRemoteRepo(path: string): boolean {
   return REMOTE_PREFIXES.some((p) => path.startsWith(p));
