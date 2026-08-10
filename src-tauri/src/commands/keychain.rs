@@ -10,9 +10,20 @@
 use base64::Engine;
 use zeroize::Zeroize;
 
+// SERVICE/ACCOUNT/B64/decode_stored/LoadOutcome's Found and Unreadable variants are only
+// reachable through the real (macOS/Windows) `mod platform` below and the `#[cfg(test)]` unit
+// tests — the Linux/other stub `mod platform` never references any of them, since its `load_key`
+// unconditionally returns `Missing`. That makes every one of them genuinely dead code on a
+// non-test, non-macOS/Windows build, which is exactly what CI's ubuntu-22.04 lint job compiles.
+// Same situation `gpu_compat.rs` documents for its own pure/wrapper split — omitting these
+// passes `npm run test:rust` (the test module supplies the missing "use") but fails
+// `npm run lint:rust` on Linux, where clippy also checks the plain lib target with no tests.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const SERVICE: &str = "com.nraboy.restydesktop";
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const ACCOUNT: &str = "master-key";
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 /// keyring's own docs warn the underlying stores "may not handle access from different threads
@@ -24,6 +35,7 @@ static KEYCHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// a denied macOS permission dialog must never be confused with a genuinely absent entry, or a
 /// single misclick would let the caller destroy the user's auto-unlock setup. See the two
 /// call sites in `auth.rs` (`try_auto_unlock`) for how each variant is handled.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(crate) enum LoadOutcome {
     /// Key retrieved. Still UNVERIFIED — the caller must check it against the `master_key`
     /// verification blob before trusting it (see `crypto::decrypt`).
@@ -40,6 +52,7 @@ pub(crate) enum LoadOutcome {
 /// Decodes a stored base64 value back into a 32-byte key. Pure and platform-independent so it
 /// can be unit-tested without any real keyring I/O (CI runs on ubuntu-22.04, where the store
 /// doesn't exist at all).
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn decode_stored(stored: &str) -> LoadOutcome {
     let mut bytes = match B64.decode(stored) {
         Ok(b) => b,
