@@ -303,15 +303,20 @@ export default function ScheduleEditPage() {
               {frequency === "weekly" && (
                 <div>
                   <label className="text-xs text-gray-500 mb-1.5 block">Day of Week</label>
-                  <select
-                    value={dayOfWeek}
-                    onChange={(e) => setDayOfWeek(e.target.value)}
-                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    {DAYS_OF_WEEK.map((d) => (
-                      <option key={d.value} value={d.value}>{d.label}</option>
-                    ))}
-                  </select>
+                  <div className="relative inline-block">
+                    <select
+                      value={dayOfWeek}
+                      onChange={(e) => setDayOfWeek(e.target.value)}
+                      className="appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {DAYS_OF_WEEK.map((d) => (
+                        <option key={d.value} value={d.value}>{d.label}</option>
+                      ))}
+                    </select>
+                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
                 </div>
               )}
 
@@ -319,15 +324,20 @@ export default function ScheduleEditPage() {
               {frequency === "monthly" && (
                 <div>
                   <label className="text-xs text-gray-500 mb-1.5 block">Day of Month</label>
-                  <select
-                    value={dayOfMonth}
-                    onChange={(e) => setDayOfMonth(e.target.value)}
-                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                      <option key={d} value={String(d)}>{d}</option>
-                    ))}
-                  </select>
+                  <div className="relative inline-block">
+                    <select
+                      value={dayOfMonth}
+                      onChange={(e) => setDayOfMonth(e.target.value)}
+                      className="appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                        <option key={d} value={String(d)}>{d}</option>
+                      ))}
+                    </select>
+                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
                 </div>
               )}
 
@@ -336,25 +346,35 @@ export default function ScheduleEditPage() {
                 <div>
                   <label className="text-xs text-gray-500 mb-1.5 block">Time of Day</label>
                   <div className="flex items-center gap-2">
-                    <select
-                      value={hour}
-                      onChange={(e) => setHour(e.target.value)}
-                      className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    >
-                      {Array.from({ length: 24 }, (_, i) => i).map((h) => (
-                        <option key={h} value={String(h)}>{String(h).padStart(2, "0")}</option>
-                      ))}
-                    </select>
+                    <div className="relative inline-block">
+                      <select
+                        value={hour}
+                        onChange={(e) => setHour(e.target.value)}
+                        className="appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        {Array.from({ length: 24 }, (_, i) => i).map((h) => (
+                          <option key={h} value={String(h)}>{String(h).padStart(2, "0")}</option>
+                        ))}
+                      </select>
+                      <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
                     <span className="text-gray-500">:</span>
-                    <select
-                      value={minute}
-                      onChange={(e) => setMinute(e.target.value)}
-                      className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    >
-                      {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
-                        <option key={m} value={String(m)}>{String(m).padStart(2, "0")}</option>
-                      ))}
-                    </select>
+                    <div className="relative inline-block">
+                      <select
+                        value={minute}
+                        onChange={(e) => setMinute(e.target.value)}
+                        className="appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+                          <option key={m} value={String(m)}>{String(m).padStart(2, "0")}</option>
+                        ))}
+                      </select>
+                      <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
                   </div>
                 </div>
               )}
@@ -363,15 +383,20 @@ export default function ScheduleEditPage() {
               {frequency === "hourly" && (
                 <div>
                   <label className="text-xs text-gray-500 mb-1.5 block">Minutes past the hour</label>
-                  <select
-                    value={minute}
-                    onChange={(e) => setMinute(e.target.value)}
-                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
-                      <option key={m} value={String(m)}>:{String(m).padStart(2, "0")}</option>
-                    ))}
-                  </select>
+                  <div className="relative inline-block">
+                    <select
+                      value={minute}
+                      onChange={(e) => setMinute(e.target.value)}
+                      className="appearance-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-8 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+                        <option key={m} value={String(m)}>:{String(m).padStart(2, "0")}</option>
+                      ))}
+                    </select>
+                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
                 </div>
               )}
 

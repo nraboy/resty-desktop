@@ -1,0 +1,194 @@
+# Frontend Reference
+
+Read this before: changing a page's behavior, adding a component, or touching theming.
+Per-file detail lifted from the `src/` project-structure tree; CLAUDE.md keeps only a
+one-line summary per file. Route table lives in CLAUDE.md.
+
+
+### `App.tsx`
+
+Router + layout shell; auth state machine (loading/setup/locked/unlocked/ updateNotice); the mount effect tries auto-unlock before ever rendering the password screen — runAutoUnlock() (shared with the "updateNotice" screen's Continue button) calls tryAutoUnlock(), landing on "unlocked" or "locked" with a reason code ("" | "denied" | "stale") mapped to AuthPage's `notice` prop via AUTO_UNLOCK_NOTICES; "updateNotice" (macOS only, gated on autoUnlockNeedsPromptWarning()) warns about the incoming keychain permission dialog before triggering it; startupRanRef guards the whole startup sequence against React StrictMode's dev-only double-invoke of effects, so tryAutoUnlock() — and the real keychain prompt it can cause — only ever fires once per launch even in `npm run tauri dev` (no effect in production, where StrictMode's double-invoke doesn't happen); a `menu:lock-app` listener (while unlocked) calls lockApp() and returns to "locked" without touching the keychain, since locking is a session action, not a settings change; ErrorBoundary catches render errors; restic version warning banner on unlock
+
+### `main.tsx`
+
+React entry; suppresses context menu globally
+
+### `index.css`
+
+Tailwind directives + global styles
+
+
+## components/
+
+### `Button.tsx`
+
+primary/secondary/danger/ghost variants
+
+### `ContextMenu.tsx`
+
+Portal-rendered right-click menu; auto-nudges onto screen; closes on Escape/click-outside
+
+### `EmptyState.tsx`
+
+Empty list placeholder
+
+### `ImportExportCard.tsx`
+
+Settings card: export all repos/plans/schedules to an encrypted .json file, and import (preview→confirm) as fresh copies; import modal tabs between Resty Export and Backrest config.json
+
+### `Input.tsx`
+
+Labeled input with error state; optional onClear prop shows inline × when value non-empty; className applies to outer wrapper div (not <input>); <input> is always w-full inside wrapper
+
+### `Modal.tsx`
+
+Overlay modal dialog
+
+### `ProgressBar.tsx`
+
+Determinate (percent) or indeterminate (constantly-sliding, via index.css's `slide` keyframe) bar; shared by ActivityPanel and every modal that shows backup/restore/copy/index/prune progress — indeterminate mode is for operations that report no incremental progress (e.g. single-repo prune)
+
+### `Sidebar.tsx`
+
+Left nav with app icon + repo indicator
+
+### `ActivityPanel.tsx`
+
+Right-side slide-in drawer (slim always-visible rail + fixed overlay) surfacing background activity with no other visibility: auto-indexing progress, scheduler- triggered backups (Active Tasks — driven by the unified `task` event bus filtered to origin "scheduler", see Operation Event Bus and lib/activity.tsx's reduceSchedulerBackup; Stop wired to cancelBackup(), which kills whatever's in BackupHandle.child regardless of manual/scheduler origin; shown only during the "backup" phase, hidden during "retention" since apply_retention has no cancel path — subtitle swaps to "Applying retention rules…" so the ~10-20s forget isn't mistaken for a frozen bar), in-flight repo stats refreshes (also in Active Tasks — lifecycle-only, no progress bar), next few due schedules (Upcoming Tasks — rows truncate with a hover tooltip for long plan lists), and last few backup runs (Recent Logs — neutral "Cancelled" glyph instead of red-X/"Failed" for CANCELLED_BACKUP_ERROR entries), and queued/running mirror runs (Active Tasks — one row per mirror, "Up Next" for any additionally queued ones; see lib/activity.tsx's reduceMirror). Restore/copy/ manual backup still have their own blocking progress modals and are intentionally excluded — see lib/activity.tsx.
+
+
+## lib/
+
+### `types.ts`
+
+Shared TS types: Repository, Snapshot, FileEntry, ResticStats, SnapshotStats, CheckResult, BackupHistoryEntry, BackupProgress, RestoreProgress, RetentionPolicy, BackupPlan, DiffEntry, DiffResult, NewRepoInput (mirrors repo.rs's NewRepoInput struct); isRemoteRepo() helper; CANCELLED_BACKUP_ERROR sentinel (see snapshot.rs's execute_backup) distinguishing a genuine cancel from a real failure
+
+### `backends.ts`
+
+detectBackend (mirrors commands/backends.rs's detect_kind — total, never persisted) and commonCredentialKeys (one-line hint naming common env vars for a recognized b2:/s3:/rest: prefix, display-only). The repository path itself is always freeform — there is no per-kind guided form; see RepositoriesPage.tsx below. Also hasBrokenRestUserinfo/hasInlineRestUserinfo (over a shared restUserinfoParts parser, deliberately not `new URL()` since that throws on the exact malformed/ partial input these exist to detect): the first flags a rest: path whose inline userinfo contains a /, @, ?, or # — which breaks Go's net/url the same way restic's own parser breaks (see Restic Integration's REST paragraph) — the second flags any inline userinfo at all, since restic's ApplyEnvironment only reads RESTIC_REST_USERNAME/PASSWORD when the URL has neither, silently ignoring stored credential rows otherwise. Both display-only, consumed by RepositoriesPage.tsx
+
+### `invoke.ts`
+
+Typed wrappers over tauri invoke()
+
+### `activity.tsx`
+
+ActivityProvider (mounted once in App.tsx, outlives route changes since it must keep updating no matter which page is mounted): indexing progress, the scheduler-triggered activeBackup (never a manual/"Run Now" backup — derived from the unified `task` bus filtered to origin "scheduler" via the pure, unit-tested reduceSchedulerBackup reducer, replacing the legacy scheduler:backup-started/backup:progress/ scheduler:retention-started/scheduler:backup-finished events outright — see Operation Event Bus) carrying a phase ("backup"|"retention") flipped by the retention step's own `forget`-kind task op reaching "started"; a plan with no retention configured never gets a `forget` op, so that case is instead dismissed by a plan-lookup effect once it confirms no keep_* flag is set (see reduceSchedulerBackup's doc comment for why the reducer alone can't know this), upcoming due schedules (refreshed on schedules:changed, which the scheduler emits after record_schedule_run advances next_run_at — NOT on the task bus, which fires per-plan before the advance and would read a stale past timestamp), recentLogs, and statsRefreshing/statsFailed — repoId sets derived (via the pure, unit-tested reduceStatsOps reducer, StatsOpsState) from the unified `task` event bus filtered to kind "stats" rather than from a per-operation feed (stats never had one). Lifecycle-only, no error text: the reducer tracks operationId→repoId across started (also clears any prior failure marker for that repo)/finished/failed/cancelled to drive an in-flight indicator (statsRefreshing — a spinning icon on RepositoriesPage's own rows, an indeterminate ProgressBar in the Activity panel) and a plain boolean "last attempt failed" marker (statsFailed, no message — see repo.rs's fetch_and_cache_stats, where every failure path reports through task_ctx.failed(...) explicitly so this marker never depends on the invoke promise's own rejection). The actual numbers are re-read from the DB cache by RepositoriesPage's own `task` listener (only on "finished"), not carried on the event. Powers ActivityPanel.tsx and (for statsRefreshing/statsFailed) RepositoriesPage.tsx directly. activeMirrors tracks every queued/running mirror (Map<operationId, ActiveMirror>, not a nullable slot — mirror_repo allows multiple runs to be queued at once, including two into the same destination from different sources, so it's attributed strictly by operationId, never repoId — see reduceMirror). Mirror has no `progress` phase (restic `copy` streams nothing incremental), so a running row is always an indeterminate ProgressBar.
+
+### `format.ts`
+
+formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration
+
+### `config.ts`
+
+MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR constants for version warning
+
+### `utils.ts`
+
+needsFullDiskAccess(paths): returns true if any path matches macOS protected prefixes (~/Library, /System, /private, /var)
+
+### `theme.tsx`
+
+ThemeProvider + useTheme(); persists to localStorage; applies dark/light/system class to <html>
+
+### `cron.ts`
+
+parseCronToSimple/buildCronExpr — pure Simple<->Expert cron helpers, moved out of ScheduleEditPage.tsx (where they were module-private) so they're directly unit-tested (cron.test.ts); round-tripping a parsed expression through buildCronExpr is not byte-identical (zero-padded, e.g. "0 2 * * *" -> "00 02 * * *") — intended, pinned by a test, not a bug
+
+### `difftree.ts`
+
+computeChildren/toSegments — pure tree-building over DiffEntry[] for DiffPage.tsx's directory browser, moved out the same way (where they were module-private) for the same reason (difftree.test.ts)
+
+
+## pages/
+
+### `AuthPage.tsx`
+
+Master password setup (first launch) and unlock screen
+
+### `RepositoriesPage.tsx`
+
+Add/open/delete repos; restic init for new repos; remote URL support; add/open modal keeps the plain Local Path / Remote URL toggle (folder picker vs. a freeform restic-URL text input — no per-backend guided sub-forms or Backend `<select>`; backend kind is only ever derived from the path, never chosen or stored) plus, for Remote, one universal optional "Credentials (optional)" key/value row list (env var name + value, add/remove rows) — the same shape for every backend, since restic's own interface is env vars regardless of which one. Left empty, a repo uses restic's own credential chain (env, `~/.aws/credentials`, an IAM role) exactly as it always has; a one-line hint (`lib/backends.ts`'s `commonCredentialKeys`) names common env vars (e.g. `B2_ACCOUNT_ID, B2_ACCOUNT_KEY`) once the typed path matches a recognized `b2:`/`s3:`/`rest:` prefix. For `rest:` specifically, two more advisory hints (`hasBrokenRestUserinfo`/`hasInlineRestUserinfo`, `lib/backends.ts`) appear under the path field in both add and edit modals: an amber one when inline URL userinfo contains a character (`/`, `@`, `?`, `#`) that breaks restic's URL parsing (only shown when true — a working URL never has both conditions), and a neutral one — shown only when the amber one isn't — when the URL has *any* inline userinfo and a credential row is filled in, since restic silently prefers the URL's own credentials over `RESTIC_REST_USERNAME`/`PASSWORD` in that case (see Restic Integration's REST paragraph). Neither hint blocks Save or Test Connection. Rust's `validate_credentials` (`backends.rs`) is the sole authority on required/allowed keys per detected kind — this form does no client-side required-field validation, so a missing/unknown key surfaces as a Test Connection / Save error rather than an inline warning; the Remote-mode path is trimmed before submit/test (`handleSubmit`/`handleTest`) since it's the only freeform text field here — the Local-mode path comes verbatim from the folder picker and is never trimmed, since a trailing space can be a real part of a directory name; credential values are trimmed on submit except `RESTIC_REST_PASSWORD`, where whitespace can be part of the password itself; the edit modal derives backend kind from the (possibly just-edited) path via `detectBackend` rather than a stored field, and blocks Save with an inline error if editing the path would change the derived kind while credentials are already stored; edit-modal credential rows are prefilled with stored key+value pairs from `getRepoCredentials` (same threat model as `getRepoPassword` — values round-trip the same way the password does); editing one row leaves the others intact, and "Clear stored credentials" empties the row list (saved as an empty list → ambient mode); Test Connection uses the populated values directly, so it reflects the saved repo's actual credentials; "Read-only repository (--no-lock)" checkbox in the add modal (next to the existing "No Password" checkbox) and the edit modal (dirty-checked like name/path/password, via updateRepoReadOnly); a "Read-only" pill badge on the row; read-only repos are excluded from every mirror/copy destination picker (never as a source) and "Prune…"/row Mirror button are disabled accordingly (see Restic Integration for the backend policy); per-row and bulk stats refresh (manual-only — no auto-eviction; see Restic Integration; "Refresh All" always includes remote repos, unlike every automatic remote activity); spinner (statsRefreshing) and failure marker (statsFailed, a plain boolean — no error text, see activity.tsx) both come from ActivityProvider's `task`-bus subscription and survive navigating away mid-refresh; row data comes from a page-local `task` listener re-reading get_repo_stats on "finished" (a guaranteed cache hit); each row shows a "Refreshed …" label from cached_at, and a failed refresh keeps the last-good value visible with a plain "refresh failed" marker rather than blanking to "unavailable"; mirror, edit, check, prune, "Index All Snapshots" via right-click context menu; edit modal: name/path/password with Test Connection; prune: confirmation→progress→done, with a Hide button on the progress screen (mirrors SettingsPage's "Prune All Repositories" modal) that dismisses the modal while the prune keeps running — reopening via "Prune…" shows the same repo's live progress rather than a blank state, sourced from local `pruning`/`pruneElapsed`; "Prune…" is disabled for every repo except the one currently pruning (prune is single-in-flight app-wide, `PruneHandle`'s busy guard) so a click on a different repo can't silently reopen the modal onto the wrong repo's progress; a backgrounded prune otherwise stays visible/cancellable via the Activity panel's `activePrune` row — see ActivityPanel.tsx; mirror: destination picker → queued/running (an indeterminate bar; mirror_repo emits no progress) → done/cancelled/failed, with a Hide button on the queued/running screen that backgrounds the run without cancelling it (mirrorOpId/mirrorOutcome tracked locally; the queued-vs-running state itself is read live from ActivityProvider's activeMirrors, matched by operationId — never repoId, since mirror_repo allows multiple runs queued at once, including two into the same destination from different sources); deliberately no re-adoption path (unlike "Index All"'s getActiveIndexBatch below) — reopening the modal for a repo always starts a fresh picker, since a backgrounded mirror stays fully visible/cancellable via the panel regardless, and the backend's `(src, dest)` dedup guard rejects an accidental exact repeat (MIRROR_ALREADY_ACTIVE_ERROR); a page-local `task` listener drives the terminal outcome, backstopped by a second effect that infers "done" if activeMirrors drops the operationId first (closes a narrow race where Tauri's async `listen()` registration can lose to an unusually fast mirror's terminal event — activeMirrors isn't subject to this, since ActivityProvider has been subscribed since app launch). The backstop requires seen-then-disappeared (mirrorSeenRef), not bare absence: mirror_repo emits its "pending" task event from *inside* the spawned task (snapshot.rs), which lands strictly after the operationId has already returned to the frontend, so activeMirrors provably doesn't contain a just-started run for at least one render — concluding "done" from that absence alone (the original implementation) read the startup gap as a finish and reported success on a mirror that hadn't even begun. Accepted trade-off: a mirror fast enough to never be observed at all now leaves the modal on "Copying snapshots…" instead of resolving, rather than falsely reporting complete — the modal's Hide button and the Activity panel's own independent tracking make that an acceptable stall, not a dead end. mirrorSeenRef is reset alongside every setMirrorOpId(null) (both the row button and the context-menu item) so it never leaks into the next mirror run; "Index All Snapshots" opens the same dismissible progress/queued/Stop/complete modal pattern as RepoSearchPage's own "Index All" (independent state, its own `task` listener scoped to whichever repo the context menu targeted — deliberate duplication, see "Known, deferred frontend duplication" below), and calls the same index_snapshots_batch/getActiveIndexBatch/cancel_index_batch commands, so a batch started from either page is visible in both (and in ActivityPanel) and adopted rather than duplicated; the menu item is disabled per-repo via a page-local `repoNeedsIndexing` map (cache-only listSnapshots+get_snapshot_index_status reads, recomputed on repo-list changes and kept live via the `task` bus + snapshots:refreshed — fails open/enabled while unchecked)
+
+### `SnapshotsPage.tsx`
+
+Snapshot table; stale-while-revalidate cache; inline tag editor; delete with prune option; full-snapshot restore with streaming progress; per-snapshot copy with cancellation; pagination (PAGE_SIZE=10); filter with × clear; right-click context menu; multi-select mode: bulk delete and copy with progress bars; per-row "Index Snapshot" / "Remove Index" context-menu item toggles based on index status: shows "Index Snapshot" (disabled while in_progress) or "Remove Index" (active when complete); "Remove Index" calls clear_snapshot_index and removes the snapshot from the local status map; "Index Snapshot" shows a progress modal; listens for `task` events (kind "index") to update per-row status map live; listens for snapshots:refreshed to reload list when warmer updates cache; per-row and context-menu "Search Files" button → SearchPage; a "Read-only" pill badge next to the repo name when repo.readOnly; delete, tag add/remove, Unlock, and bulk delete are disabled (with a tooltip) for a read-only repo — restore/browse/search/check/refresh stay enabled since they're reads; the copy-destination list (row button, context item, bulk "Copy selected") is filtered to writable repos only via the otherRepos memo (a read-only repo may be a copy *source*, never a destination — see CLAUDE.md's Restic Integration section)
+
+### `BrowsePage.tsx`
+
+File tree inside a snapshot; per-entry and multi-select restore; breadcrumb nav; restore modal with strip_leading_path option; inline tag management (add/remove disabled, with a tooltip, when repo.readOnly — restore itself stays enabled since it writes to the local filesystem, not the repo); a "Read-only" pill badge next to the repo name when repo.readOnly; "Search" button navigates to SearchPage, passing returnPath+returnStack so back navigation can restore the current directory depth; accepts initialPath+initialPathStack from SearchPage so "open in browser" lands at the right directory; fromSearch flag in location state changes back-button destination (navigate(-1) restores search state from history entry written by window.history.replaceState)
+
+### `SearchPage.tsx`
+
+Full-text file search within a single snapshot at /snapshots/:repoId/:snapshotId/search; requires snapshot to be indexed (browse_cache_files); shows index state machine (loading→not_indexed→indexing→ready); "Index Now" triggers index_snapshot; listens for `task` events (kind "index") to transition to ready; debounced 300ms search via search_snapshot_files (SQLite LIKE, capped at 200 results); clicking a result writes restoredQuery+restoredResults into current history entry via window.history.replaceState before navigating to BrowsePage (so navigate(-1) restores them); back button (fromBrowse) navigates explicitly to BrowsePage with returnPath+returnStack to restore the correct directory depth; searchSeqRef guards against out-of-order responses — a burst of keystrokes can have several (slow, ~1s+) searches in flight, so only the response matching the latest call is applied to state
+
+### `RepoSearchPage.tsx`
+
+File search across every indexed snapshot in a repo at /snapshots/:repoId/search; same index/debounce/stale-response-guard pattern as SearchPage.tsx, but backed by search_repo_files, which dedups each matching path to the newest snapshot containing it (shown as a snapshot short-id badge per result; clicking opens that snapshot's BrowsePage). Banner shows "Searching N of M snapshots" with an "Index All" action when the repo is only partially indexed; "Index All" calls index_snapshots_batch once (backend indexes sequentially, one snapshot at a time, pausing the auto-indexer for the run — see browse.rs); a modal with a real progress bar (derived from `task` events, kind "index", matched against the batch's target snapshot ids via targetId) tracks the run, with a Stop button (cancel_index_batch; takes effect between snapshots) shown while in progress; the batch also survives the modal being dismissed — see ActivityPanel.tsx
+
+### `DiffPage.tsx`
+
+Diff viewer at /snapshots/:repoId/diff/:snapshotA/:snapshotB; client-side tree from flat entries; summary bar; restore from diff; truncation warning
+
+### `BackupPlansPage.tsx`
+
+List/run/delete plans; backup modal with streaming progress + cancellation (cancelling shows a local "Stopping…" state, then reverts to the Start Backup view — no distinct "cancelled" UI block, matching cancel_backup's own behavior); auto-applies retention after successful backup; per-plan Apply Retention button; pre-flight FDA check before running: warns if plan includes protected paths and FDA not granted (macOS only); Run Backup / Apply Retention Rules (row buttons and context items) disabled, with a tooltip, for any plan whose repo is currently read-only (planRepoReadOnly) — execute_backup would refuse it anyway (see Restic Integration), this just avoids the round-trip
+
+### `BackupPlanEditPage.tsx`
+
+Create/edit plan (name, repo, paths, tags, excludes, exclude-if-present marker files, exclude-caches, retention, bandwidth limits); exclude patterns: Simple tab (tag list + presets) / Expert tab (freeform textarea); a separate "Exclude If Present" card (flat filename tag list, no Simple/Expert split — restic's `name:header` syntax passes through the plain filename field with no dedicated header input) plus an "exclude cache directories" checkbox (`--exclude-caches`, restic's shorthand for `--exclude-if-present CACHEDIR.TAG:Signature: 8a477f597d28d172789f06886806bc55`); a live, non-blocking amber hint appears under that field's input while it contains a `/`/`\` (marker files match by name only — a path never matches) or starts with `#` (silently dropped by build_exclude_args' comment filter, same as Exclude Patterns) — purely advisory, doesn't block Add, mirrors the pattern's own filtering in snapshot.rs rather than introducing new validation rules; amber FDA warning suppressed when FDA is confirmed granted (macOS only); the repo <select> excludes read-only repos, except the plan's own already-selected repo (kept visible but disabled, "(read-only)" suffix) so an existing plan whose repo has since become read-only isn't silently dropped from the list — shown with an inline amber warning below the select in that case
+
+### `SchedulesPage.tsx`
+
+List schedules; toggle/delete/run; amber warning when tray disabled; a second amber warning per schedule row when any of its plans (via planIds → BackupPlan.repoId) targets a read-only repo — that plan's backup will fail on every run, the rest of the schedule is unaffected (scheduleHasReadOnlyRepo; loads listBackupPlans + listRepos once on mount for this check)
+
+### `ScheduleEditPage.tsx`
+
+Create/edit schedule (name, cron expr, backup plans); scheduleId="new" for creation; each plan row in the picker shows a "Read-only repo" badge when its repo is read-only; selecting one shows an amber warning below the picker (scoped to currently-*selected* plans via selectedReadOnlyPlans, not just any read-only-badged plan in the full list) stating that plan's backup will fail, not the whole schedule; "Delete Schedule" is a danger-variant Button (not a bare link) on the right of the Save/Cancel row, matching BackupPlanEditPage's layout
+
+### `LogsPage.tsx`
+
+Backup history log; paginated (PAGE_SIZE=10); expandable error rows (only for a real failure — a CANCELLED_BACKUP_ERROR entry renders a neutral "Cancelled" glyph instead of the red error icon, and isn't expandable)
+
+### `SettingsPage.tsx`
+
+Theme selector; tray + auto-indexing + remote-auto-refresh toggles; restic binary path; a launch-at-login toggle (its own pt-4 border-t row, a peer of the other toggles, not visually nested under tray) that's always rendered but disabled/greyed (checked state forced to false) unless the tray toggle is on, since without the tray closing the window quits the app; handleTrayToggle clears launch-at-login on BOTH tray transitions (not just disabling) so it never inherits a surviving OS entry or leaves an orphaned one; backed by the real OS autostart entry (no app_settings row — see Stack table's "Launch at login" row and repo.rs); compression selector; default restore path; prune all repos with streaming progress (read-only repos are excluded — repo.rs's prune_all_repos skips them rather than failing the batch; the confirm/done screens fetch and display the excluded count via listRepos() so that's disclosed rather than silent); import/export card (ImportExportCard); cache management: "Clean Orphaned" (remove stale rows) + "Clear All Cache" (wipe + VACUUM); DB size display (app_data.db + WAL) refreshes after each cache operation; Full Disk Access card (macOS only): green when granted, amber with instructions + Re-check when not; an "Unlock automatically at startup" toggle directly below launch-at-login, shown only when getAutoUnlockSupported() is true (macOS/Windows — never rendered on Linux) and deliberately **not** gated on tray/launch-at-login the way that toggle is gated on tray (see docs/decisions.md for why); on a failed disable the toggle stays off rather than reverting, since set_auto_unlock always clears the row server-side even when the underlying keychain delete fails
+
+## Theming
+
+Three modes: Dark (default), Light, System. Stored in `localStorage`; applied as `dark`/`light`/`system` class on `<html>`.
+
+All theme-sensitive colors route through CSS custom properties in `src/index.css`. Extended in `tailwind.config.js`:
+```
+gray.50–950, blue.300/400/700/900, green.300/400/700/900, red.300/400/700/900, amber.300/400/500/700/900
+```
+`:root` = dark defaults. `html.light` and `@media (prefers-color-scheme: light) html.system` override with light palette (slate family, reversed). Each of the three blocks also sets the CSS `color-scheme` property (`dark`/`light`/`light` respectively) — without it, UA-painted native controls (`<select>` popups, checkboxes, scrollbars) default to light chrome regardless of the app theme, since `color-scheme` isn't inferred from the `--tw-*` custom properties. Any new theme block must set it too.
+
+### Adding a themed color
+1. Add `--tw-<color>-<shade>: <R> <G> <B>;` to `:root` and `html.light` (and the `system`
+   media-query block — all three must stay in sync, `light` and `system`'s light branch use
+   identical values) in `src/index.css`.
+2. Extend `tailwind.config.js` under `theme.extend.colors`.
+3. Use `text-<color>-<shade>` / `bg-<color>-<shade>` as usual.
+4. **Verify contrast in light mode, not just that it compiles.** A shade left out of the
+   `:root`/`html.light` pair silently falls through to Tailwind's raw default value — tuned
+   for a dark background — in *every* theme, including light. This is exactly what happened
+   with `amber-400`/`amber-500`: `amber-300`/`700`/`900` were mapped, but warning text using
+   the (very common) `text-amber-400`/`text-amber-500` classes rendered as a pastel amber
+   (~1.6:1 contrast) directly on a white page background — invisible in light mode. Fixed by
+   mapping `amber-400`/`amber-500` to the same darkened accent already used for `amber-300`
+   in light mode (`146 64 14`, ~7.1:1) — the same "collapse related shades to one corrected
+   accent value" trick `blue-300`/`blue-400` already use (both map to `29 78 216` in light
+   mode). When adding a *new* shade of an already-mapped color, do the same: reuse the
+   existing light-mode value for that hue rather than leaving the shade unmapped.
+
+### Hardcoded colors to avoid
+- `text-white` on gray backgrounds → use `text-gray-50` (remaps to near-black in light mode).
+- `hover:text-white` on interactive elements → use `hover:text-gray-50`.
+- `bg-red-700` for buttons → theme-mapped, becomes pastel pink in light mode. Use `bg-red-600 hover:bg-red-800`.
+- Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface, where the surface itself (not the page background) sets the contrast context.
+- Amber/red/green/blue text used **without** a colored box behind it (a bare warning line, an
+  inline status label) must use a mapped shade (`amber-300/400/500`, `red-300/400`, `green-300/400`,
+  `blue-300/400`) — never an unmapped shade like `amber-600` or `red-500` — since that text sits
+  directly on the page background, which flips between near-black and white across themes.
+
