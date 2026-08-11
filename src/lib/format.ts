@@ -1,5 +1,7 @@
 // Shared display formatters used across pages.
 
+import type { ResticStats } from "./types";
+
 /** Human-readable byte size (e.g. "1.5 MB"). */
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -14,6 +16,34 @@ export function formatBytes(bytes: number): string {
 export function formatSize(bytes?: number): string {
   if (!bytes) return "—";
   return formatBytes(bytes);
+}
+
+/**
+ * Formats a repo's stats block for RepositoriesPage's stats column. When `raw_size` (the
+ * on-disk stored size, post-dedup/post-compression) is present, it becomes the headline
+ * `primary` figure and the restore size (`total_size`, restic's default "size if you
+ * restored everything") is folded into `secondary` alongside the snapshot count — keeping
+ * the row at the same line count it had before `raw_size` existed. When `raw_size` is
+ * absent (legacy cache row, or the raw-data call failed on the last refresh), falls back
+ * to today's single-size layout with no tooltip.
+ */
+export function formatRepoSize(stats: ResticStats): {
+  primary: string;
+  secondary: string;
+  tooltip?: string;
+} {
+  const snapshotsLabel = `${stats.snapshots_count} snapshot${stats.snapshots_count !== 1 ? "s" : ""}`;
+
+  if (stats.raw_size == null) {
+    return { primary: formatBytes(stats.total_size), secondary: snapshotsLabel };
+  }
+
+  const saving = stats.total_size > 0 ? Math.max(0, 1 - stats.raw_size / stats.total_size) : 0;
+  return {
+    primary: formatBytes(stats.raw_size),
+    secondary: `${formatBytes(stats.total_size)} · ${snapshotsLabel}`,
+    tooltip: `Stored ${formatBytes(stats.raw_size)} of ${formatBytes(stats.total_size)} restorable — ${Math.round(saving * 100)}% saved by compression + deduplication.`,
+  };
 }
 
 // Constructing an Intl.DateTimeFormat is relatively expensive; formatDate is called

@@ -38,7 +38,7 @@ import {
   hasBrokenRestUserinfo,
   hasInlineRestUserinfo,
 } from "../lib/backends";
-import { formatBytes, formatRelative, formatTimestamp } from "../lib/format";
+import { formatRelative, formatRepoSize, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -907,12 +907,19 @@ export default function RepositoriesPage() {
               </div>
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
-                  <div className="text-right min-w-[80px]">
+                  <div className="text-right min-w-[150px]">
                     {repo.id in statsMap ? (
                       statsMap[repo.id] ? (
                         <>
-                          <p className="text-sm font-medium text-gray-300">{formatBytes(statsMap[repo.id]!.total_size)}</p>
-                          <p className="text-xs text-gray-600">{statsMap[repo.id]!.snapshots_count} snapshot{statsMap[repo.id]!.snapshots_count !== 1 ? "s" : ""}</p>
+                          {(() => {
+                            const { primary, secondary, tooltip } = formatRepoSize(statsMap[repo.id]!);
+                            return (
+                              <>
+                                <p className="text-sm font-medium text-gray-300" title={tooltip}>{primary}</p>
+                                <p className="text-xs text-gray-600">{secondary}</p>
+                              </>
+                            );
+                          })()}
                           {statsMap[repo.id]!.cached_at != null && (
                             <p
                               className="text-xs text-gray-600"

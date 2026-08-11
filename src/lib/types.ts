@@ -72,6 +72,11 @@ export interface ResticStats {
   total_size: number;
   total_file_count: number;
   snapshots_count: number;
+  /** Bytes actually stored (post-dedup, post-compression), from a second `restic stats
+   *  --mode raw-data` call. `null`/`undefined` for a legacy cache row, or when the raw-data
+   *  call failed on the most recent refresh — that failure is non-fatal, so the rest of the
+   *  stats still populate. See `formatRepoSize` in `lib/format.ts`. */
+  raw_size?: number | null;
   /** Unix-seconds timestamp of when this value was cached. Stats are manual-refresh-only
    *  (no background eviction) — this powers the "Refreshed …" label on RepositoriesPage. */
   cached_at?: number | null;

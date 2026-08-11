@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, isOverdue } from "./format";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue } from "./format";
+import type { ResticStats } from "./types";
 
 describe("formatBytes", () => {
   it("returns '0 B' for zero", () => {
@@ -131,6 +132,54 @@ describe("formatRelative", () => {
     expect(formatRelative(now - 30)).toBe("just now");
     expect(formatRelative(now - 10 * 60)).toBe("10 mins ago");
     expect(formatRelative(now - 3600)).toBe("1 hour ago");
+  });
+});
+
+describe("formatRepoSize", () => {
+  it("falls back to the single-size layout when raw_size is absent (legacy cache row)", () => {
+    const stats: ResticStats = { total_size: 1024 ** 3, total_file_count: 10, snapshots_count: 3 };
+    const result = formatRepoSize(stats);
+    expect(result.primary).toBe("1.00 GB");
+    expect(result.secondary).toBe("3 snapshots");
+    expect(result.tooltip).toBeUndefined();
+  });
+
+  it("falls back to the single-size layout when raw_size is explicitly null", () => {
+    const stats: ResticStats = { total_size: 1024 ** 3, total_file_count: 10, snapshots_count: 1, raw_size: null };
+    const result = formatRepoSize(stats);
+    expect(result.primary).toBe("1.00 GB");
+    expect(result.secondary).toBe("1 snapshot");
+    expect(result.tooltip).toBeUndefined();
+  });
+
+  it("promotes raw_size to primary and folds total_size + snapshot count into secondary", () => {
+    const stats: ResticStats = {
+      total_size: 4 * 1024 ** 3,
+      total_file_count: 100,
+      snapshots_count: 12,
+      raw_size: 1024 ** 3,
+    };
+    const result = formatRepoSize(stats);
+    expect(result.primary).toBe("1.00 GB");
+    expect(result.secondary).toBe("4.00 GB · 12 snapshots");
+    expect(result.tooltip).toBe("Stored 1.00 GB of 4.00 GB restorable — 75% saved by compression + deduplication.");
+  });
+
+  it("treats a zero total_size as 0% saving rather than dividing by zero", () => {
+    const stats: ResticStats = { total_size: 0, total_file_count: 0, snapshots_count: 0, raw_size: 0 };
+    const result = formatRepoSize(stats);
+    expect(result.tooltip).toContain("0% saved");
+  });
+
+  it("clamps a negative saving (raw_size > total_size) to 0%", () => {
+    const stats: ResticStats = {
+      total_size: 100,
+      total_file_count: 1,
+      snapshots_count: 1,
+      raw_size: 150,
+    };
+    const result = formatRepoSize(stats);
+    expect(result.tooltip).toContain("0% saved");
   });
 });
 

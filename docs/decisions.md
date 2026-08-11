@@ -95,6 +95,19 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   repos — unlike every *automatic* remote activity (cache warmer's snapshot/index sweep,
   SnapshotsPage's background refresh, Index All), which stay gated behind `remote_auto_refresh`, a
   manual refresh is an explicit user request with no surprise-bandwidth concern to guard against.
+- **The on-disk stored-size figure (`ResticStats.raw_size`) comes from a second `restic stats
+  --mode raw-data --json` call, not a local filesystem walk (`du`/`walkdir`).** raw-data mode works
+  identically for local *and* remote repos (S3/B2/REST/SFTP) with no filesystem access needed,
+  reuses the existing `run_restic_blocking`/`RepoLocks` plumbing, and is fast (index load only, no
+  tree walk) — a directory walk would only ever work for local repos and would need a new
+  dependency-free traversal helper for something restic already reports. Accepted that raw-data
+  mode counts blob data only, excluding the few MB of index/snapshot/key/lock files — immaterial
+  against a repo measured in GB/TB. **The raw-data call's failure is deliberately non-fatal to the
+  stats refresh as a whole** — it's logged, `raw_size` is left `None` for that cycle, and the
+  refresh still succeeds and caches the (unaffected) restore-size figures. Making it fatal would
+  turn an older-restic-binary or transient-remote-backend hiccup into a full "refresh failed" that
+  blanks out numbers the user already had, with no way to recover them short of a lucky next
+  refresh — worse than just not having the new number this cycle. See docs/restic.md.
 - **`browse_cache_files.parent_path` duplicates a prefix of `path` on every row, on purpose.** It
   backs the `(snap, parent_path)` directory-listing index — a deliberate storage-for-speed
   trade-off, and the single largest contributor to that table's size. Acceptable.

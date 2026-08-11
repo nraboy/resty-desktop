@@ -9,6 +9,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::browse::FileEntry;
 use super::crypto;
+use super::repo::ResticStats;
 use super::snapshot::Snapshot;
 use crate::tasks::{new_task_slot, TaskSlot};
 
@@ -599,6 +600,7 @@ impl AppDb {
                 total_size       INTEGER NOT NULL,
                 total_file_count INTEGER NOT NULL,
                 snapshots_count  INTEGER NOT NULL,
+                raw_size         INTEGER,
                 cached_at        INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS backup_history (
@@ -646,6 +648,13 @@ impl AppDb {
         );
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN credentials_ciphertext BLOB;",
+        );
+        // Additive, nullable — on-disk stored size (post-dedup, post-compression) from a
+        // second `restic stats --mode raw-data` call. An existing row's NULL here just means
+        // "not yet refreshed since this field was added"; the frontend falls back to showing
+        // only the restore-size figure it already had. See docs/restic.md.
+        let _ = conn.execute_batch(
+            "ALTER TABLE repo_stats_cache ADD COLUMN raw_size INTEGER;",
         );
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
@@ -1696,22 +1705,24 @@ impl AppDb {
 
     // ── repo stats cache ─────────────────────────────────────────────────────
 
-    /// Returns `(total_size, total_file_count, snapshots_count, cached_at)`. `cached_at`
-    /// is a Unix-seconds timestamp — surfaced to the frontend as a "Refreshed …" label
-    /// on RepositoriesPage now that stats are manual-refresh-only (see `set_stats`).
-    pub fn get_stats(&self, repo_id: &str) -> Result<Option<(u64, u64, u64, i64)>, String> {
+    /// `cached_at` on the returned `ResticStats` is a Unix-seconds timestamp — surfaced to
+    /// the frontend as a "Refreshed …" label on RepositoriesPage now that stats are
+    /// manual-refresh-only (see `set_stats`). `raw_size` is `None` for a row cached before
+    /// that field existed, or before its most recent refresh's raw-data call last failed.
+    pub fn get_stats(&self, repo_id: &str) -> Result<Option<ResticStats>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
-            "SELECT total_size, total_file_count, snapshots_count, cached_at
+            "SELECT total_size, total_file_count, snapshots_count, raw_size, cached_at
              FROM repo_stats_cache WHERE repo_id = ?1",
             params![repo_id],
             |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, i64>(2)? as u64,
-                    row.get::<_, i64>(3)?,
-                ))
+                Ok(ResticStats {
+                    total_size: row.get::<_, i64>(0)? as u64,
+                    total_file_count: row.get::<_, i64>(1)? as u64,
+                    snapshots_count: row.get::<_, i64>(2)? as u64,
+                    raw_size: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    cached_at: Some(row.get::<_, i64>(4)?),
+                })
             },
         ) {
             Ok(stats) => Ok(Some(stats)),
@@ -1722,25 +1733,20 @@ impl AppDb {
 
     /// Writes fresh stats and returns the `cached_at` timestamp it wrote, so the caller
     /// (`fetch_and_cache_stats` in repo.rs) can hand it straight back to the frontend
-    /// without a re-read.
-    pub fn set_stats(
-        &self,
-        repo_id: &str,
-        total_size: u64,
-        total_file_count: u64,
-        snapshots_count: u64,
-    ) -> Result<i64, String> {
+    /// without a re-read. `stats.cached_at` itself is ignored — this always stamps `now`.
+    pub fn set_stats(&self, repo_id: &str, stats: &ResticStats) -> Result<i64, String> {
         let now = timestamp();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO repo_stats_cache
-             (repo_id, total_size, total_file_count, snapshots_count, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (repo_id, total_size, total_file_count, snapshots_count, raw_size, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 repo_id,
-                total_size as i64,
-                total_file_count as i64,
-                snapshots_count as i64,
+                stats.total_size as i64,
+                stats.total_file_count as i64,
+                stats.snapshots_count as i64,
+                stats.raw_size.map(|v| v as i64),
                 now
             ],
         )
@@ -2563,21 +2569,94 @@ mod tests {
     fn set_stats_returns_and_persists_cached_at() {
         let db = test_db();
 
-        let ts1 = db.set_stats("repoA", 100, 5, 2).unwrap();
-        let (total_size, total_file_count, snapshots_count, cached_at) =
-            db.get_stats("repoA").unwrap().unwrap();
-        assert_eq!((total_size, total_file_count, snapshots_count), (100, 5, 2));
-        assert_eq!(cached_at, ts1);
+        let stats1 = ResticStats {
+            total_size: 100,
+            total_file_count: 5,
+            snapshots_count: 2,
+            raw_size: Some(40),
+            cached_at: None,
+        };
+        let ts1 = db.set_stats("repoA", &stats1).unwrap();
+        let got = db.get_stats("repoA").unwrap().unwrap();
+        assert_eq!((got.total_size, got.total_file_count, got.snapshots_count), (100, 5, 2));
+        assert_eq!(got.raw_size, Some(40));
+        assert_eq!(got.cached_at, Some(ts1));
 
         // A later set_stats overwrites the value and advances cached_at (or at least
         // never goes backwards — timestamp() is second-resolution, so two calls in the
         // same test can legitimately land on the same second).
-        let ts2 = db.set_stats("repoA", 200, 8, 3).unwrap();
+        let stats2 = ResticStats {
+            total_size: 200,
+            total_file_count: 8,
+            snapshots_count: 3,
+            raw_size: None,
+            cached_at: None,
+        };
+        let ts2 = db.set_stats("repoA", &stats2).unwrap();
         assert!(ts2 >= ts1);
-        let (total_size, total_file_count, snapshots_count, cached_at) =
-            db.get_stats("repoA").unwrap().unwrap();
-        assert_eq!((total_size, total_file_count, snapshots_count), (200, 8, 3));
-        assert_eq!(cached_at, ts2);
+        let got = db.get_stats("repoA").unwrap().unwrap();
+        assert_eq!((got.total_size, got.total_file_count, got.snapshots_count), (200, 8, 3));
+        // A refresh whose raw-data call failed overwrites the previous raw_size with
+        // None — matches fetch_and_cache_stats always writing whatever it just fetched
+        // (or didn't) rather than preserving a stale raw_size from an earlier cycle.
+        assert_eq!(got.raw_size, None);
+        assert_eq!(got.cached_at, Some(ts2));
+    }
+
+    #[test]
+    fn get_stats_legacy_row_without_raw_size_reads_back_as_none() {
+        // Simulates a pre-migration row: INSERT directly, bypassing set_stats, into only
+        // the columns that existed before raw_size was added.
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO repo_stats_cache
+                 (repo_id, total_size, total_file_count, snapshots_count, cached_at)
+                 VALUES ('repoA', 100, 5, 2, 12345)",
+                [],
+            )
+            .unwrap();
+        }
+        let got = db.get_stats("repoA").unwrap().unwrap();
+        assert_eq!(got.raw_size, None);
+        assert_eq!(got.cached_at, Some(12345));
+    }
+
+    #[test]
+    fn init_schema_adds_raw_size_column_to_existing_repo_stats_cache() {
+        // Simulate an install that already has `repo_stats_cache` from before `raw_size`
+        // existed — running init_schema (as every app startup does) must add the column
+        // via the ALTER TABLE migration rather than erroring on the pre-existing table.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE repo_stats_cache (
+                 repo_id          TEXT PRIMARY KEY,
+                 total_size       INTEGER NOT NULL,
+                 total_file_count INTEGER NOT NULL,
+                 snapshots_count  INTEGER NOT NULL,
+                 cached_at        INTEGER NOT NULL
+             );
+             INSERT INTO repo_stats_cache VALUES ('repoA', 100, 5, 2, 12345);",
+        )
+        .unwrap();
+
+        AppDb::init_schema(&conn).expect("init_schema should migrate the existing table");
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(repo_stats_cache)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(cols.contains(&"raw_size".to_string()));
+
+        // Pre-existing row survives the migration with raw_size defaulting to NULL.
+        let raw_size: Option<i64> = conn
+            .query_row("SELECT raw_size FROM repo_stats_cache WHERE repo_id = 'repoA'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw_size, None);
     }
 
     #[test]

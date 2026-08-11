@@ -136,7 +136,10 @@ alongside `.no_console()`; an `async fn` `#[tauri::command]` must **never** call
 `std::process::Command` inline — always `spawn_blocking` (streaming) or `run_restic_blocking`
 (one-shot) — or it blocks a shared tokio worker and starves every other async command plus the
 `AppDb` lock. A repo can be marked **read-only** (`--no-lock` on every read op via
-`apply_repo_flags`); every write op instead calls `ensure_writable` and refuses outright.
+`apply_repo_flags`); every write op instead calls `ensure_writable` and refuses outright. A stats
+refresh (`fetch_and_cache_stats`) runs restic **twice** — default mode for the restore-size figures,
+then `--mode raw-data` for the on-disk stored size (`ResticStats.raw_size`) — with the second call's
+failure deliberately non-fatal to the refresh; see docs/restic.md.
 
 ## Concurrency: Per-Repository Lock Registry
 
@@ -197,6 +200,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `list_snapshots`, `get_snapshot_index_status`, `get_repo_stats` don't emit on the `task` bus
 - `get_repo_stats` is cache-only and must never fall through to a live `restic stats` call
 - `browse_cache_files.parent_path` duplicates a prefix of `path` on purpose (index speed)
+- Stored repo size (`ResticStats.raw_size`) comes from `restic stats --mode raw-data`, not a `du`/filesystem walk (works for remote repos too); a failed raw-data call is non-fatal to the refresh
 - File search uses `LIKE '%query%'` (leading wildcard, no index) — accepted, not an oversight
 - `cached_at` columns are written but not read yet — kept for a future TTL feature
 - `panic = "abort"` is deliberately not set in the release profile

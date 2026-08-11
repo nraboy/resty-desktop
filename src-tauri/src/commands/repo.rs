@@ -31,6 +31,13 @@ pub struct ResticStats {
     pub total_size: u64,
     pub total_file_count: u64,
     pub snapshots_count: u64,
+    /// Bytes actually stored on disk/remote (post-dedup, post-compression), from a second
+    /// `restic stats --mode raw-data --json` call in `fetch_and_cache_stats`. `None` for
+    /// legacy cache rows written before this field existed, and whenever the raw-data call
+    /// itself fails — that failure is deliberately non-fatal to the refresh as a whole (see
+    /// `fetch_and_cache_stats`), so `total_size`/`total_file_count`/`snapshots_count` above
+    /// still populate even when this is `None`.
+    pub raw_size: Option<u64>,
     /// Unix-seconds timestamp of when this value was cached. `None` only for the
     /// pure `parse_stats_json` path (fresh restic output has no such field) —
     /// callers that hand back a `ResticStats` to the frontend always fill it in
@@ -56,8 +63,20 @@ pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
         total_size: v["total_size"].as_u64().unwrap_or(0),
         total_file_count: v["total_file_count"].as_u64().unwrap_or(0),
         snapshots_count: v["snapshots_count"].as_u64().unwrap_or(0),
+        raw_size: None,
         cached_at: None,
     })
+}
+
+/// Parses `restic stats --mode raw-data --json` stdout into the on-disk stored-size figure
+/// (post-dedup, post-compression). Pure, mirroring `parse_stats_json` — same last-nonblank-line
+/// handling, same tolerance for restic emitting other NDJSON lines before the summary. Kept
+/// separate from `parse_stats_json` rather than folded in behind a mode flag: that function is
+/// shared with `get_snapshot_stats` in snapshot.rs, which never calls raw-data mode.
+pub(crate) fn parse_raw_data_size(stdout: &str) -> Result<u64, String> {
+    let last_line = last_nonblank_line(stdout).ok_or_else(|| "No output from restic stats".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
+    Ok(v["total_size"].as_u64().unwrap_or(0))
 }
 
 /// Rejects an empty password for repo *creation* (`init_repo`). Passwordless
@@ -461,9 +480,7 @@ pub async fn test_repo_connection(
 #[tauri::command]
 pub fn get_repo_stats(db: State<'_, AppDb>, repo_id: String) -> Result<ResticStats, String> {
     match db.get_stats(&repo_id) {
-        Ok(Some((total_size, total_file_count, snapshots_count, cached_at))) => {
-            Ok(ResticStats { total_size, total_file_count, snapshots_count, cached_at: Some(cached_at) })
-        }
+        Ok(Some(stats)) => Ok(stats),
         Ok(None) => Err("No cached stats for this repository".to_string()),
         Err(e) => Err(e),
     }
@@ -519,7 +536,10 @@ async fn fetch_and_cache_stats(
     };
     let restic_path = super::get_restic_path(db);
     let _rg = repo_locks.read(&repo.path);
-    let result = run_restic_blocking(repo, vec!["stats".into(), "--json".into()], restic_path).await;
+    // Cloning the whole `FullRepository` (never rebuilding field-by-field) so the second
+    // call below keeps any stored backend credentials — see docs/restic.md's
+    // `apply_backend_env` note on why every multi-call site does this.
+    let result = run_restic_blocking(repo.clone(), vec!["stats".into(), "--json".into()], restic_path.clone()).await;
     let stdout = match result {
         Ok(stdout) => stdout,
         Err(e) => {
@@ -534,10 +554,25 @@ async fn fetch_and_cache_stats(
             return Err(e);
         }
     };
+    // Second call, on-disk stored size (post-dedup, post-compression). Deliberately
+    // non-fatal: a failure here (e.g. an older restic without raw-data support, or a
+    // transient remote-backend hiccup) must not turn an otherwise-successful refresh into
+    // "refresh failed" and blank out the repo's last-good restore-size numbers — it just
+    // leaves `raw_size` unset for this cycle. See docs/restic.md and docs/decisions.md.
+    stats.raw_size = match run_restic_blocking(
+        repo,
+        vec!["stats".into(), "--mode".into(), "raw-data".into(), "--json".into()],
+        restic_path,
+    )
+    .await
+    {
+        Ok(stdout) => parse_raw_data_size(&stdout).ok(),
+        Err(_) => None,
+    };
     // Cache write happens before `finished()` is emitted, on purpose: a `task`-bus
     // consumer that hears "finished" and re-reads `get_repo_stats` must never race
     // ahead of this write. See CLAUDE.md's Operation Event Bus section.
-    let ts = match db.set_stats(repo_id, stats.total_size, stats.total_file_count, stats.snapshots_count) {
+    let ts = match db.set_stats(repo_id, &stats) {
         Ok(t) => t,
         Err(e) => {
             task_ctx.failed(e.clone());
@@ -1202,7 +1237,8 @@ mod tests {
     use super::{
         apply_backend_env, apply_from_repo_flags, apply_from_repo_password, apply_repo_flags,
         apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
-        parse_stats_json, validate_init_password, validate_restic_path, READ_ONLY_REPO_ERROR,
+        parse_raw_data_size, parse_stats_json, validate_init_password, validate_restic_path,
+        READ_ONLY_REPO_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
 
@@ -1543,6 +1579,30 @@ mod tests {
     #[test]
     fn parse_stats_json_malformed_json_is_error() {
         assert!(parse_stats_json("not json").is_err());
+    }
+
+    // ── parse_raw_data_size ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_raw_data_size_well_formed() {
+        let stdout = r#"{"total_size":100,"total_uncompressed_size":400}"#;
+        assert_eq!(parse_raw_data_size(stdout).unwrap(), 100);
+    }
+
+    #[test]
+    fn parse_raw_data_size_missing_field_defaults_to_zero() {
+        assert_eq!(parse_raw_data_size(r#"{"total_uncompressed_size":400}"#).unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_raw_data_size_empty_stdout_is_error() {
+        let err = parse_raw_data_size("").unwrap_err();
+        assert!(err.contains("No output"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_raw_data_size_malformed_json_is_error() {
+        assert!(parse_raw_data_size("not json").is_err());
     }
 
     // ── validate_restic_path ────────────────────────────────────────────────
