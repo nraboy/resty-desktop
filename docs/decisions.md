@@ -273,6 +273,35 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   a future `npm audit` run without checking reachability first would push a breaking
   major-version migration (v7 changes routing APIs across all 13 routed pages) for zero actual
   risk reduction.
+- **Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature
+  (`default-features = false, features = ["xdg-portal"]`), not the plugin's default `gtk3`
+  feature.** Reported by a user: the default GTK file chooser looks and behaves out of place on
+  non-GNOME desktops (KDE, etc.) since it ignores the desktop's native picker. `rfd` (the crate
+  `tauri-plugin-dialog` wraps) compiles exactly one Linux backend at build time and prefers
+  `gtk3` whenever that feature is enabled *anywhere* in the dependency graph — so `gtk3` must
+  stay off, not merely be left non-default, or the portal silently reverts to GTK. This has no
+  effect on macOS or Windows: `gtk3` only gates Linux/BSD-target deps in `rfd`, and the plugin
+  already pins `rfd` itself with `default-features = false, features = ["common-controls-v6"]`,
+  so Windows already gets its native picker regardless of this flag. No `cfg(target_os = ...)`
+  gating was needed for that reason.
+  There is **no GTK fallback** if the portal is unavailable: `rfd`'s portal backend returns
+  `None` when `xdg-desktop-portal` (or a desktop-specific backend) isn't reachable over DBus,
+  and every call site in this app treats `None` identically to a user cancel — so a missing
+  portal makes every Browse button in the app go silently inert, not show an error. To close
+  that for the common case, `tauri.conf.json`'s `bundle.linux.deb.depends` and `rpm.depends`
+  both list `xdg-desktop-portal` so a package install can't land without it (the base package
+  itself recommends a desktop-specific backend, so backends aren't listed explicitly). A
+  **startup DBus probe** for `org.freedesktop.portal.Desktop`, to warn proactively when no
+  portal is reachable, was considered and deliberately **not** added — the remaining exposure
+  after the packaging fix is tarball/self-built installs on bare window managers, a narrow
+  enough slice that the same population is already likely to have a portal from using
+  Flatpak/screen-sharing/etc., and doesn't justify a new dependency and a new banner. Don't
+  add that probe without discussing the trade-off first.
+  A second, minor, accepted behavior change: `rfd`'s portal backend drops any picked location
+  that isn't a `file://` URI (`uri.to_file_path().ok()`), so selecting a network location
+  (smb://, mtp://) from the portal's sidebar returns nothing, where the old GTK chooser would
+  have resolved it to a local gvfs mount path. Backing up a gvfs mount with restic is a niche
+  enough case not to block on.
 
 
 ## Linux GPU Compatibility

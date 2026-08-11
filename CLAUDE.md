@@ -18,7 +18,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Routing | React Router v6 |
 | Rust backend | Tauri v2 `#[tauri::command]` |
 | Settings persistence | SQLite (`app_data.db`) via `AppDb` |
-| File picker | `tauri-plugin-dialog` |
+| File picker | `tauri-plugin-dialog` (xdg-desktop-portal backend on Linux, not GTK; see docs/decisions.md) |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
@@ -208,6 +208,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - Backup progress bars are non-monotonic by design (restic's own `percent_done` behavior)
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
 - `gpu_compat::apply()`'s NVIDIA+Wayland workaround is gated, not applied unconditionally
+- Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature, not the default `gtk3` one — `rfd` silently reverts to GTK if `gtk3` is enabled anywhere in the dependency graph, so don't add it back
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - `.app_name("resty-desktop")` on the autostart builder must not be dropped
