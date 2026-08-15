@@ -23,7 +23,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup success/failure |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
-| Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting; see docs/decisions.md |
+| Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 3 (macOS/Windows only), opt-in, stores the *derived* master key; see docs/data.md |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Restic integration | `std::process::Command` with `--json`; see docs/restic.md |
@@ -212,7 +212,19 @@ proposing a change — several are pinned by a named test or reference a confirm
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - `.app_name("resty-desktop")` on the autostart builder must not be dropped
-- A login launch shows the unlock screen; it never launches hidden into the tray
+- A login launch shows a hidden window only when tray + auto-unlock + launch-at-login are all on
+  (`--from-autostart` arg, gated via the standalone `should_start_hidden`); any other state,
+  including a failed auto-unlock, always shows the window
+- `App.tsx`'s `show_main_window()` fallback is gated on `hasBeenUnlockedRef` (first-unlock-only):
+  it force-shows the window on any non-unlocked state before the session's first unlock, but
+  never after — a mid-session "Lock Now" from the tray must leave a hidden window hidden
+- The tray icon is created in `setup()` (locked variant) whenever `tray_enabled` is on, not lazily
+  after unlock; `activate_tray` swaps the locked/unlocked variant in place via `set_menu`/
+  `set_tooltip` on the existing icon rather than rebuilding it — rebuilding leaks the old OS icon
+  (Tauri's `TrayIconBuilder::build` keeps its own resource-table clone), which is exactly the bug
+  that made the tray keep showing "Locked" after unlock; the unlocked variant also carries a
+  tray-only "Lock Now" item (needed once unlocked-and-hidden becomes a reachable state) whose
+  handler deliberately never shows the window
 - `handleTrayToggle` clears launch-at-login on *enabling* the tray, not only on disabling
 - `set_launch_at_login`'s disable path checks `is_enabled()` first (Windows idempotency)
 - `reset_app` also best-effort clears the OS autostart entry, not just DB tables

@@ -9,11 +9,14 @@ export const isAppSetup = (): Promise<boolean> =>
 export const setMenuAuthState = (unlocked: boolean): Promise<void> =>
   invoke("set_menu_auth_state", { unlocked });
 
-export const activateTray = (): Promise<void> =>
-  invoke("activate_tray");
+export const activateTray = (unlocked: boolean): Promise<void> =>
+  invoke("activate_tray", { unlocked });
 
 export const deactivateTray = (): Promise<void> =>
   invoke("deactivate_tray");
+
+export const showMainWindow = (): Promise<void> =>
+  invoke("show_main_window");
 
 export const setupMasterPassword = (password: string): Promise<void> =>
   invoke("setup_master_password", { password });

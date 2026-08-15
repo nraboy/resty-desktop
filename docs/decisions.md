@@ -207,19 +207,40 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   and the pinned `auto-launch 0.5.0` writes both the Linux `Exec=` line and the Windows Run
   registry value **unquoted**. Losing the explicit name reintroduces a broken/ambiguous autostart
   entry on those two platforms.
-- **A login launch shows the window on the unlock screen; it does not launch hidden into the
-  tray.** The app always starts locked (`MasterKey` is in-memory only, no auto-unlock command
-  exists), and `scheduler.rs`'s tick silently no-ops while locked — so a hidden launch would park
-  a locked app in the tray running nothing until the user found and clicked the tray icon,
-  advertising background activity ("launch at login") the app cannot actually perform yet. A
-  visible unlock screen gets the user to unlock (and backups to actually resume) immediately, at
-  the cost of not being a silent background start. Revisiting this requires first designing an
-  auto-unlock story, which is a security decision, not a startup one. **That story is now the
-  opt-in, default-off auto-unlock toggle** (see Security Architecture) — a login launch still
-  always shows the window (there is no silent/hidden launch path even with auto-unlock on), but
-  `try_auto_unlock` now runs before the unlock screen renders, so a user who has opted in sees
-  the repository list directly rather than the password prompt, and scheduled backups resume
-  without anyone finding and clicking anything. A user who hasn't opted in sees no change at all.
+- **A login launch shows a hidden window only when tray, auto-unlock, and launch-at-login are all
+  three enabled; any other combination shows the window.** This used to be an unconditional "never
+  launch hidden" — the app always started locked (`MasterKey` is in-memory only, no auto-unlock
+  command existed), and a hidden launch would have parked a locked app in the tray running nothing
+  until the user found and clicked the icon, advertising background activity the app couldn't
+  actually perform yet. Revisiting it required first designing an auto-unlock story, which is a
+  security decision, not a startup one — **that story is now the opt-in, default-off auto-unlock
+  toggle** (see Security Architecture), which satisfies the original blocker. `lib.rs`'s `setup()`
+  computes `start_hidden` via the standalone `should_start_hidden(from_autostart, tray_on,
+  auto_unlock_on)` — pulled out of `setup()` and pinned by
+  `should_start_hidden_requires_all_three` specifically so the "all three, not just auto-unlock"
+  rule can't be quietly narrowed later — where `from_autostart` comes from a `--from-autostart`
+  arg the `tauri_plugin_autostart::Builder` now passes (verified present in the pinned
+  `auto-launch 0.5.0` on all three platforms: macOS LaunchAgent `ProgramArguments`, the Windows
+  `Run` value, the Linux `Exec=` line). All three conditions are required, not just auto-unlock:
+  without the tray there is no icon to bring the window back at all. **`App.tsx` shows the window
+  on every auth state except `unlocked` — but only before the session's first unlock.** A
+  `hasBeenUnlockedRef` (a ref, not state, so setting it doesn't itself re-trigger the effect)
+  distinguishes a hidden launch that hasn't succeeded yet — where a failed auto-unlock
+  (`denied`/`stale`) or the macOS post-update `updateNotice` prompt must always surface the
+  window, so a hidden start can never end in a locked, invisible app with no obvious way in
+  besides the tray — from a deliberate mid-session "Lock Now" fired from the tray's own
+  unlocked-only menu item (see the tray entry below), which must leave an already-hidden window
+  hidden rather than popping it back open. `setup()` also arms a one-shot
+  20s watchdog (`MasterKey::is_locked()`, a boolean-only probe that never copies the key out of its
+  zeroize-on-drop storage) that force-shows the window if a hidden start is still locked by then —
+  covering the case where the frontend itself never loads far enough to call back into Rust.
+  **On Linux this path can never trigger**: `keychain.rs`'s Linux build is a total no-op stub, so
+  `auto_unlock` can never be `true` there — Linux keeps exactly the old always-visible behavior.
+  Existing users' autostart entries predate `--from-autostart`; `setup()` re-registers the entry
+  once (`app.autolaunch().enable()`, guarded on `is_enabled()` so it never creates an entry nor
+  fights a Windows Task-Manager-disabled `Run` value) and records `autostart_args_migrated` in
+  `app_settings` so it only runs once. A second autostart-triggered launch must not un-hide an
+  already-hidden session: the single-instance handler ignores its own `--from-autostart` arg.
 - **`SettingsPage.tsx`'s `handleTrayToggle` clears launch-at-login on *enabling* the tray, not
   only on disabling it.** Clearing only on disable looks sufficient at first glance — it does stop
   an orphaned OS entry from surviving after the tray (and thus hide-to-tray) goes away — but it
@@ -251,6 +272,48 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   way to clear it short of re-enabling the tray first. The call's result is discarded (`let _ =`)
   deliberately: wiping user data is the part of a reset that must not fail, and
   `set_launch_at_login` is already idempotent for exactly this kind of best-effort call.
+- **The tray icon is created in `setup()` (locked variant) whenever `tray_enabled` is on, not
+  lazily after unlock.** Previously `activate_tray` was only ever called from `App.tsx` once
+  `authState === "unlocked"`, so a locked app had no tray icon and closing the unlock-screen window
+  quit the app outright even with the tray setting on. The locked-vs-unlocked menu differs: the
+  locked variant carries a disabled, unclickable `Locked` header row and omits `Settings` and
+  `Lock Now` entirely (both fire events — `menu:settings`/`menu:lock-app` — that only the unlocked
+  React subtree listens for; on the lock screen they'd be dead clicks). `Lock Now` exists on the
+  tray specifically because this change makes "unlocked and hidden in the tray indefinitely" a
+  reachable state: on macOS the native menu bar (which already had its own `Lock Now`) is
+  unreachable while the window is hidden under `ActivationPolicy::Accessory`, so without a tray
+  equivalent there would be no way to lock such a session at all short of reopening the window.
+  Its handler deliberately does not call `show_window` — see the `hasBeenUnlockedRef` guard in the
+  hidden-launch entry above for the frontend half of keeping a Lock Now silent. The header row
+  exists **in the menu, not just the tooltip**, because
+  GNOME's AppIndicator extension routinely drops tray tooltips — the locked signal has to survive
+  on the one platform where the tray is already weakest. `TrayState` accordingly tracks which
+  variant is installed (`Tray { icon, unlocked, gen }`), and `lib.rs`'s close-to-tray handler no
+  longer checks whether a tray exists at all — it hides on `tray_enabled` alone, in every auth state.
+- **`activate_tray` short-circuits when the requested variant is already installed, and otherwise
+  updates the existing icon in place with `set_menu`/`set_tooltip` rather than rebuilding it.**
+  `App.tsx` calls it on every auth-state transition (not just once, on unlock), so both matter.
+  The early-out (`guard.icon.is_some() && guard.unlocked == Some(unlocked)`) collapses a normal
+  launch-then-unlock sequence to exactly one real update and incidentally absorbs React
+  StrictMode's dev-only double-invoke. The in-place update is not just a Windows
+  `NIM_DELETE`/`NIM_ADD`-flicker optimization — **rebuilding was an outright bug**: dropping the
+  stored `TrayIcon` handle and calling `build_tray` again does not remove the old OS icon.
+  `tauri::tray::TrayIcon` wraps a reference-counted `tray_icon::TrayIcon`
+  (`Rc<RefCell<platform_impl::TrayIcon>>`), and `TrayIconBuilder::build` stores a *second* clone
+  in Tauri's own resource table (`TrayIcon::register`, called from inside `build`) — so our
+  stored handle was never the last reference. The result was a silent leak: the old (locked)
+  icon stayed live in the menu bar, with its `on_menu_event` closure still registered, while a
+  new (unlocked) icon appeared next to it — read by users as "the tray still says locked after
+  unlocking," since the stale locked icon was indistinguishable from the new one. `build_tray`
+  now returns `(TrayIcon, u32)` (the generation), stored once in `Tray::gen`; `build_tray_menu`
+  is split out so `activate_tray` can rebuild just the `Menu` for the *same* generation and hand
+  it to the existing icon via `set_menu`, while the icon's `on_menu_event` closure recomputes its
+  ids from the same captured `gen` at click time — so it keeps matching whichever menu is
+  currently installed. Don't reintroduce a rebuild-to-swap-variants pattern for this tray; it
+  will silently reproduce the leak. `deactivate_tray` is the only place that must actually free
+  the OS icon, and does so correctly by calling `AppHandle::remove_tray_by_id` (which takes the
+  resource-table clone out) before dropping the last reference on the main thread — seeing
+  `set_visible(false)` plus a Windows-only `mem::forget` there again would mean this bug came back.
 - **The Windows `Run` registry value `auto-launch` writes is unquoted, and this cannot be fixed
   from app code.** `auto-launch 0.5.0`'s Windows `enable()` does
   `format!("{} {}", app_path, args.join(" "))` with no quoting. With this app's empty `args` that

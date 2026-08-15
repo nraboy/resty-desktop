@@ -457,6 +457,12 @@ impl MasterKey {
             .ok_or_else(|| "App is locked — please unlock first".to_string())
     }
 
+    /// Lock-state probe that never materializes the key (unlike `get().is_err()`, which would
+    /// copy the 32 key bytes into a temporary nothing zeroizes just to test a boolean).
+    pub fn is_locked(&self) -> bool {
+        self.0.lock().map(|g| g.is_none()).unwrap_or(true)
+    }
+
     pub fn set(&self, key: [u8; 32]) -> Result<(), String> {
         let mut guard = self.0.lock().map_err(|e| e.to_string())?;
         if let Some(mut old) = guard.replace(key) {
@@ -2409,6 +2415,16 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         AppDb::init_schema(&conn).unwrap();
         AppDb::new(conn, std::path::PathBuf::new())
+    }
+
+    #[test]
+    fn master_key_is_locked_reflects_set_and_clear() {
+        let mk = MasterKey::new();
+        assert!(mk.is_locked());
+        mk.set([0u8; 32]).unwrap();
+        assert!(!mk.is_locked());
+        mk.clear().unwrap();
+        assert!(mk.is_locked());
     }
 
     #[test]

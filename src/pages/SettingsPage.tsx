@@ -146,7 +146,8 @@ export default function SettingsPage() {
     try {
       await setTrayEnabled(enabled);
       if (enabled) {
-        await activateTray();
+        // SettingsPage is only reachable while unlocked.
+        await activateTray(true);
       } else {
         await deactivateTray();
       }
@@ -365,8 +366,9 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <div>
             <p className="text-xs text-gray-500 mb-3">
-              When enabled, closing the window keeps the app running in the system tray so scheduled
-              backups continue to run. Disabling this will quit the app when the window is closed.
+              When enabled, closing the window keeps the app running in the system tray instead of
+              quitting — scheduled backups run whenever the app is unlocked, tray icon or not. A
+              locked app shows "Locked" in the tray menu until you unlock it.
             </p>
             <label className="flex items-center gap-3 cursor-pointer select-none">
               <button
@@ -399,9 +401,9 @@ export default function SettingsPage() {
           </div>
           <div className={["pt-4 border-t border-gray-800", trayEnabled ? "" : "opacity-50"].join(" ")}>
             <p className="text-xs text-gray-500 mb-3">
-              Start Resty Desktop automatically when you log in. The app opens to the unlock
-              screen — scheduled backups resume once you unlock it. Closing that window without
-              unlocking quits the app until your next login.
+              {autoUnlockSupported && autoUnlock
+                ? "Start Resty Desktop automatically when you log in. It starts hidden in the tray and scheduled backups resume immediately — open it from the tray icon."
+                : "Start Resty Desktop automatically when you log in. The app opens to the unlock screen; scheduled backups resume once you unlock it."}
             </p>
             <label
               className={[

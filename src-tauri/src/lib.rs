@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tauri::tray::TrayIconBuilder;
+use tauri_plugin_autostart::ManagerExt;
 
 struct MenuState {
     app_submenu: tauri::menu::Submenu<tauri::Wry>,
@@ -24,8 +25,17 @@ struct MenuState {
     export_item: tauri::menu::MenuItem<tauri::Wry>,
 }
 
-// Keeps the TrayIcon alive; None until the app has been unlocked.
-struct TrayState(Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>);
+/// Holds the live TrayIcon plus which variant is installed, under one lock so the two can
+/// never disagree. `unlocked` is `None` exactly when `icon` is `None`. `gen` is the generation
+/// suffix baked into the live icon's `on_menu_event` closure at build time — every later
+/// `set_menu` call must reuse it so the closure's captured ids keep matching the swapped-in menu.
+#[derive(Default)]
+struct Tray {
+    icon: Option<tauri::tray::TrayIcon<tauri::Wry>>,
+    unlocked: Option<bool>,
+    gen: u32,
+}
+struct TrayState(Mutex<Tray>);
 
 static TRAY_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -36,6 +46,24 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// A login launch starts hidden only when all three are on: the OS-autostart marker, the tray
+/// setting (there is otherwise no icon to bring the window back), and auto-unlock (otherwise
+/// the app would sit locked and invisible doing nothing — the exact failure mode the old
+/// "never launch hidden" decision existed to prevent). See docs/decisions.md. Pulled out as its
+/// own function, rather than left inline in `setup()`, specifically so it's unit-testable —
+/// don't drop any of the three conditions without updating `should_start_hidden_requires_all_three`.
+fn should_start_hidden(from_autostart: bool, tray_on: bool, auto_unlock_on: bool) -> bool {
+    from_autostart && tray_on && auto_unlock_on
+}
+
+/// Frontend-callable wrapper over `show_window`. Idempotent — showing an already-visible
+/// window is a no-op — so App.tsx can call it unconditionally on every non-unlocked auth
+/// state without tracking whether this particular launch started hidden.
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    show_window(&app);
 }
 
 #[tauri::command]
@@ -65,51 +93,103 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     Ok(())
 }
 
-/// Removes the tray icon (called when the user disables the tray toggle).
-/// On Windows, set_visible(false) maps to NIM_DELETE and removes the icon synchronously.
-/// We then forget the value to skip Drop, which would otherwise issue a second NIM_DELETE
-/// and log "Error removing system tray icon". On macOS, Drop handles removal cleanly.
+/// Removes the tray icon (called when the user disables the tray toggle, or on app reset).
+///
+/// `tauri::tray::TrayIcon` wraps a reference-counted `tray_icon::TrayIcon` (`Rc<RefCell<..>>`
+/// under the hood); building it via `TrayIconBuilder::build` also stores a second clone in
+/// Tauri's own resource table (see `TrayIcon::register`), so simply dropping our stored handle
+/// does *not* remove the OS icon — the resource-table clone keeps it alive. `remove_tray_by_id`
+/// takes that second clone out of the table; dropping both the returned clone and our own then
+/// actually frees the platform icon. Must run on the main thread (macOS removal touches AppKit).
 #[tauri::command]
-fn deactivate_tray(tray_state: tauri::State<TrayState>) -> Result<(), String> {
+fn deactivate_tray(app: tauri::AppHandle, tray_state: tauri::State<TrayState>) -> Result<(), String> {
     let mut guard = tray_state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(tray) = guard.take() {
-        let _ = tray.set_visible(false);
-        // On Windows, set_visible(false) maps to NIM_DELETE (full OS removal), so Drop
-        // would issue a second NIM_DELETE and log an error — skip it with mem::forget.
-        // On macOS/Linux, set_visible(false) only hides the icon; Drop then cleans up
-        // the remaining resources cleanly with no double-removal.
-        #[cfg(target_os = "windows")]
-        std::mem::forget(tray);
+    if let Some(tray) = guard.icon.take() {
+        let id = tray.id().clone();
+        let app_for_thread = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _table_clone = app_for_thread.remove_tray_by_id(&id);
+            drop(tray);
+        });
     }
+    guard.unlocked = None;
     Ok(())
 }
 
-/// Called from the frontend after successful unlock/setup, and when the tray toggle is
-/// turned on. Always recreates fresh — set_visible(true) is unreliable on macOS.
-/// The caller is responsible for checking tray_enabled before invoking.
-#[tauri::command]
-fn activate_tray(
-    app: tauri::AppHandle,
-    tray_state: tauri::State<TrayState>,
-) -> Result<(), String> {
-    let mut guard = tray_state.0.lock().map_err(|e| e.to_string())?;
-    // Drop any existing icon before recreating.
-    *guard = None;
-    // Use a unique generation suffix so menu item IDs don't collide with the previous instance.
-    let gen = TRAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+/// Builds the tray's context menu for the given generation and auth state. Split out of
+/// `build_tray` so `activate_tray` can swap variants in place with `TrayIcon::set_menu`
+/// instead of rebuilding the icon (see `activate_tray`'s doc comment for why rebuilding is
+/// wrong here). `gen` must be the live icon's generation — its `on_menu_event` closure
+/// recomputes the same ids from `gen` at click time, so menu and closure only agree when
+/// they share a generation.
+fn build_tray_menu(app: &tauri::AppHandle, gen: u32, unlocked: bool) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
     let open_id = format!("tray_open_{gen}");
     let settings_id = format!("tray_settings_{gen}");
+    let lock_id = format!("tray_lock_{gen}");
     let quit_id = format!("tray_quit_{gen}");
-    let tray_open = MenuItemBuilder::with_id(&open_id, "Open").build(&app).map_err(|e| e.to_string())?;
-    let tray_settings = MenuItemBuilder::with_id(&settings_id, "Settings").build(&app).map_err(|e| e.to_string())?;
-    let tray_quit = MenuItemBuilder::with_id(&quit_id, "Quit Resty Desktop").build(&app).map_err(|e| e.to_string())?;
-    let tray_menu = MenuBuilder::new(&app)
-        .item(&tray_open)
-        .item(&tray_settings)
-        .separator()
-        .item(&tray_quit)
-        .build()
-        .map_err(|e| e.to_string())?;
+
+    let tray_open = MenuItemBuilder::with_id(&open_id, "Open").build(app).map_err(|e| e.to_string())?;
+    let tray_quit = MenuItemBuilder::with_id(&quit_id, "Quit Resty Desktop").build(app).map_err(|e| e.to_string())?;
+
+    // "Settings" fires the `menu:settings` event, which only App.tsx's unlocked subtree
+    // listens for — on the lock screen it would open the window onto a dead click, so the
+    // item is not built at all (the on_menu_event closure simply never matches its id).
+    let tray_settings = if unlocked {
+        Some(MenuItemBuilder::with_id(&settings_id, "Settings").build(app).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    // "Lock Now" — unlocked only, same reasoning as Settings above. This is the only way to
+    // lock a session that's sitting unlocked-and-hidden in the tray: on macOS the native menu
+    // bar is unreachable while the window is hidden under ActivationPolicy::Accessory, and the
+    // window itself may not be on screen at all. Fires the same `menu:lock-app` event the
+    // native "Lock Now" menu item already emits (App.tsx's unlocked-only listener), so locking
+    // from here deliberately does not show the window.
+    let tray_lock = if unlocked {
+        Some(MenuItemBuilder::with_id(&lock_id, "Lock Now").build(app).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    // A disabled header row, not just the tooltip: Linux StatusNotifierItem hosts (GNOME's
+    // AppIndicator extension in particular) routinely ignore tray tooltips, so the locked
+    // state has to be visible in the menu itself to read the same on all three platforms.
+    let status_id = format!("tray_status_{gen}");
+    let tray_status = if unlocked {
+        None
+    } else {
+        // enabled(false) renders a greyed, unclickable row on all three platforms; its id is
+        // never matched in on_menu_event because it can't be clicked.
+        Some(
+            MenuItemBuilder::with_id(&status_id, "Locked")
+                .enabled(false)
+                .build(app)
+                .map_err(|e| e.to_string())?,
+        )
+    };
+
+    let mut b = MenuBuilder::new(app);
+    if let Some(item) = &tray_status {
+        b = b.item(item).separator();
+    }
+    b = b.item(&tray_open);
+    if let Some(item) = &tray_settings {
+        b = b.item(item);
+    }
+    if let Some(item) = &tray_lock {
+        b = b.item(item);
+    }
+    b.separator().item(&tray_quit).build().map_err(|e| e.to_string())
+}
+
+/// Builds a fresh tray icon (with its own generation) for the given auth state. Called only
+/// when no icon currently exists: `setup()` (always the locked variant — the app always starts
+/// locked) and `activate_tray`'s no-existing-icon branch. Returns the icon alongside its
+/// generation so the caller can store it in `Tray::gen` for later `set_menu` calls.
+fn build_tray(app: &tauri::AppHandle, unlocked: bool) -> Result<(tauri::tray::TrayIcon<tauri::Wry>, u32), String> {
+    // Unique generation suffix so menu item IDs don't collide with a previous instance.
+    let gen = TRAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tray_menu = build_tray_menu(app, gen, unlocked)?;
+
     #[cfg(target_os = "macos")]
     let png_bytes = include_bytes!("../icons/tray-icon.png");
     #[cfg(not(target_os = "macos"))]
@@ -119,26 +199,72 @@ fn activate_tray(
         .into_rgba8();
     let (w, h) = decoded.dimensions();
     let icon = tauri::image::Image::new_owned(decoded.into_raw(), w, h);
+
     let tray = TrayIconBuilder::new()
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
         .show_menu_on_left_click(true)
-        .tooltip("Resty Desktop")
+        .tooltip(if unlocked { "Resty Desktop" } else { "Resty Desktop — Locked" })
         .menu(&tray_menu)
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
-            if id == open_id || id == settings_id {
+            if id == format!("tray_open_{gen}") || id == format!("tray_settings_{gen}") {
                 show_window(app);
-                if id == settings_id {
+                if id == format!("tray_settings_{gen}") {
                     app.emit("menu:settings", ()).ok();
                 }
-            } else if id == quit_id {
+            } else if id == format!("tray_lock_{gen}") {
+                // Deliberately does not call show_window — locking from the tray must be
+                // able to leave a hidden session hidden (see build_tray_menu's doc comment).
+                app.emit("menu:lock-app", ()).ok();
+            } else if id == format!("tray_quit_{gen}") {
                 app.exit(0);
             }
         })
-        .build(&app)
+        .build(app)
         .map_err(|e| e.to_string())?;
-    *guard = Some(tray);
+    Ok((tray, gen))
+}
+
+/// Called from the frontend on every auth-state change (and when the tray toggle is turned
+/// on). Returns early when the requested variant is already installed — App.tsx runs this on
+/// every `locked`/`unlocked` transition, and this also absorbs React StrictMode's dev-only
+/// double-invoke.
+///
+/// When a variant switch is actually needed, this updates the **existing** icon in place via
+/// `set_menu`/`set_tooltip` rather than rebuilding it. Rebuilding (dropping the stored handle
+/// and calling `build_tray` again) does *not* remove the old OS icon: `TrayIconBuilder::build`
+/// stores a second clone of the icon in Tauri's own resource table (see `TrayIcon::register`),
+/// so dropping only our handle leaves that clone alive — the old icon stays in the menu bar
+/// and a new one appears next to it. In-place updates also avoid a real Windows
+/// `NIM_DELETE`/`NIM_ADD` pair (a visible icon flicker and a lost overflow-area position). See
+/// `deactivate_tray` for the correct way to actually remove an icon.
+#[tauri::command]
+fn activate_tray(
+    app: tauri::AppHandle,
+    tray_state: tauri::State<TrayState>,
+    unlocked: bool,
+) -> Result<(), String> {
+    let mut guard = tray_state.0.lock().map_err(|e| e.to_string())?;
+    if guard.icon.is_some() && guard.unlocked == Some(unlocked) {
+        return Ok(());
+    }
+    if let Some(icon) = guard.icon.clone() {
+        let menu = build_tray_menu(&app, guard.gen, unlocked)?;
+        icon.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+        // The menu is what actually carries the auth-state signal (Settings/Lock Now vs. the
+        // disabled "Locked" row) — record the variant as soon as it lands, so a subsequent
+        // set_tooltip failure (tooltip is decoration only, and a guaranteed no-op on Linux)
+        // can't leave `guard.unlocked` disagreeing with the menu that's actually installed.
+        guard.unlocked = Some(unlocked);
+        icon.set_tooltip(Some(if unlocked { "Resty Desktop" } else { "Resty Desktop — Locked" }))
+            .map_err(|e| e.to_string())?;
+    } else {
+        let (icon, gen) = build_tray(&app, unlocked)?;
+        guard.icon = Some(icon);
+        guard.gen = gen;
+        guard.unlocked = Some(unlocked);
+    }
     Ok(())
 }
 
@@ -147,7 +273,13 @@ pub fn run() {
     gpu_compat::apply();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second *autostart* launch (Windows Run key plus a Startup-folder shortcut, a
+            // desktop session that both restores and autostarts) must not yank a deliberately
+            // hidden login launch onto the screen. Only a hand launch means "show me the app".
+            if args.iter().any(|a| a == "--from-autostart") {
+                return;
+            }
             show_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -162,6 +294,12 @@ pub fn run() {
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("resty-desktop")
+                // Written into the OS autostart entry so a login launch is distinguishable
+                // from a hand launch (see the single-instance handler above and setup()'s
+                // start_hidden gate below). Verified honored on all three platforms by the
+                // pinned auto-launch 0.5.0: macOS LaunchAgent ProgramArguments, the Windows
+                // Run value, and the Linux Exec= line.
+                .args(["--from-autostart"])
                 .build(),
         )
         .setup(|app| {
@@ -221,6 +359,36 @@ pub fn run() {
             let conn = Connection::open(&db_path)?;
             cache::AppDb::init_schema(&conn)?;
             let app_db = cache::AppDb::new(conn, db_path);
+
+            // ── startup visibility ──────────────────────────────────────────────────
+            let tray_on = app_db
+                .get_setting("tray_enabled", "false")
+                .unwrap_or_else(|_| "false".to_string())
+                == "true";
+            let auto_unlock_on = app_db
+                .get_setting("auto_unlock", "false")
+                .unwrap_or_else(|_| "false".to_string())
+                == "true";
+            // Only the OS autostart entry carries this arg (see the plugin builder above).
+            let from_autostart = std::env::args().any(|a| a == "--from-autostart");
+
+            let start_hidden = should_start_hidden(from_autostart, tray_on, auto_unlock_on);
+
+            // One-shot re-registration: entries written by an older build carry no
+            // `--from-autostart`, so a hidden start would never trigger for existing users.
+            // enable() truncates and rewrites the plist / Run value / .desktop file with the
+            // current args. Guarded on is_enabled() so this never *creates* an entry, and —
+            // on Windows — never resurrects one the user switched off in Task Manager
+            // (is_enabled() there ANDs the Run value with the StartupApproved flag). The
+            // migrated flag is only written when the rewrite actually lands, so a
+            // Task-Manager-disabled user who re-enables later still gets migrated then.
+            if app_db.get_setting("autostart_args_migrated", "0").unwrap_or_default() != "1"
+                && app.autolaunch().is_enabled().unwrap_or(false)
+                && app.autolaunch().enable().is_ok()
+            {
+                let _ = app_db.set_setting("autostart_args_migrated", "1");
+            }
+
             app.manage(app_db);
             app.manage(cache::MasterKey::new());
             app.manage(cache::CopyHandle::new());
@@ -231,31 +399,74 @@ pub fn run() {
             app.manage(cache::IndexHandle::new());
             app.manage(repo_locks::RepoLocks::new());
 
-            // Tray is created lazily after unlock via activate_tray command.
-            app.manage(TrayState(Mutex::new(None)));
+            app.manage(TrayState(Mutex::new(Tray::default())));
 
-            // Intercept window close: hide to tray only after tray has been activated
-            // (i.e. the user has unlocked the app). Before unlock, close quits the app.
+            // The app always starts locked (MasterKey is in-memory only), so this is always
+            // the locked variant; App.tsx swaps in the unlocked one once auth succeeds.
+            // Failure is logged, never fatal — a missing tray must not stop the app starting.
+            if tray_on {
+                match build_tray(&app.handle().clone(), false) {
+                    Ok((icon, gen)) => {
+                        if let Ok(mut g) = app.state::<TrayState>().0.lock() {
+                            g.icon = Some(icon);
+                            g.gen = gen;
+                            g.unlocked = Some(false);
+                        }
+                    }
+                    Err(e) => eprintln!("tray: failed to create at startup: {e}"),
+                }
+            }
+
+            // Intercept window close: hide to tray whenever the setting is on, regardless of
+            // auth state (a locked app in the tray is now a normal, supported state).
+            // Otherwise close quits the app.
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
                 let win = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let tray = app_handle.state::<TrayState>();
-                        let tray_active = tray.0.lock().map(|g| g.is_some()).unwrap_or(false);
-                        if tray_active {
-                            let db = app_handle.state::<cache::AppDb>();
-                            let tray_on = db
-                                .get_setting("tray_enabled", "false")
-                                .unwrap_or_else(|_| "false".to_string())
-                                == "true";
-                            if tray_on {
-                                api.prevent_close();
-                                let _ = win.hide();
-                                #[cfg(target_os = "macos")]
-                                let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                            }
+                        let db = app_handle.state::<cache::AppDb>();
+                        let tray_on = db
+                            .get_setting("tray_enabled", "false")
+                            .unwrap_or_else(|_| "false".to_string())
+                            == "true";
+                        if tray_on {
+                            api.prevent_close();
+                            let _ = win.hide();
+                            #[cfg(target_os = "macos")]
+                            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
                         }
+                    }
+                });
+
+                if start_hidden {
+                    // Accessory keeps the dock icon out of a login launch entirely.
+                    // show_window() flips back to Regular whenever the window is later
+                    // brought up, the same pair the close-to-tray path above uses.
+                    #[cfg(target_os = "macos")]
+                    let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                } else {
+                    let _ = window.show();
+                }
+            }
+
+            if start_hidden {
+                // Hidden is only ever legitimate while unlocked. If we're still locked well
+                // after launch, something in the frontend never got as far as reporting a
+                // state (bundle error, webview crash) — surface the window so the user is
+                // never left with an invisible, non-functioning app. The tray's own "Open"
+                // item is the primary mitigation; this is a self-healing backstop.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    let still_locked = handle.state::<cache::MasterKey>().is_locked();
+                    let hidden = handle
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_visible().ok())
+                        .map(|visible| !visible)
+                        .unwrap_or(false);
+                    if still_locked && hidden {
+                        show_window(&handle);
                     }
                 });
             }
@@ -384,6 +595,7 @@ pub fn run() {
             set_menu_auth_state,
             activate_tray,
             deactivate_tray,
+            show_main_window,
         ])
         .build(tauri::generate_context!())
         .expect("error building tauri application")
@@ -398,4 +610,24 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = (app_handle, event);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_start_hidden;
+
+    // Pins the "all three required" rule — see should_start_hidden's doc comment. Each of the
+    // seven non-all-true combinations must stay false; only from_autostart && tray_on &&
+    // auto_unlock_on may start hidden.
+    #[test]
+    fn should_start_hidden_requires_all_three() {
+        assert!(should_start_hidden(true, true, true));
+        assert!(!should_start_hidden(false, true, true));
+        assert!(!should_start_hidden(true, false, true));
+        assert!(!should_start_hidden(true, true, false));
+        assert!(!should_start_hidden(false, false, true));
+        assert!(!should_start_hidden(false, true, false));
+        assert!(!should_start_hidden(true, false, false));
+        assert!(!should_start_hidden(false, false, false));
+    }
 }

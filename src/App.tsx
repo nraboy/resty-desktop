@@ -20,7 +20,7 @@ import LogsPage from "./pages/LogsPage";
 import SearchPage from "./pages/SearchPage";
 import RepoSearchPage from "./pages/RepoSearchPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, getTrayEnabled, getResticVersion } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, deactivateTray, showMainWindow, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
 import type { TaskEvent } from "./lib/types";
 
@@ -107,6 +107,13 @@ export default function App() {
   // reliably limits the startup sequence to one real attempt. No effect in production, where
   // React only invokes effects once.
   const startupRanRef = useRef(false);
+  // Tracks whether this session has ever reached "unlocked". A ref, not state, so setting it
+  // doesn't itself trigger the effect below. Distinguishes a hidden login launch that hasn't
+  // succeeded yet (auto-unlock still pending, or failed/denied/stale, or updateNotice) — which
+  // must still force the window visible — from a deliberate mid-session lock via the tray's
+  // or menu bar's "Lock Now" (see lib.rs's tray_lock_{gen} item), which must NOT. Without this,
+  // locking from the tray while hidden would immediately pop the window back open.
+  const hasBeenUnlockedRef = useRef(false);
 
   // Shared by the mount effect below and the "updateNotice" screen's Continue button, so both
   // paths land on the exact same success/failure handling.
@@ -155,8 +162,30 @@ export default function App() {
   useEffect(() => {
     if (authState === "loading") return;
     setMenuAuthState(authState === "unlocked").catch(() => {});
+
     if (authState === "unlocked") {
-      getTrayEnabled().then(enabled => { if (enabled) activateTray().catch(() => {}); }).catch(() => {});
+      hasBeenUnlockedRef.current = true;
+    } else if (!hasBeenUnlockedRef.current) {
+      // Rescues a hidden login launch whose auto-unlock failed ("denied"/"stale") or that
+      // needs the macOS post-update keychain prompt ("updateNotice") — but only before the
+      // session has ever unlocked. Once it has, "not unlocked" instead means a deliberate
+      // Lock Now from the tray, which must leave a hidden window hidden. It's a no-op on an
+      // already-visible window either way, so no started-hidden flag has to be plumbed in.
+      showMainWindow().catch(() => {});
+    }
+
+    if (authState === "setup") {
+      // Reaching "setup" after startup means a reset: reset_all wipes app_settings (so
+      // tray_enabled reverts to its false default) but not the tray icon setup() already
+      // built for the app's previous lifetime.
+      deactivateTray().catch(() => {});
+    } else {
+      getTrayEnabled()
+        .then((enabled) => { if (enabled) activateTray(authState === "unlocked").catch(() => {}); })
+        .catch(() => {});
+    }
+
+    if (authState === "unlocked") {
       getResticVersion().then((v) => {
         const m = v.match(/restic (\d+)\.(\d+)/);
         if (m) {
