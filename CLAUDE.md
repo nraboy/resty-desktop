@@ -213,7 +213,8 @@ proposing a change — several are pinned by a named test or reference a confirm
 - Windows and Linux install no native menu bar — the menu is built and `MenuState` managed on
   every platform, but `setup()` drops it on Windows/Linux; only macOS installs it (replaces the
   old Windows-only "fold the app submenu into File" workaround, whose cfg machinery was deleted).
-  Locking's tray-independent path is the sidebar footer's lock button (`Sidebar`'s `onLock`,
+  Locking's tray-independent path is the Lock item at the bottom of the sidebar's nav list
+  (`Sidebar`'s `onLock`,
   shared `handleLock` in `App.tsx`); don't reintroduce a Windows menu bar, the File-fold, or hide
   macOS's system menu bar — see docs/decisions.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
@@ -237,7 +238,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `reset_app` also best-effort clears the OS autostart entry, not just DB tables
 - The Windows `Run` registry value `auto-launch` writes is unquoted — not fixable from app code
 - `react-router-dom` stays on 6.x — its two audit advisories are unreachable in this app
-- Dark-mode `--tw-gray-500` (`139 148 163`) and light-mode `--tw-gray-500` (`97 112 135`) are
+- Dark-mode `--tw-gray-500` (`139 148 163`) and light-mode `--tw-gray-500` (`88 103 126`) are
   deliberately not stock Tailwind values — both tuned so gray-500 text passes WCAG AA (≥4.5:1)
   on every surface it sits on, enforced by `src/lib/contrast.test.ts`; bare text never goes
   darker than `text-gray-500` (gray-600/700 are border/divider colors only) — see docs/frontend.md

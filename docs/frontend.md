@@ -34,7 +34,7 @@ Empty list placeholder
 
 ### `icons.tsx`
 
-Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, ChevronRightIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningCircle, SearchIcon, RestoreIcon, LockIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
+Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, ChevronRightIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningSolid, SearchIcon, RestoreIcon, LockIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
 
 ### `ImportExportCard.tsx`
 
@@ -191,13 +191,14 @@ gray.50–950, blue.300/400/700/900, green.300/400/700/900, red.300/400/700/900,
 Bare text on a page/card background never goes darker than `text-gray-500` — gray-600/700 are
 border/divider colors, and in dark mode they render at ~2:1/1.4:1 contrast (invisible; this was
 a reported user issue). Both gray-500 values are deliberately *not* stock Tailwind values:
-dark `--tw-gray-500` is `139 148 163` (stock: `107 114 128`) and light is `97 112 135`
+dark `--tw-gray-500` is `139 148 163` (stock: `107 114 128`) and light is `88 103 126`
 (stock-ish slate: `100 116 139`), each tuned so gray-500 text passes WCAG AA (≥4.5:1) on every
-surface it sits on — dark gray-950/900/800, light page and panel. These are enforced by
-`src/lib/contrast.test.ts`, which parses all three blocks of `src/index.css` and asserts the
-text-capable shades (gray 100–500, accent 300–500) hold ≥4.5:1 against the app's surfaces in
-both themes — run `npm run test:vite` after any palette edit; the test will name the exact
-shade/surface pair that regressed.
+surface it sits on — dark and light both cover gray-950/900/800 (page/panel/input). Light-mode
+`green-400` reuses `green-300`'s value for the same reason (`21 128 61` only held 4.07:1 against
+light `gray-800`). These are enforced by `src/lib/contrast.test.ts`, which parses all three
+blocks of `src/index.css` and asserts the text-capable shades (gray 100–500, accent 300–500)
+hold ≥4.5:1 against the app's surfaces in both themes — run `npm run test:vite` after any
+palette edit; the test will name the exact shade/surface pair that regressed.
 
 ### Hardcoded colors to avoid
 - `text-white` on gray backgrounds → use `text-gray-50` (remaps to near-black in light mode).

@@ -272,7 +272,7 @@ export default function BrowsePage() {
               <button
                 onClick={() => { setNewTag(""); setShowTagModal(true); }}
                 disabled={repo.readOnly}
-                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-400 hover:text-gray-400 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:border-gray-700"
+                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:border-gray-700"
                 title={repo.readOnly ? "This repository is read-only" : "Add tag"}
               >
                 + tag

@@ -53,7 +53,7 @@
     --tw-gray-200: 30 41 59;      /* strong text */
     --tw-gray-300: 51 65 85;      /* body text */
     --tw-gray-400: 71 85 105;     /* secondary text — ~7.8:1 on bg ✓ */
-    --tw-gray-500: 97 112 135;    /* muted text — ≥4.5:1 on page and panel bg ✓ */
+    --tw-gray-500: 88 103 126;    /* muted text — ≥4.5:1 on page, panel, and input bg ✓ */
     --tw-gray-600: 148 163 184;   /* subtle borders/dividers */
     --tw-gray-700: 203 213 225;   /* light borders */
     --tw-gray-800: 226 232 240;   /* card/input bg */
@@ -66,7 +66,8 @@
     --tw-blue-900: 219 234 254;   /* → blue-100: light bg for dark-mode pill/badge bg */
     /* Green — darker for legibility on light backgrounds */
     --tw-green-300: 22 101 52;    /* → green-800: dark text on light bg */
-    --tw-green-400: 21 128 61;    /* → green-700 */
+    --tw-green-400: 22 101 52;    /* → green-800: reuses green-300's already-corrected value —
+                                      21 128 61 (→green-700) only held 4.07:1 on input bg */
     --tw-green-700: 134 239 172;  /* → green-300: medium border on light bg */
     --tw-green-900: 240 253 244;  /* → green-50: very light bg */
     /* Red — dark values for contrast on light backgrounds */
@@ -95,7 +96,7 @@
       --tw-gray-200: 30 41 59;
       --tw-gray-300: 51 65 85;
       --tw-gray-400: 71 85 105;
-      --tw-gray-500: 97 112 135;
+      --tw-gray-500: 88 103 126;
       --tw-gray-600: 148 163 184;
       --tw-gray-700: 203 213 225;
       --tw-gray-800: 226 232 240;
@@ -106,7 +107,7 @@
       --tw-blue-700: 96 165 250;
       --tw-blue-900: 219 234 254;
       --tw-green-300: 22 101 52;
-      --tw-green-400: 21 128 61;
+      --tw-green-400: 22 101 52;
       --tw-green-700: 134 239 172;
       --tw-green-900: 240 253 244;
       --tw-red-300: 153 27 27;

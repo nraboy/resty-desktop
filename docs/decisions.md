@@ -380,8 +380,8 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   menu bars). Nothing of value was lost: every menu feature is reachable in the sidebar,
   pages, or tray; the only accelerator anywhere in the menu was Ctrl+Q (window close /
   Alt+F4 still quit); and the predefined Edit items' Cut/Copy/Paste shortcuts are handled
-  natively by WebView2 without a menu. "Lock Now" gained a tray-independent home — a lock
-  button in the sidebar footer (`Sidebar`'s `onLock` prop, shared `handleLock` in
+  natively by WebView2 without a menu. "Lock Now" gained a tray-independent home — a Lock
+  item at the bottom of the sidebar's nav list (`Sidebar`'s `onLock` prop, shared `handleLock` in
   `App.tsx` with the `menu:lock-app` event listener) — because with the menu gone and the
   tray setting off there would otherwise be no way to lock a session short of quitting.
   The locked-state "Reset Application" path is covered by the lock screen's existing

@@ -94,7 +94,7 @@ export function MinusCircleIcon({ className = "w-4 h-4" }: IconProps) {
   );
 }
 
-export function WarningCircleIcon({ className = "w-4 h-4" }: IconProps) {
+export function WarningSolidIcon({ className = "w-4 h-4" }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fillRule="evenodd"

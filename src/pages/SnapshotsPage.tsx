@@ -13,7 +13,7 @@ import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
-import { TrashIcon, SearchIcon, RestoreIcon, CheckCircleIcon, XCircleIcon, WarningIcon, WarningCircleIcon, ChevronDownIcon } from "../components/icons";
+import { TrashIcon, SearchIcon, RestoreIcon, CheckCircleIcon, XCircleIcon, WarningIcon, WarningSolidIcon, ChevronDownIcon } from "../components/icons";
 
 const PAGE_SIZE = 10;
 
@@ -852,7 +852,7 @@ export default function SnapshotsPage() {
         ) : multiCopyCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <WarningCircleIcon className="w-5 h-5 shrink-0" />
+              <WarningSolidIcon className="w-5 h-5 shrink-0" />
               Copy cancelled
             </div>
             <p className="text-sm text-gray-400 mb-3">
@@ -1026,7 +1026,7 @@ export default function SnapshotsPage() {
         ) : restoreCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <WarningCircleIcon className="w-5 h-5 shrink-0" />
+              <WarningSolidIcon className="w-5 h-5 shrink-0" />
               Restore cancelled
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1111,7 +1111,7 @@ export default function SnapshotsPage() {
         ) : copyCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <WarningCircleIcon className="w-5 h-5 shrink-0" />
+              <WarningSolidIcon className="w-5 h-5 shrink-0" />
               Copy cancelled
             </div>
             <p className="text-sm text-gray-400 mb-3">

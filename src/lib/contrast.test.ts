@@ -90,6 +90,7 @@ describe("light mode text contrast (WCAG AA)", () => {
   const surfaces: Array<[string, Rgb]> = [
     ["bg-gray-950 (page)", light["gray-950"]],
     ["bg-gray-900 (panels)", light["gray-900"]],
+    ["bg-gray-800 (inputs/tabs)", light["gray-800"]],
   ];
 
   it.each(textColors(light))("%s passes 4.5:1 on every light surface", (name, color) => {
