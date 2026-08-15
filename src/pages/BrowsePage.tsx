@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { getRestorePath, listFiles, listRepos, restorePath, tagSnapshot } from "../lib/invoke";
+import { getRestorePath, listFiles, listRepos, listSnapshots, restorePath, tagSnapshot } from "../lib/invoke";
 import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import { formatSize, formatDateOnly } from "../lib/format";
@@ -50,6 +50,21 @@ export default function BrowsePage() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [tags, setTags] = useState<string[]>(snapshot?.tags ?? []);
+  // SnapshotsPage/SearchPage pass the snapshot via router state, but LogsPage's hash links,
+  // deep links, and a page refresh all arrive without it — backfill the tags from the
+  // snapshot cache (a pure-DB read) so the tag chips render on those paths too.
+  useEffect(() => {
+    if (snapshot || !repoId || !snapshotId) return;
+    let cancelled = false;
+    listSnapshots(repoId)
+      .then((snaps) => {
+        if (cancelled) return;
+        const match = snaps.find((s) => s.id === snapshotId);
+        if (match) setTags(match.tags ?? []);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [snapshot, repoId, snapshotId]);
   const [showTagModal, setShowTagModal] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [tagging, setTagging] = useState(false);

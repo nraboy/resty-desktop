@@ -23,13 +23,6 @@ struct MenuState {
     file_separator: tauri::menu::PredefinedMenuItem<tauri::Wry>,
     import_item: tauri::menu::MenuItem<tauri::Wry>,
     export_item: tauri::menu::MenuItem<tauri::Wry>,
-    // Windows folds the "Resty Desktop" app submenu into File (see setup()) so Quit needs to be
-    // re-pinned to the bottom of File on every auth-state flip; other platforms keep Quit in the
-    // app submenu, which set_menu_auth_state never touches.
-    #[cfg(target_os = "windows")]
-    quit_separator: tauri::menu::PredefinedMenuItem<tauri::Wry>,
-    #[cfg(target_os = "windows")]
-    quit: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 /// Holds the live TrayIcon plus which variant is installed, under one lock so the two can
@@ -83,17 +76,10 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
     let _ = menu_state.file_submenu.remove(&menu_state.file_separator);
     let _ = menu_state.file_submenu.remove(&menu_state.import_item);
     let _ = menu_state.file_submenu.remove(&menu_state.export_item);
-    #[cfg(target_os = "windows")]
-    {
-        let _ = menu_state.file_submenu.remove(&menu_state.quit_separator);
-        let _ = menu_state.file_submenu.remove(&menu_state.quit);
-    }
 
     if unlocked {
         // prepend inserts at index 0 each call, so prepending in this order — lock_app first,
         // then settings — yields the intended top-to-bottom layout: Settings, Lock Now, … Quit.
-        // On Windows, `app_submenu` is actually `file_submenu` itself (see setup()), so these
-        // prepends land Settings/Lock Now at the top of File rather than in a separate submenu.
         menu_state.app_submenu.prepend(&menu_state.lock_app).map_err(|e| e.to_string())?;
         menu_state.app_submenu.prepend(&menu_state.settings).map_err(|e| e.to_string())?;
         menu_state.file_submenu.append(&menu_state.new_repository).map_err(|e| e.to_string())?;
@@ -103,12 +89,6 @@ fn set_menu_auth_state(unlocked: bool, menu_state: tauri::State<MenuState>) -> R
         menu_state.file_submenu.append(&menu_state.export_item).map_err(|e| e.to_string())?;
     } else {
         menu_state.file_submenu.append(&menu_state.reset_app).map_err(|e| e.to_string())?;
-    }
-    // Keep Exit pinned to the bottom of File on Windows regardless of auth state.
-    #[cfg(target_os = "windows")]
-    {
-        menu_state.file_submenu.append(&menu_state.quit_separator).map_err(|e| e.to_string())?;
-        menu_state.file_submenu.append(&menu_state.quit).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -325,18 +305,9 @@ pub fn run() {
         .setup(|app| {
             let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
             let lock_app_item = MenuItemBuilder::with_id("lock_app", "Lock Now").build(app)?;
-            // Windows folds the app submenu into File (see below), so "Quit Resty Desktop" would
-            // be a fourth on-screen repetition of the app name there — "Exit" is also the
-            // conventional label for a Windows File menu's terminal item. Other platforms keep
-            // the fuller label since it sits in its own submenu.
-            #[cfg(target_os = "windows")]
-            let quit_label = "Exit";
-            #[cfg(not(target_os = "windows"))]
-            let quit_label = "Quit Resty Desktop";
-            let quit = MenuItemBuilder::with_id("quit", quit_label)
+            let quit = MenuItemBuilder::with_id("quit", "Quit Resty Desktop")
                 .accelerator("CmdOrCtrl+Q")
                 .build(app)?;
-            #[cfg(not(target_os = "windows"))]
             let app_submenu = SubmenuBuilder::new(app, "Resty Desktop")
                 .item(&quit)
                 .build()?;
@@ -346,17 +317,7 @@ pub fn run() {
             let file_separator = PredefinedMenuItem::separator(app)?;
             let import_item = MenuItemBuilder::with_id("import", "Import…").build(app)?;
             let export_item = MenuItemBuilder::with_id("export", "Export…").build(app)?;
-            #[cfg(target_os = "windows")]
-            let quit_separator = PredefinedMenuItem::separator(app)?;
-            let file_submenu = SubmenuBuilder::new(app, "File").item(&reset_app_item);
-            #[cfg(target_os = "windows")]
-            let file_submenu = file_submenu.item(&quit_separator).item(&quit);
-            let file_submenu = file_submenu.build()?;
-            // On Windows there's no separate app submenu — set_menu_auth_state's
-            // app_submenu.prepend(...) calls target `file_submenu` itself, landing
-            // Settings/Lock Now at the top of File. See MenuState's doc comment.
-            #[cfg(target_os = "windows")]
-            let app_submenu = file_submenu.clone();
+            let file_submenu = SubmenuBuilder::new(app, "File").item(&reset_app_item).build()?;
             let source_github = MenuItemBuilder::with_id("source_github", "Source on GitHub").build(app)?;
             let help_submenu = SubmenuBuilder::new(app, "Help")
                 .item(&source_github)
@@ -370,16 +331,16 @@ pub fn run() {
                 .item(&PredefinedMenuItem::paste(app, None)?)
                 .item(&PredefinedMenuItem::select_all(app, None)?)
                 .build()?;
-            #[cfg(not(target_os = "windows"))]
             let menu = MenuBuilder::new(app).items(&[&app_submenu, &file_submenu, &edit_submenu, &help_submenu]).build()?;
-            #[cfg(target_os = "windows")]
-            let menu = MenuBuilder::new(app).items(&[&file_submenu, &edit_submenu, &help_submenu]).build()?;
             // Native menu bar on Linux inherits the GTK theme and can be unreadable when
-            // the GTK dark-theme hint conflicts with text color. All navigation is in the
-            // sidebar, so skip the menu bar on Linux entirely.
-            #[cfg(not(target_os = "linux"))]
+            // the GTK dark-theme hint conflicts with text color. On Windows the in-window
+            // menu bar stacks the app name against the title bar and sidebar logo (the bug
+            // the old File-fold workaround existed to kill) and adds nothing the sidebar
+            // doesn't cover. All navigation is in the sidebar, so only macOS — whose menu
+            // lives in the system bar, away from the window — installs it.
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             app.set_menu(menu)?;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             drop(menu);
             app.manage(MenuState {
                 app_submenu,
@@ -392,10 +353,6 @@ pub fn run() {
                 file_separator,
                 import_item,
                 export_item,
-                #[cfg(target_os = "windows")]
-                quit_separator,
-                #[cfg(target_os = "windows")]
-                quit,
             });
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;

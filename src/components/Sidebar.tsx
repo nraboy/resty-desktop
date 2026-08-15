@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { getVersion } from "@tauri-apps/api/app";
+import { LockIcon } from "./icons";
 
 const navItems = [
   {
@@ -59,7 +60,13 @@ const navItems = [
   },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  /** Locks the session. Only passed when the app is unlocked (Sidebar renders solely in
+   *  App.tsx's unlocked branch), so its presence doubles as that gate. */
+  onLock?: () => void;
+}
+
+export default function Sidebar({ onLock }: SidebarProps) {
   const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
@@ -95,6 +102,17 @@ export default function Sidebar() {
             {item.label}
           </NavLink>
         ))}
+        {onLock && (
+          <button
+            onClick={onLock}
+            title="Lock Now"
+            aria-label="Lock Now"
+            className="flex w-full items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+          >
+            <LockIcon className="w-5 h-5" />
+            Lock
+          </button>
+        )}
       </nav>
 
       {appVersion && (

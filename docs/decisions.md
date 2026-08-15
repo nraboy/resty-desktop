@@ -365,26 +365,30 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   (smb://, mtp://) from the portal's sidebar returns nothing, where the old GTK chooser would
   have resolved it to a local gvfs mount path. Backing up a gvfs mount with restic is a niche
   enough case not to block on.
-- **On Windows only, the native menu bar has no separate "Resty Desktop" app submenu — it's
-  folded into `File`, and the Quit item there reads "Exit" instead of "Quit Resty Desktop".**
-  Reported by a user: on Windows the window title bar, that submenu's label, and the sidebar
-  logo stack three near-identical "Resty Desktop" strings within a few dozen pixels, since
-  (unlike macOS) the app submenu renders inside the window's own menu bar rather than a
-  system-wide menu bar away from the window. The window title itself was deliberately left
-  alone — blanking it would also blank the Alt+Tab switcher and taskbar hover label, which read
-  the same title, and that regression is worse than the visual repetition it would "fix". `File`
-  becomes the unlocked layout's `Settings, Lock Now, New Repository, New Backup Plan, ──,
-  Import…, Export…, ──, Exit` (locked: `Reset Application, ──, Exit`) — implemented by making
-  `MenuState.app_submenu` an `Arc`-cloned handle to the *same* `file_submenu` on Windows (see the
-  comment at its assignment in `lib.rs`'s `setup()`), so `set_menu_auth_state`'s existing
-  `app_submenu.prepend(...)` calls need no platform-specific branching to land Settings/Lock Now
-  at the top of `File`; Windows carries two extra cfg-gated `MenuState` fields (`quit`,
-  `quit_separator`) purely to keep Exit re-pinned to the bottom of `File` across that function's
-  remove/re-add cycle. macOS and Linux are untouched — macOS keeps the separate app submenu (it
-  lives in the system menu bar, nowhere near the window), and Linux still has no native menu bar
-  at all (see the `xdg-portal` entry above's neighbor comment in `lib.rs` — menu bar, not dialog,
-  reference: search for "GTK dark-theme hint"). Don't "complete" this by giving macOS/Linux the
-  same fold, or by reintroducing a same-string Quit label on Windows — both were the reported bug.
+- **Windows and Linux install no native menu bar at all; only macOS does.** The menu is
+  still built and `MenuState` managed on every platform, but `setup()` drops it on
+  Windows/Linux (`#[cfg]` gate around `app.set_menu(menu)` in `lib.rs`) — extending what
+  Linux already did for GTK dark-theme-unreadability reasons. History: a user first
+  reported that on Windows the window title bar, the app submenu's label, and the sidebar
+  logo stacked three near-identical "Resty Desktop" strings within a few dozen pixels
+  (unlike macOS, the app submenu renders inside the window's own menu bar). That was
+  initially fixed by folding the app submenu into `File` with an "Exit" item — which worked
+  but cost Windows-only `MenuState` fields, a Windows-only re-pinning branch in
+  `set_menu_auth_state`, and cfg forks throughout menu assembly. Hiding the menu entirely
+  replaced the workaround: it deletes the whole duplicate-label problem class *and* the
+  fold machinery, and matches Windows norms (browsers, VS Code, etc. ship without visible
+  menu bars). Nothing of value was lost: every menu feature is reachable in the sidebar,
+  pages, or tray; the only accelerator anywhere in the menu was Ctrl+Q (window close /
+  Alt+F4 still quit); and the predefined Edit items' Cut/Copy/Paste shortcuts are handled
+  natively by WebView2 without a menu. "Lock Now" gained a tray-independent home — a lock
+  button in the sidebar footer (`Sidebar`'s `onLock` prop, shared `handleLock` in
+  `App.tsx` with the `menu:lock-app` event listener) — because with the menu gone and the
+  tray setting off there would otherwise be no way to lock a session short of quitting.
+  The locked-state "Reset Application" path is covered by the lock screen's existing
+  "Forgot your password?" modal. macOS keeps its system menu bar (it lives in the OS menu
+  bar, away from the window — no label-stacking problem, and it's where Mac users expect
+  it); don't "complete" this by hiding it there, and don't reintroduce a Windows menu bar
+  or the File-fold — both were the reported bug.
 
 
 ## Linux GPU Compatibility

@@ -8,7 +8,7 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
-import { SearchIcon } from "../components/icons";
+import { SearchIcon, ChevronRightIcon } from "../components/icons";
 
 type IndexState = "loading" | "not_indexed" | "indexing" | "ready";
 
@@ -317,9 +317,7 @@ export default function SearchPage() {
                           <span className="hidden sm:inline w-40 shrink-0 text-right tabular-nums whitespace-nowrap">
                             {entry.mtime ? formatDate(entry.mtime) : "—"}
                           </span>
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-500 group-hover:text-gray-400 transition-colors flex-shrink-0">
-                            <path fillRule="evenodd" d="M8.22 5.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L11.94 10 8.22 6.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-          </svg>
+                          <ChevronRightIcon className="w-4 h-4 text-gray-500 group-hover:text-gray-400 transition-colors flex-shrink-0" />
                         </div>
                       </button>
                     );

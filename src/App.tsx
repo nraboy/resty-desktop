@@ -203,17 +203,23 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, [authState]);
 
-  useEffect(() => {
-    if (authState !== "unlocked") return;
+  // Shared by the menu-bar/tray "Lock Now" listener below and the sidebar's lock button —
+  // the only two UI paths that lock a session (the tray one exists only when the tray
+  // setting is on, which is why the sidebar button matters on Windows/Linux where there's
+  // no native menu bar).
+  const handleLock = useCallback(() => {
     // Locking is a session action, not a settings change — it never touches the keychain, so
     // an auto-unlock user lands right back in the unlocked app on next launch, which is correct.
-    const unlisten = listen("menu:lock-app", () => {
-      lockApp()
-        .then(() => { setAutoUnlockReason(""); setAuthState("locked"); })
-        .catch(() => {});
-    });
+    lockApp()
+      .then(() => { setAutoUnlockReason(""); setAuthState("locked"); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (authState !== "unlocked") return;
+    const unlisten = listen("menu:lock-app", handleLock);
     return () => { unlisten.then((fn) => fn()); };
-  }, [authState]);
+  }, [authState, handleLock]);
 
   useEffect(() => {
     const unlisten = listen("menu:source-github", () => {
@@ -280,7 +286,7 @@ export default function App() {
           <MenuEventHandler />
           <ActivityProvider>
             <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
-              <Sidebar />
+              <Sidebar onLock={handleLock} />
               <div className="flex-1 flex flex-col overflow-hidden">
                 {showVersionWarning && (
                   <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">

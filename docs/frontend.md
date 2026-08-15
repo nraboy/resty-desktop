@@ -34,7 +34,7 @@ Empty list placeholder
 
 ### `icons.tsx`
 
-Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningCircle, SearchIcon, RestoreIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
+Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, ChevronRightIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningCircle, SearchIcon, RestoreIcon, LockIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
 
 ### `ImportExportCard.tsx`
 
@@ -54,7 +54,7 @@ Determinate (percent) or indeterminate (constantly-sliding, via index.css's `sli
 
 ### `Sidebar.tsx`
 
-Left nav with app icon + repo indicator
+Left nav with app icon + repo indicator; last item in the nav list is a "Lock" button (same format as the nav items, `onLock` prop — only passed when unlocked, since Sidebar renders solely in App.tsx's unlocked branch) that locks the session via the shared `handleLock` in App.tsx, the same path as the menu bar's and tray's "Lock Now"
 
 ### `ActivityPanel.tsx`
 

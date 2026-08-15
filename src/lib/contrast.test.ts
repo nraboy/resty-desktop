@@ -49,6 +49,7 @@ function parseBlock(css: string, selector: string): Record<string, Rgb> {
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "index.css"), "utf-8");
 const dark = parseBlock(css, ":root");
 const light = parseBlock(css, "html.light");
+const system = parseBlock(css, "html.system");
 
 /** Shades used as bare text on page/card backgrounds. */
 const TEXT_SHADES = {
@@ -96,5 +97,14 @@ describe("light mode text contrast (WCAG AA)", () => {
       const ratio = contrastRatio(color, bg);
       expect(ratio, `${name} on ${surface}: ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+describe("system theme block", () => {
+  // The `html.system` block (inside the prefers-color-scheme: light media query) must stay
+  // byte-identical to `html.light` — a shade tuned in one but not the other is exactly how
+  // amber-400 shipped invisible on white for System-theme users only.
+  it("html.system is identical to html.light", () => {
+    expect(system).toEqual(light);
   });
 });
