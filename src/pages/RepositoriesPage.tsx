@@ -45,7 +45,7 @@ import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
-import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon } from "../components/icons";
+import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
 
@@ -960,6 +960,18 @@ export default function RepositoriesPage() {
                   </Button>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/snapshots/${repo.id}/search`);
+                    }}
+                    className="text-gray-500 hover:text-blue-400"
+                    title="Search Files…"
+                  >
+                    <SearchIcon className="w-4 h-4" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
