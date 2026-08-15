@@ -166,7 +166,7 @@ export default function DiffPage() {
                   const isCurrent = i === breadcrumbParts.length - 1;
                   return (
                     <span key={path} className="contents">
-                      <span className="text-gray-700">/</span>
+                      <span className="text-gray-500">/</span>
                       {isCurrent ? (
                         <span className="text-gray-300">{part}</span>
                       ) : (

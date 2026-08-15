@@ -916,13 +916,13 @@ export default function RepositoriesPage() {
                             return (
                               <>
                                 <p className="text-sm font-medium text-gray-300" title={tooltip}>{primary}</p>
-                                <p className="text-xs text-gray-600">{secondary}</p>
+                                <p className="text-xs text-gray-500">{secondary}</p>
                               </>
                             );
                           })()}
                           {statsMap[repo.id]!.cached_at != null && (
                             <p
-                              className="text-xs text-gray-600"
+                              className="text-xs text-gray-500"
                               title={formatTimestamp(statsMap[repo.id]!.cached_at!)}
                             >
                               Refreshed {formatRelative(statsMap[repo.id]!.cached_at!)}
@@ -933,12 +933,12 @@ export default function RepositoriesPage() {
                           )}
                         </>
                       ) : (
-                        <p className="text-xs text-gray-600">unavailable</p>
+                        <p className="text-xs text-gray-500">unavailable</p>
                       )
                     ) : isRemoteRepo(repo.path) ? (
-                      <p className="text-xs text-gray-600">—</p>
+                      <p className="text-xs text-gray-500">—</p>
                     ) : (
-                      <p className="text-xs text-gray-600 animate-pulse">loading…</p>
+                      <p className="text-xs text-gray-500 animate-pulse">loading…</p>
                     )}
                   </div>
                   <Button
@@ -1121,7 +1121,7 @@ export default function RepositoriesPage() {
               <div className="space-y-3">
                 <input
                   type="text"
-                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
+                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500"
                   value={editPath}
                   onChange={(e) => setEditPath(e.target.value)}
                   spellCheck={false}
@@ -1204,7 +1204,7 @@ export default function RepositoriesPage() {
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${editPath ? "text-gray-300" : "text-gray-600"}`}>
+                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${editPath ? "text-gray-300" : "text-gray-500"}`}>
                   {editPath || "No folder selected"}
                 </span>
                 <Button
@@ -1596,7 +1596,7 @@ export default function RepositoriesPage() {
             </div>
             {pathMode === "local" ? (
               <div className="flex items-center gap-2">
-                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-600"}`}>
+                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-500"}`}>
                   {form.path || "No folder selected"}
                 </span>
                 <Button type="button" variant="secondary" size="sm" onClick={pickFolder}>
@@ -1607,7 +1607,7 @@ export default function RepositoriesPage() {
               <div className="space-y-3">
                 <input
                   type="text"
-                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-600"
+                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500"
                   value={form.path}
                   onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
                   placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
@@ -1759,7 +1759,7 @@ export default function RepositoriesPage() {
             <p className="text-sm text-gray-300 mb-3">
               Stopped after {indexAllDoneCount} of {indexAllTotal} snapshots.
             </p>
-            <p className="text-xs text-gray-600 mb-4">
+            <p className="text-xs text-gray-500 mb-4">
               The remaining snapshots were not indexed. You can resume later from this repository.
             </p>
             <div className="flex justify-end">
@@ -1773,7 +1773,7 @@ export default function RepositoriesPage() {
                 <p className="text-sm text-gray-300 mb-3">
                   {indexAllQueued ? "Queued — waiting for other indexing to finish…" : "Starting…"}
                 </p>
-                <p className="text-xs text-gray-600 mb-4">
+                <p className="text-xs text-gray-500 mb-4">
                   Only one repository is indexed at a time. This batch will start automatically
                   as soon as the one ahead of it finishes.
                 </p>
@@ -1789,7 +1789,7 @@ export default function RepositoriesPage() {
                     style={{ width: `${(indexAllDoneCount / indexAllTotal) * 100}%` }}
                   />
                 </div>
-                <p className="text-xs text-gray-600 mb-4">
+                <p className="text-xs text-gray-500 mb-4">
                   Snapshots are indexed one at a time. You can close this and keep browsing —
                   indexing continues in the background.
                 </p>

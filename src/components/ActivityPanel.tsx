@@ -71,7 +71,7 @@ function SectionHeading({ children }: { children: string }) {
 }
 
 function EmptyRow({ children }: { children: string }) {
-  return <p className="px-4 pb-3 text-xs text-gray-600 italic">{children}</p>;
+  return <p className="px-4 pb-3 text-xs text-gray-500 italic">{children}</p>;
 }
 
 function SuccessIcon() {
@@ -446,7 +446,7 @@ export default function ActivityPanel() {
                     <div key={batch.operationId} className="flex items-center justify-between gap-2">
                       <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
                         Indexing snapshots{repoName ? ` — ${repoName}` : ""}{" "}
-                        <span className="text-xs text-gray-600">· {stopping ? "Stopping…" : "Queued"}</span>
+                        <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
                       </p>
                       <button
                         onClick={async () => {
@@ -479,7 +479,7 @@ export default function ActivityPanel() {
                     <div key={mirror.operationId} className="flex items-center justify-between gap-2">
                       <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
                         Mirroring{repoName ? ` to ${repoName}` : ""}{" "}
-                        <span className="text-xs text-gray-600">· {stopping ? "Stopping…" : "Queued"}</span>
+                        <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
                       </p>
                       <button
                         onClick={async () => {

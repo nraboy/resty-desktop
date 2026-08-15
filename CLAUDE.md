@@ -236,6 +236,10 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `reset_app` also best-effort clears the OS autostart entry, not just DB tables
 - The Windows `Run` registry value `auto-launch` writes is unquoted — not fixable from app code
 - `react-router-dom` stays on 6.x — its two audit advisories are unreachable in this app
+- Dark-mode `--tw-gray-500` (`139 148 163`) and light-mode `--tw-gray-500` (`97 112 135`) are
+  deliberately not stock Tailwind values — both tuned so gray-500 text passes WCAG AA (≥4.5:1)
+  on every surface it sits on, enforced by `src/lib/contrast.test.ts`; bare text never goes
+  darker than `text-gray-500` (gray-600/700 are border/divider colors only) — see docs/frontend.md
 
 ## Import / Export
 

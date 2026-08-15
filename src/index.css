@@ -16,7 +16,7 @@
     --tw-gray-200: 229 231 235;
     --tw-gray-300: 209 213 219;
     --tw-gray-400: 156 163 175;
-    --tw-gray-500: 107 114 128;
+    --tw-gray-500: 139 148 163;  /* tuned for ≥4.5:1 on gray-950/900/800 — see src/lib/contrast.test.ts */
     --tw-gray-600: 75 85 99;
     --tw-gray-700: 55 65 81;
     --tw-gray-800: 31 41 55;
@@ -53,7 +53,7 @@
     --tw-gray-200: 30 41 59;      /* strong text */
     --tw-gray-300: 51 65 85;      /* body text */
     --tw-gray-400: 71 85 105;     /* secondary text — ~7.8:1 on bg ✓ */
-    --tw-gray-500: 100 116 139;   /* muted text — ~4.6:1 on bg ✓ */
+    --tw-gray-500: 97 112 135;    /* muted text — ≥4.5:1 on page and panel bg ✓ */
     --tw-gray-600: 148 163 184;   /* subtle borders/dividers */
     --tw-gray-700: 203 213 225;   /* light borders */
     --tw-gray-800: 226 232 240;   /* card/input bg */
@@ -95,7 +95,7 @@
       --tw-gray-200: 30 41 59;
       --tw-gray-300: 51 65 85;
       --tw-gray-400: 71 85 105;
-      --tw-gray-500: 100 116 139;
+      --tw-gray-500: 97 112 135;
       --tw-gray-600: 148 163 184;
       --tw-gray-700: 203 213 225;
       --tw-gray-800: 226 232 240;

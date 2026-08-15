@@ -141,7 +141,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
         {!isSetup && (
           <div className="mt-5 text-center">
             <button
-              className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
+              className="text-xs text-gray-500 hover:text-gray-400 transition-colors"
               onClick={openResetModalFn}
             >
               Forgot your password?
@@ -150,7 +150,7 @@ export default function AuthPage({ mode, onSuccess, onSubmit, onReset, openReset
         )}
 
         {isSetup && (
-          <p className="mt-6 text-xs text-gray-600 text-center">
+          <p className="mt-6 text-xs text-gray-500 text-center">
             Your master password encrypts all repository passwords using Argon2id + AES-256-GCM.
             It is never stored — if forgotten, the app must be reset.
           </p>

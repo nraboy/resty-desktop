@@ -246,7 +246,7 @@ export default function BrowsePage() {
                   <button
                     onClick={() => handleRemoveTag(tag)}
                     disabled={repo.readOnly}
-                    className="text-gray-600 hover:text-red-300 transition-colors leading-none disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-600"
+                    className="text-gray-400 hover:text-red-300 transition-colors leading-none disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400"
                     title={repo.readOnly ? "This repository is read-only" : "Remove tag"}
                   >
                     ×
@@ -256,7 +256,7 @@ export default function BrowsePage() {
               <button
                 onClick={() => { setNewTag(""); setShowTagModal(true); }}
                 disabled={repo.readOnly}
-                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-600 disabled:hover:border-gray-700"
+                className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-400 hover:text-gray-400 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:border-gray-700"
                 title={repo.readOnly ? "This repository is read-only" : "Add tag"}
               >
                 + tag
@@ -264,7 +264,7 @@ export default function BrowsePage() {
             </div>
           </div>
         )}
-        <p className="text-xs text-gray-600 font-mono mt-0.5">{snapshotId}</p>
+        <p className="text-xs text-gray-500 font-mono mt-0.5">{snapshotId}</p>
       </div>
 
       <div className="flex items-center gap-1 mb-4 text-sm text-gray-400 justify-between">
@@ -275,7 +275,7 @@ export default function BrowsePage() {
           if (!p) return null;
           return (
             <span key={i} className="contents">
-              <span className="text-gray-700">/</span>
+              <span className="text-gray-500">/</span>
               <button
                 className="hover:text-gray-200 transition-colors"
                 onClick={() => { setPathStack(pathStack.slice(0, i)); setSelectedPaths(new Set()); load(p); }}
@@ -287,7 +287,7 @@ export default function BrowsePage() {
         })}
         {currentPath && (
           <>
-            <span className="text-gray-700">/</span>
+            <span className="text-gray-500">/</span>
             <span className="text-gray-300">{currentPath.split("/").pop()}</span>
           </>
         )}

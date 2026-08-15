@@ -263,7 +263,7 @@ export default function SchedulesPage() {
                   {" · "}
                   {sched.planIds.length} {sched.planIds.length === 1 ? "plan" : "plans"}
                 </p>
-                <div className="flex gap-4 mt-1 text-xs text-gray-600">
+                <div className="flex gap-4 mt-1 text-xs text-gray-500">
                   <span>Last run: {formatTimestamp(sched.lastRunAt)}</span>
                   <span>Next run: {sched.enabled
                     ? (isOverdue(sched.nextRunAt)

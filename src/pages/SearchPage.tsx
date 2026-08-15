@@ -244,7 +244,7 @@ export default function SearchPage() {
           <div className="w-full">
             <ProgressBar indeterminate />
           </div>
-          <p className="text-xs text-gray-600">You can navigate away — indexing continues in the background.</p>
+          <p className="text-xs text-gray-500">You can navigate away — indexing continues in the background.</p>
         </div>
       )}
 
@@ -273,7 +273,7 @@ export default function SearchPage() {
           )}
 
           {!searching && !query.trim() && (
-            <div className="flex flex-col items-center gap-2 py-16 text-gray-600">
+            <div className="flex flex-col items-center gap-2 py-16 text-gray-500">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.2} className="w-12 h-12">
                 <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 15.803m10.607 0A7.5 7.5 0 0 0 5.196 15.803" />
               </svg>
@@ -282,7 +282,7 @@ export default function SearchPage() {
           )}
 
           {!searching && searched && query.trim() && results.length === 0 && (
-            <div className="flex flex-col items-center gap-2 py-16 text-gray-600">
+            <div className="flex flex-col items-center gap-2 py-16 text-gray-500">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8">
                 <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
               </svg>
@@ -309,16 +309,16 @@ export default function SearchPage() {
                         <FileIcon type={entry.type} />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-baseline gap-1 min-w-0">
-                            <span className="text-xs text-gray-600 font-mono truncate shrink-0 max-w-[50%]">{dirPart}</span>
+                            <span className="text-xs text-gray-500 font-mono truncate shrink-0 max-w-[50%]">{dirPart}</span>
                             <span className="text-sm text-gray-200 font-medium truncate">{entry.name}</span>
                           </div>
                         </div>
-                        <div className="flex items-center gap-4 shrink-0 text-xs text-gray-600">
+                        <div className="flex items-center gap-4 shrink-0 text-xs text-gray-500">
                           <span className="w-16 shrink-0 text-right tabular-nums whitespace-nowrap">{formatSize(entry.size)}</span>
                           <span className="hidden sm:inline w-40 shrink-0 text-right tabular-nums whitespace-nowrap">
                             {entry.mtime ? formatDate(entry.mtime) : "—"}
                           </span>
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-700 group-hover:text-gray-400 transition-colors flex-shrink-0">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-500 group-hover:text-gray-400 transition-colors flex-shrink-0">
                             <path fillRule="evenodd" d="M8.22 5.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L11.94 10 8.22 6.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
           </svg>
                         </div>

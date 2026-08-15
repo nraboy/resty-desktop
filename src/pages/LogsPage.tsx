@@ -107,14 +107,14 @@ export default function LogsPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(entry.startedAt)}</td>
-                        <td className="px-4 py-3 text-gray-300">{entry.planName ?? <span className="text-gray-600 italic">Manual</span>}</td>
+                        <td className="px-4 py-3 text-gray-300">{entry.planName ?? <span className="text-gray-500 italic">Manual</span>}</td>
                         <td className="px-4 py-3 text-gray-400">{entry.repoName ?? entry.repoId}</td>
                         <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatDuration(entry.durationSeconds, true)}</td>
                         <td className="px-4 py-3 text-gray-400">{entry.filesNew.toLocaleString()}</td>
                         <td className="px-4 py-3 text-gray-400">{entry.filesChanged.toLocaleString()}</td>
                         <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatBytes(entry.bytesAdded)}</td>
                         <td className="px-4 py-3 font-mono text-blue-400 text-xs">
-                          {entry.snapshotId ? entry.snapshotId.slice(0, 8) : <span className="text-gray-600">—</span>}
+                          {entry.snapshotId ? entry.snapshotId.slice(0, 8) : <span className="text-gray-500">—</span>}
                         </td>
                       </tr>
                       {expanded === entry.id && realError && (

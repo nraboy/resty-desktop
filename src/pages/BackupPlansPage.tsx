@@ -398,7 +398,7 @@ export default function BackupPlansPage() {
                   if (r.keepMonthly != null) parts.push(`${r.keepMonthly}mo`);
                   if (r.keepYearly != null) parts.push(`${r.keepYearly}y`);
                   return parts.length > 0 ? (
-                    <p className="text-xs text-gray-600 mt-0.5 truncate">
+                    <p className="text-xs text-gray-500 mt-0.5 truncate">
                       Retention: {parts.join(" · ")}
                     </p>
                   ) : null;

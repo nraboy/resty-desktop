@@ -210,7 +210,7 @@ export default function ScheduleEditPage() {
                     type="checkbox"
                     checked={selectedPlanIds.includes(plan.id)}
                     onChange={() => togglePlan(plan.id)}
-                    className="rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-900"
+                    className="rounded border-gray-600 bg-gray-800 text-blue-400 focus:ring-blue-500 focus:ring-offset-gray-900"
                   />
                   <div>
                     <div className="flex items-center gap-2">
@@ -401,7 +401,7 @@ export default function ScheduleEditPage() {
               )}
 
               {effectiveCronExpr && (
-                <p className="text-xs text-gray-600 font-mono">
+                <p className="text-xs text-gray-500 font-mono">
                   cron: <span className="text-gray-400">{effectiveCronExpr}</span>
                 </p>
               )}
@@ -414,9 +414,9 @@ export default function ScheduleEditPage() {
                   value={cronExpr}
                   onChange={(e) => setCronExpr(e.target.value)}
                   placeholder="0 2 * * *"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />
-                <p className="text-xs text-gray-600 mt-1.5">
+                <p className="text-xs text-gray-500 mt-1.5">
                   5-field format: <span className="font-mono text-gray-500">minute hour day-of-month month day-of-week</span>
                 </p>
               </div>

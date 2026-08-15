@@ -383,7 +383,7 @@ export default function BackupPlanEditPage() {
         </div>
 
         {paths.length === 0 ? (
-          <p className="text-sm text-gray-600 text-center py-4">
+          <p className="text-sm text-gray-500 text-center py-4">
             No paths selected. Add a file or folder to back up.
           </p>
         ) : (
@@ -542,7 +542,7 @@ export default function BackupPlanEditPage() {
             )}
 
             {excludeItems.length === 0 && (
-              <p className="text-sm text-gray-600 text-center py-3">
+              <p className="text-sm text-gray-500 text-center py-3">
                 No exclusions. Files and folders added above will be skipped during backup.
               </p>
             )}
@@ -558,7 +558,7 @@ export default function BackupPlanEditPage() {
               onChange={(e) => setExcludeText(e.target.value)}
               placeholder={"*.log\nnode_modules/\n# ignore temp files\n*.tmp"}
               rows={6}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-y"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-y"
               spellCheck={false}
             />
           </>
@@ -633,7 +633,7 @@ export default function BackupPlanEditPage() {
         )}
 
         {excludeIfPresent.length === 0 && (
-          <p className="text-sm text-gray-600 text-center py-3">
+          <p className="text-sm text-gray-500 text-center py-3">
             No marker files. Directories containing a file added above will have their contents skipped.
           </p>
         )}
@@ -673,7 +673,7 @@ export default function BackupPlanEditPage() {
                 value={value}
                 onChange={(e) => set(e.target.value)}
                 placeholder="—"
-                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
               />
               <span className="text-xs text-gray-500">{unit}</span>
             </div>
@@ -700,7 +700,7 @@ export default function BackupPlanEditPage() {
                 value={value}
                 onChange={(e) => set(e.target.value)}
                 placeholder="—"
-                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
               />
               <span className="text-xs text-gray-500">KiB/s</span>
             </div>
