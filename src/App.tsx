@@ -115,6 +115,16 @@ export default function App() {
   // or menu bar's "Lock Now" (see lib.rs's tray_lock_{gen} item), which must NOT. Without this,
   // locking from the tray while hidden would immediately pop the window back open.
   const hasBeenUnlockedRef = useRef(false);
+  // Whether the Activity drawer (ActivityPanel) is open — owned here so the Sidebar's "Activity"
+  // item and the panel's right-edge rail toggle the same drawer. Only rendered in the unlocked
+  // branch below; locking unmounts that branch, resetting it to closed (matching the panel's
+  // original always-closed-on-launch behavior).
+  const [activityOpen, setActivityOpen] = useState(false);
+  // Stable identities so ActivityPanel's outside-close effect (deps [open, onClose]) doesn't
+  // re-subscribe its document listener on every App render.
+  const openActivity = useCallback(() => setActivityOpen(true), []);
+  const closeActivity = useCallback(() => setActivityOpen(false), []);
+  const toggleActivity = useCallback(() => setActivityOpen((v) => !v), []);
 
   // Shared by the mount effect below and the "updateNotice" screen's Continue button, so both
   // paths land on the exact same success/failure handling.
@@ -286,7 +296,7 @@ export default function App() {
           <MenuEventHandler />
           <ActivityProvider>
             <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
-              <Sidebar onLock={handleLock} />
+              <Sidebar onLock={handleLock} activityOpen={activityOpen} onToggleActivity={toggleActivity} />
               <div className="flex-1 flex flex-col overflow-hidden">
                 {showVersionWarning && (
                   <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">
@@ -321,7 +331,7 @@ export default function App() {
                   </ErrorBoundary>
                 </main>
               </div>
-              <ActivityPanel />
+              <ActivityPanel open={activityOpen} onOpen={openActivity} onClose={closeActivity} />
             </div>
           </ActivityProvider>
         </BrowserRouter>

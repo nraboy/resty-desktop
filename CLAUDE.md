@@ -47,8 +47,8 @@ src/
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
-    Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu)
-    ActivityPanel.tsx     # Right-side drawer surfacing background activity (indexing, scheduler backups, stats, mirrors) — see docs/concurrency.md
+    Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); non-route "Activity" item (between Schedules and Logs) toggles the Activity drawer, with a live task-count badge from activeTaskCount()
+    ActivityPanel.tsx     # Right-side drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's "Activity" item or the right-edge rail, open state owned by App.tsx — see docs/concurrency.md
   lib/
     types.ts              # Shared TS types (Repository, Snapshot, BackupPlan, etc.); isRemoteRepo() helper
     backends.ts           # detectBackend + credential hints for S3/B2/REST — see docs/restic.md

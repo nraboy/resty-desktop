@@ -120,7 +120,7 @@ export interface ActiveScheduledBackup {
   backupFinished: boolean;
 }
 
-interface ActivityState {
+export interface ActivityState {
   /** Background auto-indexing progress; null when auto-indexing is off or fully caught up. */
   indexing: { cached: number; total: number } | null;
   /** The scheduler-triggered backup currently running, if any. Manual/"Run Now" backups never
@@ -185,6 +185,48 @@ interface ActivityState {
   setStatsRefreshAllProgress: (
     progress: { current: number; total: number } | null | ((prev: { current: number; total: number } | null) => { current: number; total: number } | null)
   ) => void;
+}
+
+/** Filters activeSnapshotIndexes down to standalone entries — suppresses any entry whose repo
+ *  already has an "Index All" batch (running or queued), since a batch's own per-snapshot events
+ *  are indistinguishable on the wire (see ActiveSnapshotIndex's doc comment). Formerly inlined in
+ *  ActivityPanel; extracted so the sidebar badge and the panel render the same set. */
+export function standaloneSnapshotIndexes(
+  activeIndexBatches: ActiveIndexBatch[],
+  activeSnapshotIndexes: ActiveSnapshotIndex[]
+): ActiveSnapshotIndex[] {
+  const batchRepoIds = new Set(activeIndexBatches.map((b) => b.repoId));
+  return activeSnapshotIndexes.filter((s) => !batchRepoIds.has(s.repoId));
+}
+
+/** The fields activeTaskCount reads — a Pick so callers (and unit tests) don't have to supply
+ *  the setter/functions in the full ActivityState. */
+export type ActiveTaskCountState = Pick<ActivityState,
+  "indexing" | "activeBackup" | "activePrune" | "statsRefreshing" | "activeIndexBatches"
+  | "activeSnapshotIndexes" | "activeMirrors" | "statsRefreshAllProgress">;
+
+/** Number of background tasks the Activity panel surfaces — drives the Sidebar badge chip, the
+ *  rail's activity dot, and the panel's empty-state, from one shared computation so they can't
+ *  drift. Deliberate semantics:
+ *  - Counts QUEUED index batches and mirrors too (not just running ones), matching the panel's
+ *    original `hasActive` — queued work is still work the user started. The badge can therefore
+ *    read higher than the visible "Active Tasks" row count while queued rows sit under
+ *    "Up Next"; that asymmetry is intended.
+ *  - Stats counts as 1 when statsRefreshAllProgress is set, else statsRefreshing.length — the
+ *    panel renders these two exclusively (RepositoriesPage's batch loop leaves the last repoId
+ *    in flight while its progress counter is set), so never sum them.
+ *  - statsFailed is NOT counted — a failure marker is not activity.
+ *  - upcoming / recentLogs are not activity. */
+export function activeTaskCount(state: ActiveTaskCountState): number {
+  return (
+    (state.indexing != null ? 1 : 0) +
+    (state.activeBackup != null ? 1 : 0) +
+    (state.activePrune != null ? 1 : 0) +
+    state.activeIndexBatches.length +
+    state.activeMirrors.length +
+    standaloneSnapshotIndexes(state.activeIndexBatches, state.activeSnapshotIndexes).length +
+    (state.statsRefreshAllProgress != null ? 1 : state.statsRefreshing.length)
+  );
 }
 
 /** A manual "Index All" batch — either actively indexing or still queued waiting its turn on

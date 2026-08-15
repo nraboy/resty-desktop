@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, reduceMirror, type StatsOpsState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, reduceMirror, activeTaskCount, standaloneSnapshotIndexes, type StatsOpsState, type ActiveTaskCountState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -475,5 +475,130 @@ describe("reduceMirror", () => {
     expect(state.has("opA")).toBe(false);
     expect(state.has("opC")).toBe(true);
     expect(state.get("opC")).toEqual({ operationId: "opC", repoId: "repoB", status: "queued" });
+  });
+});
+
+describe("activeTaskCount", () => {
+  const empty: ActiveTaskCountState = {
+    indexing: null,
+    activeBackup: null,
+    activePrune: null,
+    statsRefreshing: [],
+    activeIndexBatches: [],
+    activeSnapshotIndexes: [],
+    activeMirrors: [],
+    statsRefreshAllProgress: null,
+  };
+  const buildState = (overrides: Partial<ActiveTaskCountState>): ActiveTaskCountState => ({ ...empty, ...overrides });
+
+  it("counts zero when nothing is in flight", () => {
+    expect(activeTaskCount(buildState({}))).toBe(0);
+  });
+
+  it("counts indexing as one task", () => {
+    expect(activeTaskCount(buildState({ indexing: { cached: 3, total: 10 } }))).toBe(1);
+  });
+
+  it("counts a scheduler backup as one task", () => {
+    expect(activeTaskCount(buildState({
+      activeBackup: { runId: "r1", currentOperationId: "r1", planId: "p1", planName: "Nightly", progress: null, phase: "backup", backupFinished: false },
+    }))).toBe(1);
+  });
+
+  it("counts a prune as one task", () => {
+    expect(activeTaskCount(buildState({
+      activePrune: { operationId: "op1", itemsDone: 0, itemsTotal: 3, repoLabel: "repoA" },
+    }))).toBe(1);
+  });
+
+  it("counts a running index batch as one task", () => {
+    expect(activeTaskCount(buildState({
+      activeIndexBatches: [{ operationId: "op1", repoId: "repoA", itemsDone: 2, itemsTotal: 5, status: "running" }],
+    }))).toBe(1);
+  });
+
+  it("counts a queued index batch too — queued work is still work the user started", () => {
+    expect(activeTaskCount(buildState({
+      activeIndexBatches: [{ operationId: "op1", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "queued" }],
+    }))).toBe(1);
+  });
+
+  it("counts a mirror as one task", () => {
+    expect(activeTaskCount(buildState({
+      activeMirrors: [{ operationId: "op1", repoId: "repoB", status: "queued" }],
+    }))).toBe(1);
+  });
+
+  it("counts a standalone snapshot index as one task", () => {
+    expect(activeTaskCount(buildState({
+      activeSnapshotIndexes: [{ operationId: "op1", repoId: "repoA", snapshotId: "abc12345" }],
+    }))).toBe(1);
+  });
+
+  it("counts one per refreshing repoId", () => {
+    expect(activeTaskCount(buildState({ statsRefreshing: ["repoA", "repoB"] }))).toBe(2);
+  });
+
+  it("counts an all-repos stats refresh as exactly one task", () => {
+    expect(activeTaskCount(buildState({ statsRefreshAllProgress: { current: 1, total: 4 } }))).toBe(1);
+  });
+
+  it("never double-counts stats: batch progress supersedes the in-flight repoId", () => {
+    // RepositoriesPage's Refresh All loop leaves the current repo's id in statsRefreshing while
+    // statsRefreshAllProgress is set — the panel renders these exclusively, so the count must too.
+    expect(activeTaskCount(buildState({
+      statsRefreshing: ["repoA"],
+      statsRefreshAllProgress: { current: 1, total: 4 },
+    }))).toBe(1);
+  });
+
+  it("sums independent contributors", () => {
+    expect(activeTaskCount(buildState({
+      indexing: { cached: 1, total: 9 },
+      activePrune: { operationId: "opP", itemsDone: 0, itemsTotal: 0, repoLabel: null },
+      activeMirrors: [
+        { operationId: "opM1", repoId: "repoB", status: "running" },
+        { operationId: "opM2", repoId: "repoC", status: "queued" },
+      ],
+      statsRefreshing: ["repoA"],
+    }))).toBe(5);
+  });
+
+  it("suppresses a standalone snapshot index whose repo has a running batch, counting the batch only", () => {
+    expect(activeTaskCount(buildState({
+      activeIndexBatches: [{ operationId: "opB", repoId: "repoA", itemsDone: 1, itemsTotal: 4, status: "running" }],
+      activeSnapshotIndexes: [{ operationId: "opS", repoId: "repoA", snapshotId: "abc12345" }],
+    }))).toBe(1);
+  });
+
+  it("suppresses a standalone snapshot index against a queued batch as well", () => {
+    expect(activeTaskCount(buildState({
+      activeIndexBatches: [{ operationId: "opB", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "queued" }],
+      activeSnapshotIndexes: [{ operationId: "opS", repoId: "repoA", snapshotId: "abc12345" }],
+    }))).toBe(1);
+  });
+
+  it("keeps a standalone snapshot index whose repo has no batch", () => {
+    expect(activeTaskCount(buildState({
+      activeIndexBatches: [{ operationId: "opB", repoId: "repoB", itemsDone: 1, itemsTotal: 4, status: "running" }],
+      activeSnapshotIndexes: [{ operationId: "opS", repoId: "repoA", snapshotId: "abc12345" }],
+    }))).toBe(2);
+  });
+});
+
+describe("standaloneSnapshotIndexes", () => {
+  it("filters entries whose repoId matches any batch, running or queued", () => {
+    const batches = [
+      { operationId: "op1", repoId: "repoA", itemsDone: 0, itemsTotal: 0, status: "running" as const },
+      { operationId: "op2", repoId: "repoB", itemsDone: 0, itemsTotal: 0, status: "queued" as const },
+    ];
+    const standalone = [
+      { operationId: "opS1", repoId: "repoA", snapshotId: "aaaa1111" }, // suppressed (running batch)
+      { operationId: "opS2", repoId: "repoB", snapshotId: "bbbb2222" }, // suppressed (queued batch)
+      { operationId: "opS3", repoId: "repoC", snapshotId: "cccc3333" }, // kept
+    ];
+    expect(standaloneSnapshotIndexes(batches, standalone)).toEqual([
+      { operationId: "opS3", repoId: "repoC", snapshotId: "cccc3333" },
+    ]);
   });
 });

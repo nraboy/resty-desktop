@@ -57,10 +57,12 @@
 // with a transform so it slides both in and out; it's just off-screen + non-interactive when
 // closed.
 //
-// Open/closed state is self-contained (toggled here, always closed on launch) so mounting
-// this once in App.tsx doesn't require every page to grow a toolbar toggle button.
+// Open/closed state is owned by App.tsx (passed as props, always closed on launch) so the
+// Sidebar's "Activity" item and this panel's rail toggle the same drawer — locking unmounts the
+// unlocked branch and resets it to closed, matching the panel's original always-closed-on-launch
+// behavior.
 import { useEffect, useRef, useState } from "react";
-import { useActivity } from "../lib/activity";
+import { useActivity, activeTaskCount, standaloneSnapshotIndexes } from "../lib/activity";
 import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative, isOverdue } from "../lib/format";
@@ -83,12 +85,23 @@ function StopIcon() {
   );
 }
 
-export default function ActivityPanel() {
+interface ActivityPanelProps {
+  /** Whether the drawer is shown. Owned by App.tsx so the Sidebar's "Activity" item and the
+   *  rail toggle the same drawer. */
+  open: boolean;
+  /** Rail click — opens only (the rail sits under the drawer overlay when open, so it can't
+   *  close; the sidebar item and the drawer's own chevron handle that). */
+  onOpen: () => void;
+  /** Drawer chevron + outside-click. Must be referentially stable (App passes useCallback'd
+   *  handlers) — the outside-click effect below depends on it. */
+  onClose: () => void;
+}
+
+export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelProps) {
   const {
     indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
     activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, statsRefreshAllProgress,
   } = useActivity();
-  const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
 
   // A batch is "queued" (waiting its turn on the backend's batch_turn mutex — see
@@ -100,10 +113,10 @@ export default function ActivityPanel() {
 
   // A batch's own per-snapshot progress events are indistinguishable on the wire from a
   // standalone "Index Snapshot"/"Index Now" call (see ActiveSnapshotIndex's doc comment in
-  // activity.tsx) — so suppress any standalone entry whose repo already has a batch running,
-  // rather than rendering a redundant row alongside the batch's own "X / N snapshots" bar.
-  const batchRepoIds = new Set(activeIndexBatches.map((b) => b.repoId));
-  const standaloneSnapshotIndexes = activeSnapshotIndexes.filter((s) => !batchRepoIds.has(s.repoId));
+  // activity.tsx) — so suppress any standalone entry whose repo already has a batch (running or
+  // queued), rather than rendering a redundant row alongside the batch's own bar. Shared with
+  // the Sidebar badge via the helper so the two can't drift.
+  const standaloneIndexes = standaloneSnapshotIndexes(activeIndexBatches, activeSnapshotIndexes);
 
   // Same "queued" vs "running" split as index batches above — a mirror is "queued" until it
   // wins its turn on the backend's MirrorHandle::turn mutex and its task event flips to
@@ -111,10 +124,12 @@ export default function ActivityPanel() {
   const runningMirrors = activeMirrors.filter((m) => m.status === "running");
   const queuedMirrors = activeMirrors.filter((m) => m.status === "queued");
 
-  const hasActive =
-    indexing != null || activeBackup != null || activePrune != null || statsRefreshing.length > 0 ||
-    activeIndexBatches.length > 0 || standaloneSnapshotIndexes.length > 0 ||
-    activeMirrors.length > 0 || statsRefreshAllProgress != null;
+  // Shared computation (activity.tsx) — the Sidebar's badge chip and this panel's empty-state
+  // derive from the same counter, so they can't disagree. Includes queued batches/mirrors.
+  const hasActive = activeTaskCount({
+    indexing, activeBackup, activePrune, statsRefreshing, activeIndexBatches,
+    activeSnapshotIndexes, activeMirrors, statsRefreshAllProgress,
+  }) > 0;
 
   // Cancel affordance for a scheduler-triggered backup — cancelBackup() already kills
   // whatever's in BackupHandle.child regardless of whether it was started manually or by the
@@ -163,18 +178,22 @@ export default function ActivityPanel() {
   useEffect(() => {
     if (!open) return;
     const handleMouseDown = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setOpen(false);
+      // The Sidebar's Activity toggle owns its own clicks — without this guard, its mousedown
+      // would close the drawer here and its subsequent click would toggle it right back open.
+      const target = e.target as Element | null;
+      if (target?.closest?.("[data-activity-toggle]")) return;
+      if (panelRef.current && !panelRef.current.contains(target)) {
+        onClose();
       }
     };
     document.addEventListener("mousedown", handleMouseDown);
     return () => document.removeEventListener("mousedown", handleMouseDown);
-  }, [open]);
+  }, [open, onClose]);
 
   return (
     <>
       <button
-        onClick={() => setOpen(true)}
+        onClick={onOpen}
         title="Show activity"
         className="flex-shrink-0 w-6 h-full bg-gray-900 border-l border-gray-800 hover:bg-gray-800 transition-colors flex items-center justify-center relative"
       >
@@ -195,7 +214,7 @@ export default function ActivityPanel() {
         <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
           <h2 className="text-sm font-bold text-gray-50 tracking-tight">Task Activity</h2>
           <button
-            onClick={() => setOpen(false)}
+            onClick={onClose}
             title="Hide activity"
             className="text-gray-500 hover:text-gray-300 transition-colors"
           >
@@ -258,7 +277,7 @@ export default function ActivityPanel() {
                   </div>
                 );
               })}
-              {standaloneSnapshotIndexes.map((s) => {
+              {standaloneIndexes.map((s) => {
                 const repoName = indexBatchRepoNames[s.repoId];
                 const shortId = s.snapshotId.slice(0, 8);
                 return (
