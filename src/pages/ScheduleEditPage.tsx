@@ -423,6 +423,10 @@ export default function ScheduleEditPage() {
           <div>
             <p className="text-sm font-medium text-gray-300">Enabled</p>
             <p className="text-xs text-gray-500">Schedule will run automatically when active.</p>
+            <p className="text-xs text-gray-500 mt-1">
+              If a run is missed while the app is closed, it runs once automatically the next time
+              the app is started and unlocked.
+            </p>
           </div>
           <button
             onClick={() => setEnabled((v) => !v)}
