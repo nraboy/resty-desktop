@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { listBackupHistory } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import type { BackupHistoryEntry } from "../lib/types";
@@ -10,6 +11,7 @@ import { CheckCircleIcon, XCircleIcon, MinusCircleIcon } from "../components/ico
 const PAGE_SIZE = 10;
 
 export default function LogsPage() {
+  const navigate = useNavigate();
   const [entries, setEntries] = useState<BackupHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -109,7 +111,20 @@ export default function LogsPage() {
                         <td className="px-4 py-3 text-gray-400">{entry.filesChanged.toLocaleString()}</td>
                         <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatBytes(entry.bytesAdded)}</td>
                         <td className="px-4 py-3 font-mono text-blue-400 text-xs">
-                          {entry.snapshotId ? entry.snapshotId.slice(0, 8) : <span className="text-gray-500">—</span>}
+                          {entry.snapshotId ? (
+                            <button
+                              title="Browse files"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigate(`/snapshots/${entry.repoId}/${entry.snapshotId}/browse`);
+                              }}
+                              className="hover:underline"
+                            >
+                              {entry.snapshotId.slice(0, 8)}
+                            </button>
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
                         </td>
                       </tr>
                       {expanded === entry.id && realError && (

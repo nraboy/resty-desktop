@@ -619,7 +619,22 @@ export default function SnapshotsPage() {
                         />
                       </td>
                     )}
-                    <td className="px-4 py-3 font-mono text-blue-400 text-xs">{snap.short_id}</td>
+                    <td className="px-4 py-3 font-mono text-blue-400 text-xs">
+                      {!selectMode ? (
+                        <button
+                          title="Browse files"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigate(`/snapshots/${repoId}/${snap.id}/browse`, { state: { snapshot: snap } });
+                          }}
+                          className="hover:underline"
+                        >
+                          {snap.short_id}
+                        </button>
+                      ) : (
+                        snap.short_id
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
                     <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
                     <td className="px-4 py-3 text-gray-400 max-w-xs">
