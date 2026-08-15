@@ -209,6 +209,12 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
 - `gpu_compat::apply()`'s NVIDIA+Wayland workaround is gated, not applied unconditionally
 - Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature, not the default `gtk3` one — `rfd` silently reverts to GTK if `gtk3` is enabled anywhere in the dependency graph, so don't add it back
+- On Windows only, the native menu bar has no separate "Resty Desktop" app submenu — it's folded
+  into `File` (Settings/Lock Now prepended, "Exit" — not "Quit Resty Desktop" — pinned to the
+  bottom via `MenuState.app_submenu` being an `Arc`-cloned handle to `file_submenu`), to kill a
+  reported stack of three near-identical "Resty Desktop" labels (title bar, app submenu, sidebar
+  logo) unique to Windows' own-window menu bar; the window title itself stays as-is (blanking it
+  would blank Alt+Tab/taskbar labels too); macOS/Linux are untouched — see docs/decisions.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - `.app_name("resty-desktop")` on the autostart builder must not be dropped

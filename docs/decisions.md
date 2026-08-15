@@ -365,6 +365,26 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   (smb://, mtp://) from the portal's sidebar returns nothing, where the old GTK chooser would
   have resolved it to a local gvfs mount path. Backing up a gvfs mount with restic is a niche
   enough case not to block on.
+- **On Windows only, the native menu bar has no separate "Resty Desktop" app submenu — it's
+  folded into `File`, and the Quit item there reads "Exit" instead of "Quit Resty Desktop".**
+  Reported by a user: on Windows the window title bar, that submenu's label, and the sidebar
+  logo stack three near-identical "Resty Desktop" strings within a few dozen pixels, since
+  (unlike macOS) the app submenu renders inside the window's own menu bar rather than a
+  system-wide menu bar away from the window. The window title itself was deliberately left
+  alone — blanking it would also blank the Alt+Tab switcher and taskbar hover label, which read
+  the same title, and that regression is worse than the visual repetition it would "fix". `File`
+  becomes the unlocked layout's `Settings, Lock Now, New Repository, New Backup Plan, ──,
+  Import…, Export…, ──, Exit` (locked: `Reset Application, ──, Exit`) — implemented by making
+  `MenuState.app_submenu` an `Arc`-cloned handle to the *same* `file_submenu` on Windows (see the
+  comment at its assignment in `lib.rs`'s `setup()`), so `set_menu_auth_state`'s existing
+  `app_submenu.prepend(...)` calls need no platform-specific branching to land Settings/Lock Now
+  at the top of `File`; Windows carries two extra cfg-gated `MenuState` fields (`quit`,
+  `quit_separator`) purely to keep Exit re-pinned to the bottom of `File` across that function's
+  remove/re-add cycle. macOS and Linux are untouched — macOS keeps the separate app submenu (it
+  lives in the system menu bar, nowhere near the window), and Linux still has no native menu bar
+  at all (see the `xdg-portal` entry above's neighbor comment in `lib.rs` — menu bar, not dialog,
+  reference: search for "GTK dark-theme hint"). Don't "complete" this by giving macOS/Linux the
+  same fold, or by reintroducing a same-string Quit label on Windows — both were the reported bug.
 
 
 ## Linux GPU Compatibility
