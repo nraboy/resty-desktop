@@ -32,6 +32,10 @@ Portal-rendered right-click menu; auto-nudges onto screen; closes on Escape/clic
 
 Empty list placeholder
 
+### `icons.tsx`
+
+Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningCircle, SearchIcon, RestoreIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
+
 ### `ImportExportCard.tsx`
 
 Settings card: export all repos/plans/schedules to an encrypted .json file, and import (preview→confirm) as fresh copies; import modal tabs between Resty Export and Backrest config.json

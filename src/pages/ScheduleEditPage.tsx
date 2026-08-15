@@ -6,6 +6,7 @@ import type { BackupPlan, Repository, Schedule, ScheduleFrequency } from "../lib
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import { ChevronDownIcon } from "../components/icons";
 
 const DAYS_OF_WEEK = [
   { value: "0", label: "Sunday" },
@@ -313,9 +314,7 @@ export default function ScheduleEditPage() {
                         <option key={d.value} value={d.value}>{d.label}</option>
                       ))}
                     </select>
-                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
+                    <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   </div>
                 </div>
               )}
@@ -334,9 +333,7 @@ export default function ScheduleEditPage() {
                         <option key={d} value={String(d)}>{d}</option>
                       ))}
                     </select>
-                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
+                    <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   </div>
                 </div>
               )}
@@ -356,9 +353,7 @@ export default function ScheduleEditPage() {
                           <option key={h} value={String(h)}>{String(h).padStart(2, "0")}</option>
                         ))}
                       </select>
-                      <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
+                      <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     </div>
                     <span className="text-gray-500">:</span>
                     <div className="relative inline-block">
@@ -371,9 +366,7 @@ export default function ScheduleEditPage() {
                           <option key={m} value={String(m)}>{String(m).padStart(2, "0")}</option>
                         ))}
                       </select>
-                      <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
+                      <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     </div>
                   </div>
                 </div>
@@ -393,9 +386,7 @@ export default function ScheduleEditPage() {
                         <option key={m} value={String(m)}>:{String(m).padStart(2, "0")}</option>
                       ))}
                     </select>
-                    <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
+                    <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   </div>
                 </div>
               )}

@@ -11,6 +11,7 @@ import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
+import { SearchIcon, RestoreIcon } from "../components/icons";
 
 const FileIcon = ({ type }: { type: string }) => {
   if (type === "dir") {
@@ -323,9 +324,7 @@ export default function BrowsePage() {
             onClick={() => navigate(`/snapshots/${repoId}/${snapshotId}/search`, { state: { snapshot, fromBrowse: true, returnPath: currentPath, returnStack: pathStack } })}
             className="hover:text-gray-200 transition-colors"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-              <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
-            </svg>
+            <SearchIcon className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -424,10 +423,7 @@ export default function BrowsePage() {
                       onClick={() => { setRestoreTarget(entry); setTargetDir(defaultTargetDir); setStripLeadingPath(true); }}
                       className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                        <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
-                        <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
-                      </svg>
+                      <RestoreIcon className="w-4 h-4" />
                     </button>
                   </td>
                 </tr>

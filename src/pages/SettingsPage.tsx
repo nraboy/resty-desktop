@@ -11,6 +11,7 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import ImportExportCard from "../components/ImportExportCard";
+import { ChevronDownIcon, CheckIcon, WarningIcon } from "../components/icons";
 
 const THEMES: { value: Theme; label: string; description: string }[] = [
   { value: "system", label: "System", description: "Follow the OS appearance" },
@@ -606,9 +607,7 @@ export default function SettingsPage() {
               <option value="better">better — more compression, more CPU</option>
               <option value="max">max — maximum compression, highest CPU</option>
             </select>
-            <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+            <ChevronDownIcon className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           </div>
         </div>
         <div>
@@ -642,9 +641,7 @@ export default function SettingsPage() {
           <Button onClick={handleSave} loading={saving}>Save Settings</Button>
           {saved && (
             <span className="text-sm text-green-400 flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+              <CheckIcon className="w-4 h-4" />
               Saved
             </span>
           )}
@@ -662,16 +659,12 @@ export default function SettingsPage() {
           </p>
           {fdaStatus.granted ? (
             <div className="flex items-center gap-2 mb-3">
-              <svg className="w-4 h-4 text-green-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+              <CheckIcon className="w-4 h-4 text-green-400 flex-shrink-0" />
               <span className="text-sm text-green-400">Full Disk Access is enabled.</span>
             </div>
           ) : (
             <div className="flex items-start gap-2 mb-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg">
-              <svg className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-              </svg>
+              <WarningIcon className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
               <p className="text-xs text-amber-300">
                 <span className="font-medium">Full Disk Access is not enabled.</span>{" "}
                 Open <span className="font-medium">System Settings → Privacy &amp; Security → Full Disk Access</span>{" "}
@@ -723,9 +716,7 @@ export default function SettingsPage() {
             <Button type="submit" loading={changingPassword}>Change Password</Button>
             {passwordChanged && (
               <span className="text-sm text-green-400 flex items-center gap-1">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
+                <CheckIcon className="w-4 h-4" />
                 Password changed
               </span>
             )}
@@ -918,9 +909,7 @@ export default function SettingsPage() {
           </Button>
           {cleanedCount !== null && (
             <span className="text-sm text-green-400 flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+              <CheckIcon className="w-4 h-4" />
               {cleanedCount === 0
                 ? "No orphaned entries"
                 : `Removed ${cleanedCount} orphaned ${cleanedCount === 1 ? "entry" : "entries"}`}
@@ -928,17 +917,13 @@ export default function SettingsPage() {
           )}
           {cacheCleared && (
             <span className="text-sm text-green-400 flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+              <CheckIcon className="w-4 h-4" />
               Cleared
             </span>
           )}
           {compressed && (
             <span className="text-sm text-green-400 flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+              <CheckIcon className="w-4 h-4" />
               Compressed
             </span>
           )}

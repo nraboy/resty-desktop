@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
 import Button from "./components/Button";
+import { XIcon } from "./components/icons";
 import { ActivityProvider } from "./lib/activity";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import SnapshotsPage from "./pages/SnapshotsPage";
@@ -291,9 +292,7 @@ export default function App() {
                       className="flex-shrink-0 text-yellow-300 hover:text-yellow-100 transition-colors"
                       aria-label="Dismiss"
                     >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                      <XIcon className="w-4 h-4" />
                     </button>
                   </div>
                 )}

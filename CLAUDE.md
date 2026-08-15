@@ -42,6 +42,7 @@ src/
     Button.tsx            # primary/secondary/danger/ghost variants
     ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen
     EmptyState.tsx        # Empty list placeholder
+    icons.tsx             # Canonical glyph icons — single source for every icon used in more than one place; same meaning = same drawing
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog

@@ -8,6 +8,7 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import Spinner from "../components/Spinner";
+import { SearchIcon, CheckCircleIcon } from "../components/icons";
 
 type IndexState = "loading" | "not_indexed" | "ready";
 
@@ -435,9 +436,7 @@ export default function RepoSearchPage() {
 
           {!searching && searched && query.trim() && results.length === 0 && (
             <div className="flex flex-col items-center gap-2 py-16 text-gray-500">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8">
-                <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
-              </svg>
+              <SearchIcon className="w-8 h-8" />
               <p className="text-sm">No files matching <span className="text-gray-400 font-mono">"{query}"</span></p>
             </div>
           )}
@@ -551,9 +550,7 @@ export default function RepoSearchPage() {
         ) : (
           <div className="py-2">
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Indexing complete
             </div>
             <p className="text-sm text-gray-400 mb-4">

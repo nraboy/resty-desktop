@@ -7,6 +7,7 @@ import { formatTimestamp, isOverdue } from "../lib/format";
 import Button from "../components/Button";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+import { TrashIcon, PencilIcon, WarningIcon } from "../components/icons";
 
 export default function SchedulesPage() {
   const navigate = useNavigate();
@@ -191,9 +192,7 @@ export default function SchedulesPage() {
 
       {!trayEnabled && (
         <div className="mb-4 p-3 bg-amber-900/30 border border-amber-700 rounded-lg text-sm text-amber-300 flex items-start gap-2">
-          <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-          </svg>
+          <WarningIcon className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>
             System tray is disabled. Schedules will not run while the app window is closed.{" "}
             <button
@@ -286,10 +285,7 @@ export default function SchedulesPage() {
                     onClick={() => setDeleteTarget(sched)}
                     className="text-gray-500 hover:text-red-300"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
+                    <TrashIcon className="w-4 h-4" />
                   </Button>
                   <Button
                     variant="ghost"
@@ -297,10 +293,7 @@ export default function SchedulesPage() {
                     onClick={() => navigate(`/schedules/${sched.id}`)}
                     className="text-gray-500 hover:text-blue-400"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                    </svg>
+                    <PencilIcon className="w-4 h-4" />
                   </Button>
                   <button
                     onClick={() => handleToggle(sched)}

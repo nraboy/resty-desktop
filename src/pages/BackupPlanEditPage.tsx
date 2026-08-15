@@ -15,6 +15,7 @@ import { needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import { ChevronDownIcon, CheckIcon } from "../components/icons";
 
 type ExcludeMode = "simple" | "expert";
 
@@ -360,7 +361,7 @@ export default function BackupPlanEditPage() {
                 ))}
             </select>
             <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">
-              ▾
+              <ChevronDownIcon className="w-4 h-4" />
             </div>
           </div>
         )}
@@ -500,7 +501,11 @@ export default function BackupPlanEditPage() {
                           : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-300"
                       }`}
                     >
-                      {active && <span className="text-blue-400">✓</span>}
+                      {active && (
+                        <span className="text-blue-400 flex-shrink-0">
+                          <CheckIcon className="w-3.5 h-3.5" />
+                        </span>
+                      )}
                       {s.label}
                     </button>
                   );

@@ -45,6 +45,7 @@ import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
+import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
 
@@ -969,10 +970,7 @@ export default function RepositoriesPage() {
                     className="text-gray-500 hover:text-blue-400"
                     title="Rename"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                    </svg>
+                    <PencilIcon className="w-4 h-4" />
                   </Button>
                   <Button
                     variant="ghost"
@@ -1010,10 +1008,7 @@ export default function RepositoriesPage() {
                     className="text-gray-500 hover:text-red-300"
                     title="Remove"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
+                    <TrashIcon className="w-4 h-4" />
                   </Button>
                 </div>
               </div>
@@ -1038,16 +1033,12 @@ export default function RepositoriesPage() {
               <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
                 {checkResult.success ? (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-                    </svg>
+                    <CheckCircleIcon className="w-8 h-8 shrink-0" />
                     No errors found
                   </>
                 ) : (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-                    </svg>
+                    <XCircleIcon className="w-8 h-8 shrink-0" />
                     Errors found
                   </>
                 )}
@@ -1055,9 +1046,7 @@ export default function RepositoriesPage() {
             ) : (
               <>
                 <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-                  </svg>
+                  <XCircleIcon className="w-5 h-5 shrink-0" />
                   Errors found
                 </div>
                 <div className="mb-4 space-y-2">
@@ -1305,9 +1294,7 @@ export default function RepositoriesPage() {
         {mirrorOutcome === "done" ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Mirror complete
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1387,7 +1374,7 @@ export default function RepositoriesPage() {
                       <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
                     ))}
                 </select>
-                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
             </div>
             {mirrorPickerError && (
@@ -1415,9 +1402,7 @@ export default function RepositoriesPage() {
         {pruneDone ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Prune complete
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1810,9 +1795,7 @@ export default function RepositoriesPage() {
         ) : (
           <div className="py-2">
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Indexing complete
             </div>
             <p className="text-sm text-gray-400 mb-4">

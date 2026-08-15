@@ -65,6 +65,7 @@ import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../li
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
+import { CheckCircleIcon, XCircleIcon, MinusCircleIcon } from "./icons";
 
 function SectionHeading({ children }: { children: string }) {
   return <h3 className="text-xs font-semibold text-gray-500 tracking-wider uppercase px-4 pt-4 pb-2">{children}</h3>;
@@ -72,30 +73,6 @@ function SectionHeading({ children }: { children: string }) {
 
 function EmptyRow({ children }: { children: string }) {
   return <p className="px-4 pb-3 text-xs text-gray-500 italic">{children}</p>;
-}
-
-function SuccessIcon() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-green-400 flex-shrink-0">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function ErrorIcon() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-red-300 flex-shrink-0">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function CancelledIcon() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-gray-500 flex-shrink-0">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-    </svg>
-  );
 }
 
 function StopIcon() {
@@ -536,7 +513,13 @@ export default function ActivityPanel() {
                 return (
                 <div key={entry.id} className="space-y-0.5">
                   <div className="flex items-center gap-2">
-                    {cancelled ? <CancelledIcon /> : entry.error ? <ErrorIcon /> : <SuccessIcon />}
+                    {cancelled ? (
+                      <MinusCircleIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                    ) : entry.error ? (
+                      <XCircleIcon className="w-4 h-4 text-red-300 flex-shrink-0" />
+                    ) : (
+                      <CheckCircleIcon className="w-4 h-4 text-green-400 flex-shrink-0" />
+                    )}
                     <p className="text-sm text-gray-200 truncate min-w-0">
                       {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
                     </p>

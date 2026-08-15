@@ -13,6 +13,7 @@ import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
+import { TrashIcon, SearchIcon, RestoreIcon, CheckCircleIcon, XCircleIcon, WarningIcon, WarningCircleIcon, ChevronDownIcon } from "../components/icons";
 
 const PAGE_SIZE = 10;
 
@@ -526,9 +527,7 @@ export default function SnapshotsPage() {
 
       {repo && isRemoteRepo(repo.path) && !remoteAutoRefresh && (
         <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-start gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 shrink-0 mt-0.5">
-            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-          </svg>
+          <WarningIcon className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
             Remote repositories don't auto-refresh — click <strong className="font-semibold">Refresh</strong> to load the latest snapshots, or enable auto-refresh in Settings.
           </span>
@@ -675,19 +674,14 @@ export default function SnapshotsPage() {
                             onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/search`, { state: { snapshot: snap } })}
                             className="p-1.5 rounded text-gray-400 hover:text-blue-400 hover:bg-gray-800 transition-colors"
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                              <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
-                            </svg>
+                            <SearchIcon className="w-4 h-4" />
                           </button>
                           <button
                             title="Restore snapshot"
                             onClick={() => { setRestoreTarget(snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); }}
                             className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                              <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
-                              <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
-                            </svg>
+                            <RestoreIcon className="w-4 h-4" />
                           </button>
                           <button
                             title="Copy to repository"
@@ -706,9 +700,7 @@ export default function SnapshotsPage() {
                             disabled={repo?.readOnly ?? false}
                             className="p-1.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                              <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193v-.443A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
-                            </svg>
+                            <TrashIcon className="w-4 h-4" />
                           </button>
                         </div>
                       </td>
@@ -770,9 +762,7 @@ export default function SnapshotsPage() {
         {multiDeleteDone ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               All snapshots deleted
             </div>
             <div className="flex justify-end">
@@ -833,9 +823,7 @@ export default function SnapshotsPage() {
         {multiCopyDone ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               All snapshots copied
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -849,9 +837,7 @@ export default function SnapshotsPage() {
         ) : multiCopyCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-              </svg>
+              <WarningCircleIcon className="w-5 h-5 shrink-0" />
               Copy cancelled
             </div>
             <p className="text-sm text-gray-400 mb-3">
@@ -894,7 +880,7 @@ export default function SnapshotsPage() {
                     <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
                   ))}
                 </select>
-                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
             </div>
             {multiCopying && (
@@ -950,16 +936,12 @@ export default function SnapshotsPage() {
               <div className={`flex flex-col items-center justify-center py-8 gap-2 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
                 {checkResult.success ? (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-                    </svg>
+                    <CheckCircleIcon className="w-8 h-8 shrink-0" />
                     No errors found
                   </>
                 ) : (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-8 h-8 shrink-0">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-                    </svg>
+                    <XCircleIcon className="w-8 h-8 shrink-0" />
                     Errors found
                   </>
                 )}
@@ -967,9 +949,7 @@ export default function SnapshotsPage() {
             ) : (
               <>
                 <div className={`flex items-center gap-2 mb-4 text-sm font-medium ${checkResult.success ? "text-green-400" : "text-red-300"}`}>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-                  </svg>
+                  <XCircleIcon className="w-5 h-5 shrink-0" />
                   Errors found
                 </div>
                 <div className="mb-4 space-y-2">
@@ -1017,9 +997,7 @@ export default function SnapshotsPage() {
         {restoreDone ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Restore complete
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1033,9 +1011,7 @@ export default function SnapshotsPage() {
         ) : restoreCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-              </svg>
+              <WarningCircleIcon className="w-5 h-5 shrink-0" />
               Restore cancelled
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1106,9 +1082,7 @@ export default function SnapshotsPage() {
         {copyDone ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-              </svg>
+              <CheckCircleIcon className="w-5 h-5 shrink-0" />
               Copy complete
             </div>
             <p className="text-sm text-gray-400 mb-4">
@@ -1122,9 +1096,7 @@ export default function SnapshotsPage() {
         ) : copyCancelled ? (
           <>
             <div className="flex items-center gap-2 mb-4 text-sm font-medium text-amber-300">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-              </svg>
+              <WarningCircleIcon className="w-5 h-5 shrink-0" />
               Copy cancelled
             </div>
             <p className="text-sm text-gray-400 mb-3">
@@ -1160,7 +1132,7 @@ export default function SnapshotsPage() {
                     <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
                   ))}
                 </select>
-                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
             </div>
             {copying && (
@@ -1334,9 +1306,7 @@ export default function SnapshotsPage() {
           indexingSuccess ? (
             <>
               <div className="flex items-center gap-2 mb-4 text-sm font-medium text-green-400">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 shrink-0">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-                </svg>
+                <CheckCircleIcon className="w-5 h-5 shrink-0" />
                 Indexing complete
               </div>
               <p className="text-sm text-gray-400 mb-4">
@@ -1393,7 +1363,7 @@ export default function SnapshotsPage() {
                 </option>
               ))}
           </select>
-          <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">▾</div>
+          <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => setCompareSource(null)}>Cancel</Button>
