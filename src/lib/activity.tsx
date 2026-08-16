@@ -190,7 +190,7 @@ export interface ActivityState {
 /** Filters activeSnapshotIndexes down to standalone entries — suppresses any entry whose repo
  *  already has an "Index All" batch (running or queued), since a batch's own per-snapshot events
  *  are indistinguishable on the wire (see ActiveSnapshotIndex's doc comment). Formerly inlined in
- *  ActivityPanel; extracted so the sidebar badge and the panel render the same set. */
+ *  ActivityPanel; extracted so the sidebar status strip and the panel render the same set. */
 export function standaloneSnapshotIndexes(
   activeIndexBatches: ActiveIndexBatch[],
   activeSnapshotIndexes: ActiveSnapshotIndex[]
@@ -205,12 +205,12 @@ export type ActiveTaskCountState = Pick<ActivityState,
   "indexing" | "activeBackup" | "activePrune" | "statsRefreshing" | "activeIndexBatches"
   | "activeSnapshotIndexes" | "activeMirrors" | "statsRefreshAllProgress">;
 
-/** Number of background tasks the Activity panel surfaces — drives the Sidebar badge chip, the
- *  rail's activity dot, and the panel's empty-state, from one shared computation so they can't
- *  drift. Deliberate semantics:
+/** Number of background tasks the Activity panel surfaces — drives the Sidebar's footer status
+ *  strip and the panel's own empty-state, from one shared computation so they can't drift.
+ *  Deliberate semantics:
  *  - Counts QUEUED index batches and mirrors too (not just running ones), matching the panel's
- *    original `hasActive` — queued work is still work the user started. The badge can therefore
- *    read higher than the visible "Active Tasks" row count while queued rows sit under
+ *    original `hasActive` — queued work is still work the user started. The strip's count can
+ *    therefore read higher than the visible "Active Tasks" row count while queued rows sit under
  *    "Up Next"; that asymmetry is intended.
  *  - Stats counts as 1 when statsRefreshAllProgress is set, else statsRefreshing.length — the
  *    panel renders these two exclusively (RepositoriesPage's batch loop leaves the last repoId

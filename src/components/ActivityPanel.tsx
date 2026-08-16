@@ -50,17 +50,15 @@
 // in a spinner+text treatment for the lifecycle-only rows — kept visually consistent on
 // purpose, see ProgressBar.tsx.
 //
-// Layout: a slim 24px rail (with an active-dot indicator) always sits in the flex row as a
-// normal sibling, so it never changes the width available to routed page content. Clicking it
-// opens a `fixed` drawer that slides in over the content (no reflow, no scrim) — dismissed via
-// the chevron button or a click outside the drawer. The drawer is always mounted and animated
-// with a transform so it slides both in and out; it's just off-screen + non-interactive when
-// closed.
+// Layout: the Sidebar's footer status strip is the sole affordance that opens/closes this panel
+// (there is no right-edge rail). It's a `fixed inset-y-0 right-0` drawer that slides in/out with
+// a transform (no reflow, no scrim) — dismissed via the header chevron or a click outside the
+// drawer. The drawer is always mounted and animated with a transform so it slides both in and
+// out; it's just off-screen + non-interactive when closed.
 //
 // Open/closed state is owned by App.tsx (passed as props, always closed on launch) so the
-// Sidebar's "Activity" item and this panel's rail toggle the same drawer — locking unmounts the
-// unlocked branch and resets it to closed, matching the panel's original always-closed-on-launch
-// behavior.
+// Sidebar's status strip toggles the same drawer — locking unmounts the unlocked branch and
+// resets it to closed.
 import { useEffect, useRef, useState } from "react";
 import { useActivity, activeTaskCount, standaloneSnapshotIndexes } from "../lib/activity";
 import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../lib/invoke";
@@ -86,18 +84,15 @@ function StopIcon() {
 }
 
 interface ActivityPanelProps {
-  /** Whether the drawer is shown. Owned by App.tsx so the Sidebar's "Activity" item and the
-   *  rail toggle the same drawer. */
+  /** Whether the drawer is shown. Owned by App.tsx and toggled by the Sidebar's footer status
+   *  strip; always closed on launch. */
   open: boolean;
-  /** Rail click — opens only (the rail sits under the drawer overlay when open, so it can't
-   *  close; the sidebar item and the drawer's own chevron handle that). */
-  onOpen: () => void;
-  /** Drawer chevron + outside-click. Must be referentially stable (App passes useCallback'd
+  /** Header chevron + outside-click. Must be referentially stable (App passes useCallback'd
    *  handlers) — the outside-click effect below depends on it. */
   onClose: () => void;
 }
 
-export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelProps) {
+export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
   const {
     indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
     activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, statsRefreshAllProgress,
@@ -115,7 +110,7 @@ export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelPr
   // standalone "Index Snapshot"/"Index Now" call (see ActiveSnapshotIndex's doc comment in
   // activity.tsx) — so suppress any standalone entry whose repo already has a batch (running or
   // queued), rather than rendering a redundant row alongside the batch's own bar. Shared with
-  // the Sidebar badge via the helper so the two can't drift.
+  // the Sidebar status strip via the helper so the two can't drift.
   const standaloneIndexes = standaloneSnapshotIndexes(activeIndexBatches, activeSnapshotIndexes);
 
   // Same "queued" vs "running" split as index batches above — a mirror is "queued" until it
@@ -124,7 +119,7 @@ export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelPr
   const runningMirrors = activeMirrors.filter((m) => m.status === "running");
   const queuedMirrors = activeMirrors.filter((m) => m.status === "queued");
 
-  // Shared computation (activity.tsx) — the Sidebar's badge chip and this panel's empty-state
+  // Shared computation (activity.tsx) — the Sidebar's status strip and this panel's empty-state
   // derive from the same counter, so they can't disagree. Includes queued batches/mirrors.
   const hasActive = activeTaskCount({
     indexing, activeBackup, activePrune, statsRefreshing, activeIndexBatches,
@@ -191,157 +186,64 @@ export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelPr
   }, [open, onClose]);
 
   return (
-    <>
-      <button
-        onClick={onOpen}
-        title="Show activity"
-        className="flex-shrink-0 w-6 h-full bg-gray-900 border-l border-gray-800 hover:bg-gray-800 transition-colors flex items-center justify-center relative"
-      >
-        <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 19l-7-7 7-7" />
-        </svg>
-        {hasActive && (
-          <span className="absolute top-3 w-1.5 h-1.5 rounded-full bg-blue-500" aria-label="Activity in progress" />
-        )}
-      </button>
+    <aside
+      ref={panelRef}
+      className={`fixed inset-y-0 right-0 w-80 z-40 bg-gray-900 border-l border-gray-800 flex flex-col overflow-y-auto shadow-xl transition-transform duration-200 ${
+        open ? "translate-x-0" : "translate-x-full pointer-events-none"
+      }`}
+    >
+      <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
+        <h2 className="text-sm font-bold text-gray-50 tracking-tight">Task Activity</h2>
+        <button
+          onClick={onClose}
+          title="Hide activity"
+          className="text-gray-500 hover:text-gray-300 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+      </div>
 
-      <aside
-        ref={panelRef}
-        className={`fixed inset-y-0 right-0 w-80 z-40 bg-gray-900 border-l border-gray-800 flex flex-col overflow-y-auto shadow-xl transition-transform duration-200 ${
-          open ? "translate-x-0" : "translate-x-full pointer-events-none"
-        }`}
-      >
-        <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
-          <h2 className="text-sm font-bold text-gray-50 tracking-tight">Task Activity</h2>
-          <button
-            onClick={onClose}
-            title="Hide activity"
-            className="text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="flex-1">
-          <div className="border-b border-gray-800 pb-1">
-            <SectionHeading>Active Tasks</SectionHeading>
-            {!hasActive && <EmptyRow>Nothing running in the background right now.</EmptyRow>}
-            <div className="space-y-3 px-4 pb-3">
-              {indexing && (
-                <div className="space-y-2">
-                  <p className="text-sm text-gray-200">Indexing snapshots</p>
-                  <ProgressBar percent={(indexing.cached / Math.max(1, indexing.total)) * 100} />
-                  <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
-                </div>
-              )}
-              {runningIndexBatches.map((batch) => {
-                const repoName = indexBatchRepoNames[batch.repoId];
-                const stopping = stoppingBatchIds.has(batch.operationId);
-                return (
-                  <div key={batch.operationId} className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
-                        Indexing snapshots{repoName ? ` — ${repoName}` : ""}
-                      </p>
-                      <button
-                        onClick={async () => {
-                          setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
-                          try {
-                            await cancelIndexBatch(batch.operationId);
-                          } catch {
-                            // The cancel call itself failed (e.g. a transient IPC error) — the
-                            // batch is still running untouched, so roll back the optimistic
-                            // "Stopping…" state rather than leaving Stop stuck disabled with no
-                            // way to retry.
-                            setStoppingBatchIds((prev) => {
-                              const next = new Set(prev);
-                              next.delete(batch.operationId);
-                              return next;
-                            });
-                          }
-                        }}
-                        disabled={stopping}
-                        title="Stop"
-                        aria-label="Stop"
-                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
-                      >
-                        <StopIcon />
-                      </button>
-                    </div>
-                    <ProgressBar percent={(batch.itemsDone / Math.max(1, batch.itemsTotal)) * 100} />
-                    <p className="text-xs text-gray-500">
-                      {stopping ? "Stopping…" : `${batch.itemsDone} / ${batch.itemsTotal} snapshots`}
-                    </p>
-                  </div>
-                );
-              })}
-              {standaloneIndexes.map((s) => {
-                const repoName = indexBatchRepoNames[s.repoId];
-                const shortId = s.snapshotId.slice(0, 8);
-                return (
-                  <div key={s.operationId} className="space-y-2">
+      <div className="flex-1">
+        <div className="border-b border-gray-800 pb-1">
+          <SectionHeading>Active Tasks</SectionHeading>
+          {!hasActive && <EmptyRow>Nothing running in the background right now.</EmptyRow>}
+          <div className="space-y-3 px-4 pb-3">
+            {indexing && (
+              <div className="space-y-2">
+                <p className="text-sm text-gray-200">Indexing snapshots</p>
+                <ProgressBar percent={(indexing.cached / Math.max(1, indexing.total)) * 100} />
+                <p className="text-xs text-gray-500">{indexing.cached.toLocaleString()} / {indexing.total.toLocaleString()} indexed</p>
+              </div>
+            )}
+            {runningIndexBatches.map((batch) => {
+              const repoName = indexBatchRepoNames[batch.repoId];
+              const stopping = stoppingBatchIds.has(batch.operationId);
+              return (
+                <div key={batch.operationId} className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
                     <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
-                      Indexing snapshot <span className="font-mono">{shortId}</span>
-                      {repoName ? ` — ${repoName}` : ""}
-                    </p>
-                    <ProgressBar indeterminate />
-                  </div>
-                );
-              })}
-              {activeBackup && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-gray-200 truncate" title={activeBackup.planName ?? undefined}>
-                      {activeBackup.planName ?? "Scheduled backup"}
-                    </p>
-                    {activeBackup.phase === "backup" && (
-                      <button
-                        onClick={async () => {
-                          setStoppingScheduled(true);
-                          try { await cancelBackup(); } catch {}
-                        }}
-                        disabled={stoppingScheduled}
-                        title="Stop"
-                        aria-label="Stop"
-                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
-                      >
-                        <StopIcon />
-                      </button>
-                    )}
-                  </div>
-                  <ProgressBar percent={(activeBackup.progress?.percentDone ?? 0) * 100} />
-                  <p className="text-xs text-gray-500">
-                    {activeBackup.phase === "retention"
-                      ? "Applying retention rules…"
-                      : stoppingScheduled
-                      ? "Stopping…"
-                      : activeBackup.progress
-                      ? `${(activeBackup.progress.itemsDone ?? 0).toLocaleString()} / ${(activeBackup.progress.itemsTotal ?? 0).toLocaleString()} files`
-                      : "Starting…"}
-                  </p>
-                </div>
-              )}
-              {activePrune && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-gray-200 truncate" title={activePrune.repoLabel ?? undefined}>
-                      Pruning repositories
+                      Indexing snapshots{repoName ? ` — ${repoName}` : ""}
                     </p>
                     <button
                       onClick={async () => {
-                        setStoppingPrune(true);
+                        setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
                         try {
-                          await cancelPrune();
+                          await cancelIndexBatch(batch.operationId);
                         } catch {
-                          // Same rollback rationale as the other Stop buttons in this panel — the
-                          // cancel call itself failed, the prune is still running untouched, so
-                          // don't leave Stop stuck disabled with no way to retry.
-                          setStoppingPrune(false);
+                          // The cancel call itself failed (e.g. a transient IPC error) — the
+                          // batch is still running untouched, so roll back the optimistic
+                          // "Stopping…" state rather than leaving Stop stuck disabled with no
+                          // way to retry.
+                          setStoppingBatchIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(batch.operationId);
+                            return next;
+                          });
                         }
                       }}
-                      disabled={stoppingPrune}
+                      disabled={stopping}
                       title="Stop"
                       aria-label="Stop"
                       className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
@@ -349,210 +251,288 @@ export default function ActivityPanel({ open, onOpen, onClose }: ActivityPanelPr
                       <StopIcon />
                     </button>
                   </div>
-                  <ProgressBar
-                    indeterminate={activePrune.itemsTotal === 0}
-                    percent={activePrune.itemsTotal > 0 ? (activePrune.itemsDone / activePrune.itemsTotal) * 100 : 0}
-                  />
+                  <ProgressBar percent={(batch.itemsDone / Math.max(1, batch.itemsTotal)) * 100} />
                   <p className="text-xs text-gray-500">
-                    {stoppingPrune
-                      ? "Stopping…"
-                      : activePrune.itemsTotal > 0
-                      ? `${activePrune.itemsDone} / ${activePrune.itemsTotal} repos`
-                      : "Pruning…"}
+                    {stopping ? "Stopping…" : `${batch.itemsDone} / ${batch.itemsTotal} snapshots`}
                   </p>
                 </div>
-              )}
-              {runningMirrors.map((mirror) => {
-                const repoName = indexBatchRepoNames[mirror.repoId];
-                const stopping = stoppingMirrorIds.has(mirror.operationId);
-                return (
-                  <div key={mirror.operationId} className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
-                        Mirroring{repoName ? ` to ${repoName}` : ""}
-                      </p>
-                      <button
-                        onClick={async () => {
-                          setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
-                          try {
-                            await cancelMirror(mirror.operationId);
-                          } catch {
-                            // The cancel call itself failed (e.g. a transient IPC error) — the
-                            // mirror is still running untouched, so roll back the optimistic
-                            // "Stopping…" state rather than leaving Stop stuck disabled with no
-                            // way to retry.
-                            setStoppingMirrorIds((prev) => {
-                              const next = new Set(prev);
-                              next.delete(mirror.operationId);
-                              return next;
-                            });
-                          }
-                        }}
-                        disabled={stopping}
-                        title="Stop"
-                        aria-label="Stop"
-                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
-                      >
-                        <StopIcon />
-                      </button>
-                    </div>
-                    <ProgressBar indeterminate />
-                    <p className="text-xs text-gray-500">{stopping ? "Stopping…" : "Mirroring…"}</p>
-                  </div>
-                );
-              })}
-              {statsRefreshAllProgress ? (
-                // RepositoriesPage's "Refresh Stats" button — shows real batch progress
-                // (current/total, 0-indexed completed-so-far — see statsRefreshAllProgress's
-                // doc comment in activity.tsx, same convention as SnapshotsPage's
-                // multiDeleteProgress/multiCopyProgress) rather than the generic
-                // statsRefreshing row below, which would otherwise always read
-                // "1 repository" throughout the whole run (it refreshes repos one at a
-                // time, not in parallel — see handleRefreshAll's doc comment). Text shows
-                // `current + 1` ("working on repo N") matching SnapshotsPage's own
-                // in-progress phrasing; the bar uses raw `current` (0% at start, 100% only
-                // once every repo has actually finished).
-                <div className="space-y-2">
-                  <p className="text-sm text-gray-200">
-                    Refreshing stats — {statsRefreshAllProgress.current + 1} of {statsRefreshAllProgress.total} repositories
-                  </p>
-                  <ProgressBar
-                    percent={(statsRefreshAllProgress.current / Math.max(1, statsRefreshAllProgress.total)) * 100}
-                  />
-                </div>
-              ) : statsRefreshing.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-sm text-gray-200">
-                    Refreshing stats — {statsRefreshing.length} {statsRefreshing.length === 1 ? "repository" : "repositories"}
+              );
+            })}
+            {standaloneIndexes.map((s) => {
+              const repoName = indexBatchRepoNames[s.repoId];
+              const shortId = s.snapshotId.slice(0, 8);
+              return (
+                <div key={s.operationId} className="space-y-2">
+                  <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
+                    Indexing snapshot <span className="font-mono">{shortId}</span>
+                    {repoName ? ` — ${repoName}` : ""}
                   </p>
                   <ProgressBar indeterminate />
                 </div>
-              )}
-            </div>
-          </div>
-
-          {(queuedIndexBatches.length > 0 || queuedMirrors.length > 0) && (
-            <div className="border-b border-gray-800 pb-1">
-              <SectionHeading>Up Next</SectionHeading>
-              <div className="space-y-2 px-4 pb-3">
-                {queuedIndexBatches.map((batch) => {
-                  const repoName = indexBatchRepoNames[batch.repoId];
-                  const stopping = stoppingBatchIds.has(batch.operationId);
-                  return (
-                    <div key={batch.operationId} className="flex items-center justify-between gap-2">
-                      <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
-                        Indexing snapshots{repoName ? ` — ${repoName}` : ""}{" "}
-                        <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
-                      </p>
-                      <button
-                        onClick={async () => {
-                          setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
-                          try {
-                            await cancelIndexBatch(batch.operationId);
-                          } catch {
-                            // Same rollback rationale as the Active Tasks Stop button above.
-                            setStoppingBatchIds((prev) => {
-                              const next = new Set(prev);
-                              next.delete(batch.operationId);
-                              return next;
-                            });
-                          }
-                        }}
-                        disabled={stopping}
-                        title="Stop"
-                        aria-label="Stop"
-                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
-                      >
-                        <StopIcon />
-                      </button>
-                    </div>
-                  );
-                })}
-                {queuedMirrors.map((mirror) => {
-                  const repoName = indexBatchRepoNames[mirror.repoId];
-                  const stopping = stoppingMirrorIds.has(mirror.operationId);
-                  return (
-                    <div key={mirror.operationId} className="flex items-center justify-between gap-2">
-                      <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
-                        Mirroring{repoName ? ` to ${repoName}` : ""}{" "}
-                        <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
-                      </p>
-                      <button
-                        onClick={async () => {
-                          setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
-                          try {
-                            await cancelMirror(mirror.operationId);
-                          } catch {
-                            // Same rollback rationale as the Active Tasks Stop button above.
-                            setStoppingMirrorIds((prev) => {
-                              const next = new Set(prev);
-                              next.delete(mirror.operationId);
-                              return next;
-                            });
-                          }
-                        }}
-                        disabled={stopping}
-                        title="Stop"
-                        aria-label="Stop"
-                        className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
-                      >
-                        <StopIcon />
-                      </button>
-                    </div>
-                  );
-                })}
+              );
+            })}
+            {activeBackup && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-gray-200 truncate" title={activeBackup.planName ?? undefined}>
+                    {activeBackup.planName ?? "Scheduled backup"}
+                  </p>
+                  {activeBackup.phase === "backup" && (
+                    <button
+                      onClick={async () => {
+                        setStoppingScheduled(true);
+                        try { await cancelBackup(); } catch {}
+                      }}
+                      disabled={stoppingScheduled}
+                      title="Stop"
+                      aria-label="Stop"
+                      className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                    >
+                      <StopIcon />
+                    </button>
+                  )}
+                </div>
+                <ProgressBar percent={(activeBackup.progress?.percentDone ?? 0) * 100} />
+                <p className="text-xs text-gray-500">
+                  {activeBackup.phase === "retention"
+                    ? "Applying retention rules…"
+                    : stoppingScheduled
+                    ? "Stopping…"
+                    : activeBackup.progress
+                    ? `${(activeBackup.progress.itemsDone ?? 0).toLocaleString()} / ${(activeBackup.progress.itemsTotal ?? 0).toLocaleString()} files`
+                    : "Starting…"}
+                </p>
               </div>
-            </div>
-          )}
-
-          <div className="border-b border-gray-800 pb-1">
-            <SectionHeading>Upcoming Tasks</SectionHeading>
-            {upcoming.length === 0 && <EmptyRow>No enabled schedules due.</EmptyRow>}
-            <div className="space-y-2 px-4 pb-3">
-              {upcoming.map((u) => (
-                <div key={u.scheduleId} className="text-sm">
-                  <p className="text-gray-200 truncate" title={u.scheduleName}>{u.scheduleName}</p>
-                  <p
-                    className="text-xs text-gray-500 truncate"
-                    title={`${u.planNames.join(", ") || "No plans"} · ${formatRelative(u.nextRunAt)}`}
+            )}
+            {activePrune && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-gray-200 truncate" title={activePrune.repoLabel ?? undefined}>
+                    Pruning repositories
+                  </p>
+                  <button
+                    onClick={async () => {
+                      setStoppingPrune(true);
+                      try {
+                        await cancelPrune();
+                      } catch {
+                        // Same rollback rationale as the other Stop buttons in this panel — the
+                        // cancel call itself failed, the prune is still running untouched, so
+                        // don't leave Stop stuck disabled with no way to retry.
+                        setStoppingPrune(false);
+                      }
+                    }}
+                    disabled={stoppingPrune}
+                    title="Stop"
+                    aria-label="Stop"
+                    className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
                   >
-                    {u.planNames.join(", ") || "No plans"} · {isOverdue(u.nextRunAt) ? "Running soon" : formatRelative(u.nextRunAt)}
-                  </p>
+                    <StopIcon />
+                  </button>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <SectionHeading>Recent Logs</SectionHeading>
-            {recentLogs.length === 0 && <EmptyRow>No backups have run yet.</EmptyRow>}
-            <div className="space-y-2 px-4 pb-4">
-              {recentLogs.map((entry) => {
-                const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
-                return (
-                <div key={entry.id} className="space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    {cancelled ? (
-                      <MinusCircleIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
-                    ) : entry.error ? (
-                      <XCircleIcon className="w-4 h-4 text-red-300 flex-shrink-0" />
-                    ) : (
-                      <CheckCircleIcon className="w-4 h-4 text-green-400 flex-shrink-0" />
-                    )}
-                    <p className="text-sm text-gray-200 truncate min-w-0">
-                      {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
+                <ProgressBar
+                  indeterminate={activePrune.itemsTotal === 0}
+                  percent={activePrune.itemsTotal > 0 ? (activePrune.itemsDone / activePrune.itemsTotal) * 100 : 0}
+                />
+                <p className="text-xs text-gray-500">
+                  {stoppingPrune
+                    ? "Stopping…"
+                    : activePrune.itemsTotal > 0
+                    ? `${activePrune.itemsDone} / ${activePrune.itemsTotal} repos`
+                    : "Pruning…"}
+                </p>
+              </div>
+            )}
+            {runningMirrors.map((mirror) => {
+              const repoName = indexBatchRepoNames[mirror.repoId];
+              const stopping = stoppingMirrorIds.has(mirror.operationId);
+              return (
+                <div key={mirror.operationId} className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-gray-200 truncate" title={repoName ?? undefined}>
+                      Mirroring{repoName ? ` to ${repoName}` : ""}
                     </p>
+                    <button
+                      onClick={async () => {
+                        setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
+                        try {
+                          await cancelMirror(mirror.operationId);
+                        } catch {
+                          // The cancel call itself failed (e.g. a transient IPC error) — the
+                          // mirror is still running untouched, so roll back the optimistic
+                          // "Stopping…" state rather than leaving Stop stuck disabled with no
+                          // way to retry.
+                          setStoppingMirrorIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(mirror.operationId);
+                            return next;
+                          });
+                        }
+                      }}
+                      disabled={stopping}
+                      title="Stop"
+                      aria-label="Stop"
+                      className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                    >
+                      <StopIcon />
+                    </button>
                   </div>
-                  <p className="text-xs text-gray-500 truncate pl-6" title={cancelled ? undefined : entry.error}>
-                    {cancelled ? `Cancelled, ${formatRelative(entry.startedAt)}` : entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
-                  </p>
+                  <ProgressBar indeterminate />
+                  <p className="text-xs text-gray-500">{stopping ? "Stopping…" : "Mirroring…"}</p>
                 </div>
+              );
+            })}
+            {statsRefreshAllProgress ? (
+              // RepositoriesPage's "Refresh Stats" button — shows real batch progress
+              // (current/total, 0-indexed completed-so-far — see statsRefreshAllProgress's
+              // doc comment in activity.tsx, same convention as SnapshotsPage's
+              // multiDeleteProgress/multiCopyProgress) rather than the generic
+              // statsRefreshing row below, which would otherwise always read
+              // "1 repository" throughout the whole run (it refreshes repos one at a
+              // time, not in parallel — see handleRefreshAll's doc comment). Text shows
+              // `current + 1` ("working on repo N") matching SnapshotsPage's own
+              // in-progress phrasing; the bar uses raw `current` (0% at start, 100% only
+              // once every repo has actually finished).
+              <div className="space-y-2">
+                <p className="text-sm text-gray-200">
+                  Refreshing stats — {statsRefreshAllProgress.current + 1} of {statsRefreshAllProgress.total} repositories
+                </p>
+                <ProgressBar
+                  percent={(statsRefreshAllProgress.current / Math.max(1, statsRefreshAllProgress.total)) * 100}
+                />
+              </div>
+            ) : statsRefreshing.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-sm text-gray-200">
+                  Refreshing stats — {statsRefreshing.length} {statsRefreshing.length === 1 ? "repository" : "repositories"}
+                </p>
+                <ProgressBar indeterminate />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {(queuedIndexBatches.length > 0 || queuedMirrors.length > 0) && (
+          <div className="border-b border-gray-800 pb-1">
+            <SectionHeading>Up Next</SectionHeading>
+            <div className="space-y-2 px-4 pb-3">
+              {queuedIndexBatches.map((batch) => {
+                const repoName = indexBatchRepoNames[batch.repoId];
+                const stopping = stoppingBatchIds.has(batch.operationId);
+                return (
+                  <div key={batch.operationId} className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
+                      Indexing snapshots{repoName ? ` — ${repoName}` : ""}{" "}
+                      <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
+                    </p>
+                    <button
+                      onClick={async () => {
+                        setStoppingBatchIds((prev) => new Set(prev).add(batch.operationId));
+                        try {
+                          await cancelIndexBatch(batch.operationId);
+                        } catch {
+                          // Same rollback rationale as the Active Tasks Stop button above.
+                          setStoppingBatchIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(batch.operationId);
+                            return next;
+                          });
+                        }
+                      }}
+                      disabled={stopping}
+                      title="Stop"
+                      aria-label="Stop"
+                      className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                    >
+                      <StopIcon />
+                    </button>
+                  </div>
+                );
+              })}
+              {queuedMirrors.map((mirror) => {
+                const repoName = indexBatchRepoNames[mirror.repoId];
+                const stopping = stoppingMirrorIds.has(mirror.operationId);
+                return (
+                  <div key={mirror.operationId} className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-gray-400 truncate" title={repoName ?? undefined}>
+                      Mirroring{repoName ? ` to ${repoName}` : ""}{" "}
+                      <span className="text-xs text-gray-400">· {stopping ? "Stopping…" : "Queued"}</span>
+                    </p>
+                    <button
+                      onClick={async () => {
+                        setStoppingMirrorIds((prev) => new Set(prev).add(mirror.operationId));
+                        try {
+                          await cancelMirror(mirror.operationId);
+                        } catch {
+                          // Same rollback rationale as the Active Tasks Stop button above.
+                          setStoppingMirrorIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(mirror.operationId);
+                            return next;
+                          });
+                        }
+                      }}
+                      disabled={stopping}
+                      title="Stop"
+                      aria-label="Stop"
+                      className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                    >
+                      <StopIcon />
+                    </button>
+                  </div>
                 );
               })}
             </div>
           </div>
+        )}
+
+        <div className="border-b border-gray-800 pb-1">
+          <SectionHeading>Upcoming Tasks</SectionHeading>
+          {upcoming.length === 0 && <EmptyRow>No enabled schedules due.</EmptyRow>}
+          <div className="space-y-2 px-4 pb-3">
+            {upcoming.map((u) => (
+              <div key={u.scheduleId} className="text-sm">
+                <p className="text-gray-200 truncate" title={u.scheduleName}>{u.scheduleName}</p>
+                <p
+                  className="text-xs text-gray-500 truncate"
+                  title={`${u.planNames.join(", ") || "No plans"} · ${formatRelative(u.nextRunAt)}`}
+                >
+                  {u.planNames.join(", ") || "No plans"} · {isOverdue(u.nextRunAt) ? "Running soon" : formatRelative(u.nextRunAt)}
+                </p>
+              </div>
+            ))}
+          </div>
         </div>
-      </aside>
-    </>
+
+        <div>
+          <SectionHeading>Recent Logs</SectionHeading>
+          {recentLogs.length === 0 && <EmptyRow>No backups have run yet.</EmptyRow>}
+          <div className="space-y-2 px-4 pb-4">
+            {recentLogs.map((entry) => {
+              const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
+              return (
+              <div key={entry.id} className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  {cancelled ? (
+                    <MinusCircleIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                  ) : entry.error ? (
+                    <XCircleIcon className="w-4 h-4 text-red-300 flex-shrink-0" />
+                  ) : (
+                    <CheckCircleIcon className="w-4 h-4 text-green-400 flex-shrink-0" />
+                  )}
+                  <p className="text-sm text-gray-200 truncate min-w-0">
+                    {entry.planName ?? "Manual"} <span className="text-xs text-gray-500">· {formatBytes(entry.bytesAdded)}</span>
+                  </p>
+                </div>
+                <p className="text-xs text-gray-500 truncate pl-6" title={cancelled ? undefined : entry.error}>
+                  {cancelled ? `Cancelled, ${formatRelative(entry.startedAt)}` : entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
+                </p>
+              </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </aside>
   );
 }

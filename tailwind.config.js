@@ -8,10 +8,11 @@ export default {
         // never goes below tauri.conf.json's minWidth (1280), so stock sm/md/lg/xl are all
         // permanently true here — this is the one breakpoint that actually toggles. It's in
         // logical (CSS) px, same units as minWidth; see docs/frontend.md for the units
-        // caveat (a physical 1920px monitor is often well under 1920 logical px). Kept close
-        // to the 1280 minimum on purpose so the toggle is reachable on a laptop's built-in
-        // display without maximizing — raise it if labels feel like they show too eagerly.
-        wide: "1300px",
+        // caveat (a physical 1920px monitor is often well under 1920 logical px). Deliberately
+        // well above minWidth and above typical MacBook logical widths (13" Air ~1470, 14" Pro
+        // ~1512) so labels only reveal on a genuinely wide window — a maximized external
+        // display, not a laptop's own screen — minimizing the chance of row content wrapping.
+        wide: "1536px",
       },
       colors: {
         blue: {
