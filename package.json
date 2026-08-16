@@ -18,6 +18,7 @@
     "test:all": "npm run test:vite && npm run test:rust"
   },
   "dependencies": {
+    "@floating-ui/react": "^0.27.20",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-shell": "^2",

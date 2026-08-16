@@ -46,6 +46,7 @@ import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
+import Tooltip from "../components/Tooltip";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -915,9 +916,16 @@ export default function RepositoriesPage() {
                         <>
                           {(() => {
                             const { primary, secondary, tooltip } = formatRepoSize(statsMap[repo.id]!);
+                            const primaryLine = (
+                              <p
+                                className={`text-sm font-medium text-gray-300${tooltip ? " cursor-help underline decoration-dotted underline-offset-2 w-fit ml-auto" : ""}`}
+                              >
+                                {primary}
+                              </p>
+                            );
                             return (
                               <>
-                                <p className="text-sm font-medium text-gray-300" title={tooltip}>{primary}</p>
+                                {tooltip ? <Tooltip content={tooltip}>{primaryLine}</Tooltip> : primaryLine}
                                 <p className="text-xs text-gray-500">{secondary}</p>
                               </>
                             );

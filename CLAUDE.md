@@ -26,6 +26,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 3 (macOS/Windows only), opt-in, stores the *derived* master key; see docs/data.md |
 | ID generation | `crypto.randomUUID()` (native browser API) |
+| Tooltip positioning | `@floating-ui/react` — `Tooltip.tsx`, content hovers only (icon-button labels stay on native `title`); see docs/decisions.md for why this one component gets a dependency `ContextMenu.tsx` doesn't need |
 | Restic integration | `std::process::Command` with `--json`; see docs/restic.md |
 
 ## Project Structure
@@ -48,6 +49,7 @@ src/
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
     Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
     ActivityPanel.tsx     # Right-side overlay drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's status strip, open state owned by App.tsx — see docs/concurrency.md
   lib/

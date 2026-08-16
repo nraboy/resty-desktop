@@ -65,6 +65,7 @@ import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../li
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
+import Tooltip from "./Tooltip";
 import { CheckCircleIcon, XCircleIcon, MinusCircleIcon } from "./icons";
 
 function SectionHeading({ children }: { children: string }) {
@@ -493,12 +494,23 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
             {upcoming.map((u) => (
               <div key={u.scheduleId} className="text-sm">
                 <p className="text-gray-200 truncate" title={u.scheduleName}>{u.scheduleName}</p>
-                <p
-                  className="text-xs text-gray-500 truncate"
-                  title={`${u.planNames.join(", ") || "No plans"} · ${formatRelative(u.nextRunAt)}`}
+                <Tooltip
+                  content={
+                    <div>
+                      {u.planNames.length === 0 ? (
+                        "No plans"
+                      ) : (
+                        u.planNames.map((name) => (
+                          <div key={name} className="truncate" title={name}>{name}</div>
+                        ))
+                      )}
+                    </div>
+                  }
                 >
-                  {u.planNames.join(", ") || "No plans"} · {isOverdue(u.nextRunAt) ? "Running soon" : formatRelative(u.nextRunAt)}
-                </p>
+                  <p className="text-xs text-gray-500 truncate cursor-help underline decoration-dotted underline-offset-2">
+                    {u.planNames.join(", ") || "No plans"} · {isOverdue(u.nextRunAt) ? "Running soon" : formatRelative(u.nextRunAt)}
+                  </p>
+                </Tooltip>
               </div>
             ))}
           </div>

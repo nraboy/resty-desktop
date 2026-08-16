@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue } from "./format";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList } from "./format";
 import type { ResticStats } from "./types";
 
 describe("formatBytes", () => {
@@ -214,5 +214,26 @@ describe("isOverdue", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW * 1000);
     expect(isOverdue(NOW)).toBe(true);
+  });
+});
+
+describe("capList", () => {
+  it("returns everything with remaining 0 when under the limit", () => {
+    expect(capList(["a", "b"], 5)).toEqual({ shown: ["a", "b"], remaining: 0 });
+  });
+
+  it("returns everything with remaining 0 when exactly at the limit", () => {
+    expect(capList(["a", "b", "c"], 3)).toEqual({ shown: ["a", "b", "c"], remaining: 0 });
+  });
+
+  it("truncates and reports the remainder when over the limit", () => {
+    expect(capList(["a", "b", "c", "d", "e", "f"], 5)).toEqual({
+      shown: ["a", "b", "c", "d", "e"],
+      remaining: 1,
+    });
+  });
+
+  it("handles an empty list", () => {
+    expect(capList([], 5)).toEqual({ shown: [], remaining: 0 });
   });
 });

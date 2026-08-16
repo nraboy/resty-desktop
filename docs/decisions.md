@@ -389,6 +389,38 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   bar, away from the window — no label-stacking problem, and it's where Mac users expect
   it); don't "complete" this by hiding it there, and don't reintroduce a Windows menu bar
   or the File-fold — both were the reported bug.
+- **`@floating-ui/react` was added as a runtime dependency for `components/Tooltip.tsx`,
+  rather than hand-rolling a tooltip the way `ContextMenu.tsx` hand-rolls its portal +
+  fixed-position + overflow-nudge in ~70 lines.** This looks like it should've stayed
+  dependency-free given the app's otherwise minimal (six-runtime-dep) posture, and it was
+  seriously considered — `ContextMenu.tsx` already proves the core mechanics (portal to
+  `document.body`, measure via `getBoundingClientRect`, nudge onto screen) work fine
+  hand-rolled at this app's scale. The reason a tooltip doesn't get the same treatment: a
+  context menu closes on any mousedown, so it never needs to track its anchor after opening.
+  A tooltip anchored to a row inside a scrolling table (SnapshotsPage's Paths column,
+  ActivityPanel's Upcoming Tasks list) goes stale the instant the page scrolls — it detaches
+  from its trigger and floats over unrelated rows — unless something repositions it live.
+  Floating UI's `autoUpdate` is exactly that, plus hover-intent grace between adjacent
+  triggers and `role="tooltip"`/`aria-describedby` wiring, all of which a hand-rolled version
+  would eventually reinvent, badly, as bug reports. The dependency cost is low in this app
+  specifically: Tauri bundles the JS locally (no network-fetch cost to the extra ~20kb), the
+  package is headless (it positions; it doesn't paint, so it touches none of the
+  CSS-custom-property theming), and its transitive footprint is small: the rest of
+  `@floating-ui/*` (its own first-party packages) plus one non-`@floating-ui` package,
+  `tabbable` (focus-trapping support for `FloatingFocusManager`/roving-focus interactions),
+  confirmed via `npm ls @floating-ui/react tabbable` at the time it was added — recheck
+  before assuming that's still true. Don't hand-roll a second tooltip
+  implementation "to avoid the dependency" — extend `Tooltip.tsx` instead.
+- **Not every `title=` attribute was converted to `Tooltip.tsx` when it was added — most
+  stayed on native `title`, and that's deliberate, not partial completion.** The rule:
+  short strings that just name a control (icon-button labels — `ActionButton.tsx`, most of
+  `ActivityPanel.tsx`, disabled-state explanations like "This repository is read-only") stay
+  on native `title`; the ~1s delay and lack of styling don't matter for a one-line label, and
+  it's the semantically-correct, zero-code, screen-reader-friendly choice for that case. Only
+  hovers that carry real *content* — multi-line lists, monospaced text, a derived percentage,
+  anything a plain unstyled/unformatted box renders badly — convert to `Tooltip`. Don't
+  "finish the job" by converting every remaining `title=` in the app; audit each one against
+  that rule first. See `Tooltip.tsx`'s entry in docs/frontend.md for the converted-site list.
 
 
 ## Linux GPU Compatibility

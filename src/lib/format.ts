@@ -122,3 +122,14 @@ export function formatRelative(ts: number): string {
 export function isOverdue(ts?: number): boolean {
   return !!ts && ts <= Math.floor(Date.now() / 1000);
 }
+
+/**
+ * Caps a list for display in a bounded tooltip (e.g. snapshot paths, a plan-name list) —
+ * the first `limit` items, plus a "+N more" remainder count. Used instead of rendering a
+ * long list in full: an unbounded list makes a hover tooltip an unusable wall of text, and
+ * (for lists a user might want to scroll) a scrollable hover tooltip is itself a UX trap
+ * since moving the pointer into the box would normally dismiss it.
+ */
+export function capList<T>(items: T[], limit: number): { shown: T[]; remaining: number } {
+  return { shown: items.slice(0, limit), remaining: Math.max(0, items.length - limit) };
+}

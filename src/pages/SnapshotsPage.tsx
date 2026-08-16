@@ -5,10 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
-import { formatBytes, formatDate } from "../lib/format";
+import { capList, formatBytes, formatDate } from "../lib/format";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
+import Tooltip from "../components/Tooltip";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
@@ -639,7 +640,24 @@ export default function SnapshotsPage() {
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
                     <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
                     <td className="px-4 py-3 text-gray-400 max-w-xs">
-                      <div className="text-xs text-gray-400 cursor-default" title={snap.paths.join("\n")}>{snap.paths.length} {snap.paths.length === 1 ? "path" : "paths"}</div>
+                      <Tooltip
+                        title="Backup Paths"
+                        content={(() => {
+                          const { shown, remaining } = capList(snap.paths, 5);
+                          return (
+                            <div className="font-mono space-y-0.5">
+                              {shown.map((p) => (
+                                <div key={p} className="truncate" title={p}>{p}</div>
+                              ))}
+                              {remaining > 0 && <div className="text-gray-500">+{remaining} more</div>}
+                            </div>
+                          );
+                        })()}
+                      >
+                        <div className="text-xs text-gray-400 cursor-help underline decoration-dotted underline-offset-2 w-fit">
+                          {snap.paths.length} {snap.paths.length === 1 ? "path" : "paths"}
+                        </div>
+                      </Tooltip>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1">

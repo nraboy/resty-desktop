@@ -12,6 +12,7 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import ImportExportCard from "../components/ImportExportCard";
+import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, WarningIcon } from "../components/icons";
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -695,17 +696,16 @@ export default function SettingsPage() {
             />
             Success (no files changed)
           </label>
-          <label
-            className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer"
-            title="Includes cancelled backups."
-          >
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
             <input
               type="checkbox"
               className="w-4 h-4 accent-blue-500"
               checked={notifications.failures}
               onChange={(e) => updateNotifications({ failures: e.target.checked })}
             />
-            Failures
+            <Tooltip content="Includes cancelled backups.">
+              <span className="underline decoration-dotted underline-offset-2">Failures</span>
+            </Tooltip>
           </label>
         </div>
       </div>
