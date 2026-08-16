@@ -11,6 +11,7 @@ pub mod repo_locks;
 pub mod schedule;
 pub mod snapshot;
 pub mod transfer;
+pub mod webhook;
 
 use super::commands::cache::AppDb;
 

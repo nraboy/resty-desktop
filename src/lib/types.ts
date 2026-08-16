@@ -246,6 +246,37 @@ export interface RetentionPolicy {
   keepYearly?: number;
 }
 
+export type WebhookProvider = "generic" | "discord" | "slack" | "custom";
+
+/** Which backup lifecycle stages fire a webhook. `completed` deliberately has no
+ *  changed/unchanged split — that distinction belongs to the OS notification
+ *  categories, not webhooks. */
+export interface WebhookStages {
+  started: boolean;
+  completed: boolean;
+  failed: boolean;
+}
+
+export interface PlanWebhook {
+  id: string;
+  url: string;
+  provider: WebhookProvider;
+  stages: WebhookStages;
+  /** Custom-provider JSON body template with {placeholders}; ignored by the presets. */
+  template?: string;
+}
+
+/** Preview-rendered request body per stage, from the backend's own `build_body` —
+ *  the single source of truth, so the preview can never drift from what's POSTed. */
+export interface WebhookPreview {
+  started: string;
+  completed: string;
+  failed: string;
+  /** Custom templates only: `{tokens}` matching no known placeholder (typos) —
+   *  they're sent literally at fire time, so the UI warns before that happens. */
+  unknownPlaceholders: string[];
+}
+
 export interface BackupPlan {
   id: string;
   name: string;
@@ -258,6 +289,7 @@ export interface BackupPlan {
   retention?: RetentionPolicy;
   limitUpload?: number;
   limitDownload?: number;
+  webhooks?: PlanWebhook[];
 }
 
 export interface Schedule {

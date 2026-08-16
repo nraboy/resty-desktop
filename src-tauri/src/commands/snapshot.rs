@@ -470,12 +470,24 @@ pub async fn execute_backup(
     // no Recent Logs entry, and no notification, and scheduler.rs's `.is_ok()` check
     // would just silently skip it. Same fix shape as fetch_and_cache_stats (repo.rs) and
     // apply_retention already use for the identical early-return gap.
+
+    // Deliberately the repo's *name*, not `repo.path` — a REST repo's path can carry inline
+    // userinfo credentials (`rest:https://user:PASS@host/repo`), which must never land in an
+    // OS notification or webhook payload. Falls back to repo_id (opaque, never secret) if
+    // the lookup fails. Computed before the read-only check below so that early-failure
+    // path can use it too.
+    let repo_display = db.get_repo_name(repo_id).unwrap_or_else(|_| repo_id.to_string());
+
+    // Computed before the read-only check and the Started webhook below so every fire
+    // site and history row shares one backup-start timestamp — including the started
+    // event itself, where `{startedAt}` is otherwise always 0.
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     if let Err(e) = super::repo::ensure_writable(&repo) {
         task_ctx.failed(e.clone());
-        let started_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         use rand::Rng;
         let history_id: String = rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
@@ -487,17 +499,35 @@ pub async fn execute_backup(
         );
         let _ = app.emit("backup:history-updated", ());
         super::notify::notify(app, db, super::notify::NotifyCategory::Failures, "Backup failed", &e);
+        super::webhook::fire_webhooks(db, plan_id, super::webhook::WebhookEvent {
+            stage: super::cache::WebhookStage::Failed,
+            repo_name: &repo_display,
+            duration_secs: Some(0.0),
+            files_new: None,
+            files_changed: None,
+            bytes_added: None,
+            snapshot_id: None,
+            error: Some(&e),
+            started_at: Some(started_at),
+        });
         return Err(e);
     }
 
     let restic_path = super::get_restic_path(db);
     let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
 
-    // Deliberately the repo's *name*, not `repo.path` — a REST repo's path can carry inline
-    // userinfo credentials (`rest:https://user:PASS@host/repo`), which must never land in an
-    // OS notification body. Falls back to repo_id (opaque, never secret) if the lookup fails.
-    let repo_display = db.get_repo_name(repo_id).unwrap_or_else(|_| repo_id.to_string());
     super::notify::notify(app, db, super::notify::NotifyCategory::Started, "Backup started", &repo_display);
+    super::webhook::fire_webhooks(db, plan_id, super::webhook::WebhookEvent {
+        stage: super::cache::WebhookStage::Started,
+        repo_name: &repo_display,
+        duration_secs: None,
+        files_new: None,
+        files_changed: None,
+        bytes_added: None,
+        snapshot_id: None,
+        error: None,
+        started_at: Some(started_at),
+    });
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -526,10 +556,6 @@ pub async fn execute_backup(
     }
 
     let started = std::time::Instant::now();
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
 
     let app_inner = app.clone();
     // Clone the whole repo (not path/password field-by-field) so backend credentials
@@ -730,6 +756,19 @@ pub async fn execute_backup(
             let category = super::notify::classify_success(files_new, files_changed);
             let body = format!("{} new, {} changed · {:.1}s", files_new, files_changed, duration);
             super::notify::notify(app, db, category, "Backup completed", &body);
+            // Webhooks fire for BOTH success variants — a "completed" trigger is not
+            // split into changed/unchanged like the OS notification categories are.
+            super::webhook::fire_webhooks(db, plan_id, super::webhook::WebhookEvent {
+                stage: super::cache::WebhookStage::Completed,
+                repo_name: &repo_display,
+                duration_secs: Some(duration),
+                files_new: Some(files_new),
+                files_changed: Some(files_changed),
+                bytes_added: Some(bytes_added),
+                snapshot_id: snapshot_id.as_deref(),
+                error: None,
+                started_at: Some(started_at),
+            });
 
             Ok(stdout.clone())
         }
@@ -752,6 +791,19 @@ pub async fn execute_backup(
                 );
             } else {
                 super::notify::notify(app, db, super::notify::NotifyCategory::Failures, "Backup failed", err);
+                // A user-initiated cancellation is not a failure — no webhook for it
+                // (the was_cancelled branch above deliberately fires none).
+                super::webhook::fire_webhooks(db, plan_id, super::webhook::WebhookEvent {
+                    stage: super::cache::WebhookStage::Failed,
+                    repo_name: &repo_display,
+                    duration_secs: Some(duration),
+                    files_new: None,
+                    files_changed: None,
+                    bytes_added: None,
+                    snapshot_id: None,
+                    error: Some(err),
+                    started_at: Some(started_at),
+                });
             }
 
             Err(err.clone())

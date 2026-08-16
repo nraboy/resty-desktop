@@ -58,6 +58,73 @@ pub struct RetentionPolicy {
     pub keep_yearly: Option<u32>,
 }
 
+/// Which backup lifecycle stage a webhook triggers on. `Completed` deliberately has no
+/// changed/unchanged split — that distinction belongs to the OS notification categories
+/// (`notify::classify_success`), not to webhooks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WebhookStage {
+    Started,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookStages {
+    #[serde(default)]
+    pub started: bool,
+    #[serde(default = "default_true")]
+    pub completed: bool,
+    #[serde(default = "default_true")]
+    pub failed: bool,
+}
+
+impl Default for WebhookStages {
+    fn default() -> Self {
+        Self { started: false, completed: true, failed: true }
+    }
+}
+
+impl WebhookStages {
+    pub fn wants(&self, stage: WebhookStage) -> bool {
+        match stage {
+            WebhookStage::Started => self.started,
+            WebhookStage::Completed => self.completed,
+            WebhookStage::Failed => self.failed,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WebhookProvider {
+    Generic,
+    Discord,
+    Slack,
+    /// User-authored JSON body template with {placeholders} (see webhook.rs's
+    /// `interpolate`); the presets ignore `PlanWebhook::template`.
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanWebhook {
+    pub id: String,
+    pub url: String,
+    pub provider: WebhookProvider,
+    #[serde(default)]
+    pub stages: WebhookStages,
+    /// Custom-provider JSON body template with {placeholders}; ignored by the presets.
+    /// Additive field inside `webhooks_json` — no schema change.
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPlan {
@@ -74,6 +141,8 @@ pub struct BackupPlan {
     pub retention: Option<RetentionPolicy>,
     pub limit_upload: Option<u32>,
     pub limit_download: Option<u32>,
+    #[serde(default)]
+    pub webhooks: Vec<PlanWebhook>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -560,7 +629,8 @@ impl AppDb {
                 exclude_caches  INTEGER NOT NULL DEFAULT 0,
                 retention_json  TEXT,
                 limit_upload    INTEGER,
-                limit_download  INTEGER
+                limit_download  INTEGER,
+                webhooks_json   TEXT
             );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
@@ -642,6 +712,13 @@ impl AppDb {
         );
         let _ = conn.execute_batch(
             "ALTER TABLE backup_plans ADD COLUMN exclude_caches INTEGER NOT NULL DEFAULT 0;",
+        );
+        // Additive, nullable — per-plan webhook configs (URL + provider preset + stage
+        // triggers) as a JSON array. NULL on pre-existing rows means "no webhooks" and
+        // reads back as an empty Vec, identical to exclude_if_present_json. URLs are
+        // stored plaintext — see docs/data.md.
+        let _ = conn.execute_batch(
+            "ALTER TABLE backup_plans ADD COLUMN webhooks_json TEXT;",
         );
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
@@ -1065,7 +1142,7 @@ impl AppDb {
     pub fn list_backup_plans(&self) -> Result<Vec<BackupPlan>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download FROM backup_plans ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json FROM backup_plans ORDER BY name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let plans = stmt
             .query_map([], |row| {
@@ -1081,6 +1158,7 @@ impl AppDb {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<u32>>(9)?,
                     row.get::<_, Option<u32>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -1089,7 +1167,7 @@ impl AppDb {
 
         plans
             .into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -1111,6 +1189,12 @@ impl AppDb {
                         .map_err(|e: serde_json::Error| e.to_string())?,
                     limit_upload,
                     limit_download,
+                    webhooks: webhooks_json
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e: serde_json::Error| e.to_string())?
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -1122,6 +1206,8 @@ impl AppDb {
         let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
         let exclude_if_present_json =
             serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
+        let webhooks_json =
+            serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
         let retention_json = plan
             .retention
             .as_ref()
@@ -1132,8 +1218,8 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO backup_plans
-             (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 plan.id,
                 plan.name,
@@ -1146,6 +1232,7 @@ impl AppDb {
                 retention_json,
                 plan.limit_upload,
                 plan.limit_download,
+                webhooks_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1157,6 +1244,34 @@ impl AppDb {
         conn.execute("DELETE FROM backup_plans WHERE id = ?1", params![plan_id])
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Lightweight single-plan lookup for the webhook fire path — returns the plan's
+    /// name (for payload text) and webhook list without materializing a full
+    /// `BackupPlan`. `Ok(None)` = plan id doesn't exist (e.g. deleted mid-backup) →
+    /// caller fires nothing.
+    pub fn get_plan_webhooks(
+        &self,
+        plan_id: &str,
+    ) -> Result<Option<(String, Vec<PlanWebhook>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT name, webhooks_json FROM backup_plans WHERE id = ?1",
+            params![plan_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        ) {
+            Ok((name, webhooks_json)) => Ok(Some((
+                name,
+                webhooks_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|e: serde_json::Error| e.to_string())?
+                    .unwrap_or_default(),
+            ))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     // ── settings ────────────────────────────────────────────────────────────
@@ -2078,7 +2193,7 @@ impl AppDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download
+            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json
              FROM backup_plans WHERE id IN ({})",
             placeholders
         );
@@ -2098,6 +2213,7 @@ impl AppDb {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<u32>>(9)?,
                     row.get::<_, Option<u32>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -2105,7 +2221,7 @@ impl AppDb {
             .map_err(|e| e.to_string())?;
 
         rows.into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)| {
+            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)| {
                 Ok(BackupPlan {
                     id,
                     name,
@@ -2127,6 +2243,12 @@ impl AppDb {
                         .map_err(|e: serde_json::Error| e.to_string())?,
                     limit_upload,
                     limit_download,
+                    webhooks: webhooks_json
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e: serde_json::Error| e.to_string())?
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -2309,6 +2431,8 @@ impl AppDb {
             let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
             let exclude_if_present_json =
                 serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
+            let webhooks_json =
+                serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
             let retention_json = plan
                 .retention
                 .as_ref()
@@ -2317,12 +2441,12 @@ impl AppDb {
                 .map_err(|e: serde_json::Error| e.to_string())?;
             tx.execute(
                 "INSERT INTO backup_plans
-                 (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     plan.id, plan.name, plan.repo_id, paths_json, tags_json, excludes_json,
                     exclude_if_present_json, plan.exclude_caches,
-                    retention_json, plan.limit_upload, plan.limit_download,
+                    retention_json, plan.limit_upload, plan.limit_download, webhooks_json,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -2507,6 +2631,7 @@ mod tests {
             retention: None,
             limit_upload: None,
             limit_download: None,
+            webhooks: vec![],
         };
         db.save_backup_plan(&plan).unwrap();
 
@@ -2523,6 +2648,86 @@ mod tests {
         assert_eq!(by_id.len(), 1);
         assert_eq!(by_id[0].exclude_if_present, plans[0].exclude_if_present);
         assert!(by_id[0].exclude_caches);
+    }
+
+    #[test]
+    fn save_backup_plan_round_trips_webhooks() {
+        let db = test_db();
+        let plan = BackupPlan {
+            id: "plan1".to_string(),
+            name: "Daily".to_string(),
+            repo_id: "repo1".to_string(),
+            paths: vec!["/home".to_string()],
+            tags: vec![],
+            excludes: vec![],
+            exclude_if_present: vec![],
+            exclude_caches: false,
+            retention: None,
+            limit_upload: None,
+            limit_download: None,
+            webhooks: vec![
+                PlanWebhook {
+                    id: "w1".to_string(),
+                    url: "https://discord.com/api/webhooks/x".to_string(),
+                    provider: WebhookProvider::Discord,
+                    stages: WebhookStages { started: true, completed: true, failed: false },
+                    template: None,
+                },
+                PlanWebhook {
+                    id: "w2".to_string(),
+                    url: "https://hooks.example.com/x".to_string(),
+                    provider: WebhookProvider::Generic,
+                    stages: WebhookStages::default(),
+                    template: None,
+                },
+                PlanWebhook {
+                    id: "w3".to_string(),
+                    url: "https://hooks.example.com/y".to_string(),
+                    provider: WebhookProvider::Custom,
+                    stages: WebhookStages::default(),
+                    template: Some(r#"{"text": "{planName} {eventName}"}"#.to_string()),
+                },
+            ],
+        };
+        db.save_backup_plan(&plan).unwrap();
+
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].webhooks, plan.webhooks);
+
+        let by_id = db.get_plans_for_ids(&["plan1".to_string()]).unwrap();
+        assert_eq!(by_id[0].webhooks, plan.webhooks);
+
+        // The fire path's lookup agrees too.
+        let (name, webhooks) = db.get_plan_webhooks("plan1").unwrap().unwrap();
+        assert_eq!(name, "Daily");
+        assert_eq!(webhooks, plan.webhooks);
+    }
+
+    #[test]
+    fn old_schema_row_reads_back_empty_webhooks_and_unknown_plan_is_none() {
+        // Simulates a plan row inserted before this migration (NULL webhooks_json) —
+        // both the list read path and the fire-path lookup must tolerate it.
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO backup_plans (id, name, repo_id, paths_json, tags_json, excludes_json)
+                 VALUES ('old-plan', 'Old', 'repo1', '[\"/home\"]', '[]', '[]')",
+                [],
+            )
+            .unwrap();
+        }
+        let plans = db.list_backup_plans().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].webhooks.is_empty());
+
+        let (name, webhooks) = db.get_plan_webhooks("old-plan").unwrap().unwrap();
+        assert_eq!(name, "Old");
+        assert!(webhooks.is_empty());
+
+        // A plan id that doesn't exist (e.g. deleted mid-backup) fires nothing.
+        assert!(db.get_plan_webhooks("no-such-plan").unwrap().is_none());
     }
 
     #[test]
@@ -2572,6 +2777,7 @@ mod tests {
             retention: None,
             limit_upload: None,
             limit_download: None,
+            webhooks: vec![],
         };
         db.import_bundle(&[repo], &[plan], &[]).unwrap();
 

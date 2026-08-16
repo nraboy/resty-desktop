@@ -4,7 +4,9 @@ mod gpu_compat;
 mod scheduler;
 mod tasks;
 
-use commands::{auth, backup_plan, browse, cache, notify, repo, repo_locks, schedule, snapshot, transfer};
+use commands::{
+    auth, backup_plan, browse, cache, notify, repo, repo_locks, schedule, snapshot, transfer, webhook,
+};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -537,6 +539,9 @@ pub fn run() {
             // notifications
             notify::get_notification_settings,
             notify::set_notification_settings,
+            // webhooks
+            webhook::test_webhook,
+            webhook::preview_webhook,
             repo::check_repo,
             repo::prune_all_repos,
             repo::prune_repo,

@@ -69,7 +69,7 @@ src/
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; backup modal with progress; auto-applies retention — see docs/frontend.md
-    BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits — see docs/frontend.md
+    BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits, webhooks — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete/run; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
@@ -92,6 +92,7 @@ src-tauri/
       backup_plan.rs        # List/save/remove backup plans
       schedule.rs           # List/save/remove/toggle schedules; run_schedule_now
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
+      webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
   cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing — see docs/concurrency.md
   scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
@@ -199,6 +200,14 @@ proposing a change — several are pinned by a named test or reference a confirm
   observe `error_count > 0`. Re-adding it needs `execute_backup` to specifically detect restic exit
   code 3 and reclassify that case (a `backup_history`/LogsPage semantics change, not just a
   notification one) — not a trivial toggle re-add.
+- Webhook delivery is fire-and-forget **by design, with silent failures**: all of a plan's
+  endpoints are POSTed sequentially on one detached `spawn_blocking` thread, every result
+  discarded (`let _ =`), no retry/log/notification — a dead webhook must never fail or delay
+  the backup, and one failing endpoint never stops the ones after it (a failure can only
+  delay them, bounded by the 10s per-request timeout). Sequential, not parallel, is the
+  accepted trade-off for the typical 1–3 endpoints per plan; `test_webhook` (Send Test) is
+  the only path that surfaces delivery errors. Don't add fire-time retry/logging without
+  treating it as a deliberate design change — see webhook.rs in docs/backend.md
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`

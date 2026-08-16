@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use zeroize::Zeroize;
 
-use super::cache::{AppDb, BackupPlan, Credential, ImportRepo, MasterKey, RetentionPolicy, Schedule};
+use super::cache::{AppDb, BackupPlan, Credential, ImportRepo, MasterKey, PlanWebhook, RetentionPolicy, Schedule};
 use super::crypto;
 use super::schedule::next_fire_time;
 
@@ -95,6 +95,11 @@ struct ExportPlan {
     retention: Option<RetentionPolicy>,
     limit_upload: Option<u32>,
     limit_download: Option<u32>,
+    /// Rides along in the bundle in **plaintext** — a Discord/Slack webhook URL embeds
+    /// its own auth token, so treat a bundle carrying webhooks with the same care as
+    /// one carrying passwords. `#[serde(default)]` = older bundles import with none.
+    #[serde(default)]
+    webhooks: Vec<PlanWebhook>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -247,6 +252,7 @@ pub fn export_data(
             retention: p.retention.clone(),
             limit_upload: p.limit_upload,
             limit_download: p.limit_download,
+            webhooks: p.webhooks.clone(),
         })
         .collect();
 
@@ -437,6 +443,7 @@ pub fn import_data(
             retention: p.retention.clone(),
             limit_upload: p.limit_upload,
             limit_download: p.limit_download,
+            webhooks: p.webhooks.clone(),
         });
     }
 
@@ -709,6 +716,7 @@ pub fn import_backrest_config(
             retention: p.retention.as_ref().and_then(BackrestRetention::to_resty),
             limit_upload: None,
             limit_download: None,
+            webhooks: Vec::new(),
         });
     }
 
@@ -767,6 +775,7 @@ mod tests {
             retention: None,
             limit_upload: None,
             limit_download: None,
+            webhooks: vec![],
         };
         let json = serde_json::to_string(&plan).unwrap();
         let back: ExportPlan = serde_json::from_str(&json).unwrap();

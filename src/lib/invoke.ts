@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +97,19 @@ export const testRepoConnection = (
   credentials: [string, string][],
 ): Promise<void> =>
   invoke("test_repo_connection", { path, password, readOnly, credentials });
+
+export const testWebhook = (
+  url: string,
+  provider: WebhookProvider,
+  template?: string,
+): Promise<void> =>
+  invoke("test_webhook", { url, provider, template: template ?? null });
+
+export const previewWebhook = (
+  provider: WebhookProvider,
+  template?: string,
+): Promise<WebhookPreview> =>
+  invoke("preview_webhook", { provider, template: template ?? null });
 
 export const getRepoStats = (repoId: string): Promise<ResticStats> =>
   invoke("get_repo_stats", { repoId });
