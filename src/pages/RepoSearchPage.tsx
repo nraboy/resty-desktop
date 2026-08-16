@@ -347,8 +347,8 @@ export default function RepoSearchPage() {
     <div className="p-6">
       <div className="mb-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>
-            ← Snapshots
+          <Button variant="ghost" size="sm" onClick={() => navigate("/")}>
+            ← Repositories
           </Button>
         </div>
         <h1 className="text-xl font-semibold text-gray-100 mt-3">Search Repository</h1>
