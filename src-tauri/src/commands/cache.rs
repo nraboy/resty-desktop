@@ -106,6 +106,9 @@ pub enum WebhookProvider {
     Generic,
     Discord,
     Slack,
+    /// Microsoft Teams — the fixed Adaptive Card wrapper a Power Automate Workflows
+    /// webhook URL expects, with `build_message`'s text nested in a TextBlock.
+    Teams,
     /// User-authored JSON body template with {placeholders} (see webhook.rs's
     /// `interpolate`); the presets ignore `PlanWebhook::template`.
     Custom,

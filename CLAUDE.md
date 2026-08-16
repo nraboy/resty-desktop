@@ -92,7 +92,7 @@ src-tauri/
       backup_plan.rs        # List/save/remove backup plans
       schedule.rs           # List/save/remove/toggle schedules; run_schedule_now
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
-      webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
+      webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
   cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing — see docs/concurrency.md
   scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md

@@ -246,7 +246,7 @@ export interface RetentionPolicy {
   keepYearly?: number;
 }
 
-export type WebhookProvider = "generic" | "discord" | "slack" | "custom";
+export type WebhookProvider = "generic" | "discord" | "slack" | "teams" | "custom";
 
 /** Which backup lifecycle stages fire a webhook. `completed` deliberately has no
  *  changed/unchanged split — that distinction belongs to the OS notification

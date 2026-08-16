@@ -45,6 +45,7 @@ const WEBHOOK_PROVIDER_LABELS: Record<WebhookProvider, string> = {
   generic: "Generic JSON",
   discord: "Discord",
   slack: "Slack",
+  teams: "Teams",
   custom: "Custom JSON",
 };
 
@@ -1006,6 +1007,7 @@ export default function BackupPlanEditPage() {
               <option value="generic">Generic JSON</option>
               <option value="discord">Discord</option>
               <option value="slack">Slack</option>
+              <option value="teams">Teams</option>
               <option value="custom">Custom JSON</option>
             </select>
           </div>

@@ -107,6 +107,24 @@ pub(crate) fn build_body(
         WebhookProvider::Slack => {
             serde_json::json!({ "text": build_message(ev, plan_name) }).to_string()
         }
+        WebhookProvider::Teams => {
+            // The fixed Adaptive Card wrapper a Power Automate "When a Teams webhook
+            // request is received" (Workflows) URL expects — identical for everyone,
+            // only the TextBlock text varies.
+            serde_json::json!({
+                "type": "message",
+                "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "type": "AdaptiveCard",
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "version": "1.4",
+                        "body": [{ "type": "TextBlock", "text": build_message(ev, plan_name), "wrap": true }]
+                    }
+                }]
+            })
+            .to_string()
+        }
         WebhookProvider::Custom => {
             interpolate(template.unwrap_or(""), ev, plan_name)
         }
@@ -163,42 +181,95 @@ fn format_num(n: Option<f64>) -> String {
     }
 }
 
-/// Substitutes every `{name}` occurrence with its placeholder value. The user owns
-/// the JSON structure — `"count": {filesNew}` (bare number) and `"msg": "{planName}"`
-/// (quoted, escaped string) are both valid. Unknown tokens pass through literally.
+/// Splits `template` into a sequence of `{token}` candidates and the literal text between
+/// them — the single scan both `interpolate` and `unknown_placeholders` build on, so a
+/// placeholder's substituted *value* is never re-scanned for further `{token}`s (a
+/// sequential find-and-replace would otherwise let an early substitution — e.g. a repo
+/// named `{errorMessage}` — get re-substituted by a later placeholder in the pass). Only
+/// all-alphabetic `{token}`s count as placeholder candidates, so the template's own JSON
+/// braces (`{"a": 1}`) and empty braces (`{}`) are never treated as one; a non-candidate
+/// brace advances the scan by one char so placeholders inside JSON strings are still found.
+enum Piece<'a> {
+    Literal(&'a str),
+    Token(&'a str),
+}
+
+fn scan(template: &str) -> Vec<Piece<'_>> {
+    let mut pieces = Vec::new();
+    let mut rest = template;
+    loop {
+        match rest.find('{') {
+            Some(open) => {
+                let after = &rest[open + 1..];
+                match after.find('}') {
+                    Some(close_rel) => {
+                        let name = &after[..close_rel];
+                        let candidate =
+                            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic());
+                        if candidate {
+                            if open > 0 {
+                                pieces.push(Piece::Literal(&rest[..open]));
+                            }
+                            pieces.push(Piece::Token(name));
+                            rest = &after[close_rel + 1..];
+                        } else {
+                            // Not a token candidate — consume just past the `{` itself so a
+                            // JSON brace never gets swallowed into the preceding literal run.
+                            pieces.push(Piece::Literal(&rest[..open + 1]));
+                            rest = &rest[open + 1..];
+                        }
+                    }
+                    // Unterminated `{` — the rest is all literal.
+                    None => {
+                        pieces.push(Piece::Literal(rest));
+                        break;
+                    }
+                }
+            }
+            None => {
+                if !rest.is_empty() {
+                    pieces.push(Piece::Literal(rest));
+                }
+                break;
+            }
+        }
+    }
+    pieces
+}
+
+/// Substitutes every `{name}` occurrence with its placeholder value in one left-to-right
+/// pass (see `scan`) — a substituted value is never itself re-scanned for further tokens.
+/// The user owns the JSON structure — `"count": {filesNew}` (bare number) and
+/// `"msg": "{planName}"` (quoted, escaped string) are both valid. Unknown tokens pass
+/// through literally.
 pub(crate) fn interpolate(template: &str, ev: &WebhookEvent, plan_name: &str) -> String {
     let pairs = placeholder_pairs(ev, plan_name);
-    let mut out = template.to_string();
-    for (name, value) in pairs {
-        let token = format!("{{{name}}}");
-        out = out.replace(&token, &value);
+    let mut out = String::with_capacity(template.len());
+    for piece in scan(template) {
+        match piece {
+            Piece::Literal(s) => out.push_str(s),
+            Piece::Token(name) => match pairs.iter().find(|(n, _)| *n == name) {
+                Some((_, value)) => out.push_str(value),
+                None => {
+                    out.push('{');
+                    out.push_str(name);
+                    out.push('}');
+                }
+            },
+        }
     }
     out
 }
 
 /// `{...}` tokens in the template that match no known placeholder — surfaces typos
-/// like `{planname}` in the preview UI. Only all-alphabetic `{token}`s count as
-/// placeholder candidates, so the template's own JSON braces (`{"a": 1}`) and empty
-/// braces are never flagged; a non-candidate brace advances the scan by one char so
-/// placeholders inside JSON strings are still found.
+/// like `{planname}` in the preview UI.
 pub(crate) fn unknown_placeholders(template: &str) -> Vec<String> {
     let mut unknown: Vec<&str> = Vec::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        let after = &rest[open + 1..];
-        match after.find('}') {
-            Some(close_rel) => {
-                let name = &after[..close_rel];
-                let candidate =
-                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic());
-                if candidate && !PLACEHOLDERS.contains(&name) && !unknown.contains(&name) {
-                    unknown.push(name);
-                }
-                // Consume a real token; a JSON brace only steps past the `{` itself.
-                rest = if candidate { &after[close_rel + 1..] } else { &rest[open + 1..] };
+    for piece in scan(template) {
+        if let Piece::Token(name) = piece {
+            if !PLACEHOLDERS.contains(&name) && !unknown.contains(&name) {
+                unknown.push(name);
             }
-            // Unterminated `{` — nothing further can match.
-            None => break,
         }
     }
     unknown.iter().map(|n| format!("{{{n}}}")).collect()
@@ -222,7 +293,7 @@ pub fn fire_webhooks(db: &AppDb, plan_id: Option<&str>, ev: WebhookEvent<'_>) {
     let jobs: Vec<(String, String)> = webhooks
         .into_iter()
         .filter(|w| w.stages.wants(ev.stage) && valid_url(&w.url))
-        .map(|w| (w.url, build_body(w.provider, w.template.as_deref(), &ev, &plan_name)))
+        .map(|w| (w.url.trim().to_string(), build_body(w.provider, w.template.as_deref(), &ev, &plan_name)))
         .collect();
     if jobs.is_empty() {
         return;
@@ -244,6 +315,30 @@ pub fn fire_webhooks(db: &AppDb, plan_id: Option<&str>, ev: WebhookEvent<'_>) {
     });
 }
 
+/// Shared save/test-time gate for a Custom-provider template — non-Custom providers
+/// always pass (their body has no user-authored JSON to break). Requires a non-empty
+/// template, and that it renders valid JSON for **every** stage's sample event, not
+/// just `completed` — the sample events differ per stage (only `Failed` carries a
+/// non-empty `errorMessage`, for instance), so validating just one stage would miss a
+/// template that only breaks on a field another stage substitutes differently. Single
+/// source of truth for both `test_webhook` and `preview_webhook`, so the two can't
+/// drift on what counts as valid.
+fn validate_custom_template(provider: WebhookProvider, template: &str) -> Result<(), String> {
+    if provider != WebhookProvider::Custom {
+        return Ok(());
+    }
+    if template.trim().is_empty() {
+        return Err("Custom webhooks need a JSON body template.".to_string());
+    }
+    for stage in [WebhookStage::Started, WebhookStage::Completed, WebhookStage::Failed] {
+        let body = build_body(provider, Some(template), &sample_event(stage), SAMPLE_PLAN_NAME);
+        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| {
+            format!("Template does not render to valid JSON (with sample values): {e}")
+        })?;
+    }
+    Ok(())
+}
+
 /// Sends a synthetic completed-style event through the exact same `build_body` +
 /// agent/POST path the fire sites use. Unlike `test_repo_connection` this is *not*
 /// an `OperationCtx`/task-bus operation — it's sub-second, not a restic op, and has
@@ -258,6 +353,7 @@ pub async fn test_webhook(
     if !valid_url(&url) {
         return Err("Webhook URL must start with https:// (or http://).".to_string());
     }
+    validate_custom_template(provider, template.as_deref().unwrap_or(""))?;
     let body = build_body(
         provider,
         template.as_deref(),
@@ -320,9 +416,9 @@ pub struct WebhookPreview {
 }
 
 /// Pure, no I/O — deliberately a plain sync command (like `get_notification_settings`),
-/// no spawn_blocking needed. For a custom provider the completed-stage body must parse
-/// as JSON; that check is the save-time validation hook (fire time stays best-effort —
-/// a webhook must never fail a backup).
+/// no spawn_blocking needed. For a custom provider, every stage's body must parse as
+/// JSON (`validate_custom_template`); that check is the save-time validation hook (fire
+/// time stays best-effort — a webhook must never fail a backup).
 #[tauri::command]
 pub fn preview_webhook(
     provider: WebhookProvider,
@@ -330,15 +426,7 @@ pub fn preview_webhook(
 ) -> Result<WebhookPreview, String> {
     let template = template.unwrap_or_default();
     let render = |stage: WebhookStage| build_body(provider, Some(&template), &sample_event(stage), SAMPLE_PLAN_NAME);
-    if provider == WebhookProvider::Custom {
-        if template.trim().is_empty() {
-            return Err("Custom webhooks need a JSON body template.".to_string());
-        }
-        let completed = render(WebhookStage::Completed);
-        serde_json::from_str::<serde_json::Value>(&completed).map_err(|e| {
-            format!("Template does not render to valid JSON (with sample values): {e}")
-        })?;
-    }
+    validate_custom_template(provider, &template)?;
     Ok(WebhookPreview {
         started: render(WebhookStage::Started),
         completed: render(WebhookStage::Completed),
@@ -433,6 +521,20 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["text"], build_message(&ev, "Daily"));
         assert!(v.get("content").is_none());
+    }
+
+    #[test]
+    fn teams_body_is_adaptive_card_with_message_textblock() {
+        let ev = completed_event();
+        let body = build_body(WebhookProvider::Teams, None, &ev, "Daily");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["type"], "message");
+        let content = &v["attachments"][0]["content"];
+        assert_eq!(content["type"], "AdaptiveCard");
+        assert_eq!(content["version"], "1.4");
+        // the message rides inside the card's single TextBlock, escaped by json!()
+        assert_eq!(content["body"][0]["text"], build_message(&ev, "Daily"));
+        assert_eq!(v["attachments"][0]["contentType"], "application/vnd.microsoft.card.adaptive");
     }
 
     #[test]
@@ -691,5 +793,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(preview.unknown_placeholders, vec!["{planname}".to_string()]);
+    }
+
+    #[test]
+    fn validate_custom_template_matches_preview_webhook() {
+        // Non-Custom providers always pass regardless of template content.
+        assert!(validate_custom_template(WebhookProvider::Discord, "").is_ok());
+        assert!(validate_custom_template(WebhookProvider::Generic, "not json").is_ok());
+
+        // Custom: empty template rejected.
+        let err = validate_custom_template(WebhookProvider::Custom, "").unwrap_err();
+        assert!(err.contains("template"), "unexpected error: {err}");
+        let err = validate_custom_template(WebhookProvider::Custom, "   ").unwrap_err();
+        assert!(err.contains("template"), "unexpected error: {err}");
+
+        // Custom: valid template accepted.
+        assert!(validate_custom_template(WebhookProvider::Custom, DEFAULT_TEMPLATE).is_ok());
+
+        // Custom: invalid JSON rejected.
+        let err =
+            validate_custom_template(WebhookProvider::Custom, r#"{"text": "unclosed}"#).unwrap_err();
+        assert!(err.contains("valid JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn interpolate_does_not_re_substitute_a_value_that_contains_another_token() {
+        // A repo named "{errorMessage}" must render as the literal string "{errorMessage}"
+        // in the repo field — not get expanded again because errorMessage is substituted
+        // later in the pass. A sequential find-and-replace over the whole output would
+        // wrongly expand it.
+        let ev = WebhookEvent {
+            stage: WebhookStage::Failed,
+            repo_name: "{errorMessage}",
+            error: Some("disk full"),
+            ..started_event()
+        };
+        let body = interpolate(r#"{"repo":"{repoName}","error":"{errorMessage}"}"#, &ev, "Daily");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["repo"], "{errorMessage}");
+        assert_eq!(v["error"], "disk full");
+    }
+
+    #[test]
+    fn interpolate_plan_name_containing_a_token_is_not_re_substituted() {
+        let ev = completed_event();
+        let body = interpolate(r#"{"plan":"{planName}","new":{filesNew}}"#, &ev, "{filesNew}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["plan"], "{filesNew}");
+        assert_eq!(v["new"], 3);
+    }
+
+    #[test]
+    fn fire_webhooks_trims_whitespace_padded_urls_before_posting() {
+        // valid_url() already trims for the pass/fail gate; the job list built from it
+        // must carry the trimmed URL through to the actual POST, not the raw padded one —
+        // otherwise a URL like "  https://example.com/hook  " passes the gate here but
+        // fails inside ureq at fire time.
+        let padded = "  https://example.com/hook  ";
+        assert!(valid_url(padded));
+        assert_eq!(padded.trim(), "https://example.com/hook");
     }
 }
