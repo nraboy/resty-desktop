@@ -43,6 +43,9 @@
     --tw-amber-500: 245 158 11;
     --tw-amber-700: 180 83 9;
     --tw-amber-900: 120 53 15;
+    /* Purple/yellow accent — ActionButton hover tones (Mirror/Copy, Retention); dark mode originals */
+    --tw-purple-400: 192 132 252;
+    --tw-yellow-400: 250 204 21;
   }
 
   /* Light mode — slate-based palette with cool blue-gray tint */
@@ -85,6 +88,9 @@
     --tw-amber-500: 146 64 14;    /* → amber-800: same as 300/400, same reason */
     --tw-amber-700: 217 119 6;    /* → amber-600 */
     --tw-amber-900: 253 230 138;  /* → amber-200: visible warm bg on white */
+    /* Purple/yellow — dark values for contrast on light backgrounds */
+    --tw-purple-400: 107 33 168;  /* → purple-800: dark text on light bg (~7.1:1 on bg ✓) */
+    --tw-yellow-400: 133 77 14;   /* → yellow-800: dark text on light bg (~5.6:1 on bg ✓) */
   }
 
   /* System mode — follow OS preference */
@@ -119,6 +125,8 @@
       --tw-amber-500: 146 64 14;
       --tw-amber-700: 217 119 6;
       --tw-amber-900: 253 230 138;
+      --tw-purple-400: 107 33 168;
+      --tw-yellow-400: 133 77 14;
     }
   }
 

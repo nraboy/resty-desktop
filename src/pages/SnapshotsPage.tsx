@@ -7,6 +7,7 @@ import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats,
 import { isRemoteRepo } from "../lib/types";
 import { formatBytes, formatDate } from "../lib/format";
 import Button from "../components/Button";
+import ActionButton from "../components/ActionButton";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -592,7 +593,7 @@ export default function SnapshotsPage() {
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
                   {!selectMode && (
-                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20">Actions</th>
+                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20 wide:w-auto">Actions</th>
                   )}
                 </tr>
               </thead>
@@ -674,49 +675,53 @@ export default function SnapshotsPage() {
                     </td>
                     {!selectMode && (
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1">
-                          <button
+                        <div className="flex items-center gap-2">
+                          <ActionButton
+                            label="Browse"
                             title="Browse files"
+                            tone="blue"
                             onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/browse`, { state: { snapshot: snap } })}
-                            className="p-1.5 rounded text-gray-400 hover:text-blue-400 hover:bg-gray-800 transition-colors"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                              <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-                            </svg>
-                          </button>
-                          <button
+                            icon={
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                              </svg>
+                            }
+                          />
+                          <ActionButton
+                            label="Search"
                             title="Search files"
+                            tone="blue"
                             onClick={() => navigate(`/snapshots/${repoId}/${snap.id}/search`, { state: { snapshot: snap } })}
-                            className="p-1.5 rounded text-gray-400 hover:text-blue-400 hover:bg-gray-800 transition-colors"
-                          >
-                            <SearchIcon className="w-4 h-4" />
-                          </button>
-                          <button
+                            icon={<SearchIcon className="w-4 h-4" />}
+                          />
+                          <ActionButton
+                            label="Restore"
                             title="Restore snapshot"
+                            tone="green"
                             onClick={() => { setRestoreTarget(snap); setRestoreDir(defaultRestoreDir); setRestoreDone(false); }}
-                            className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
-                          >
-                            <RestoreIcon className="w-4 h-4" />
-                          </button>
-                          <button
+                            icon={<RestoreIcon className="w-4 h-4" />}
+                          />
+                          <ActionButton
+                            label="Copy"
                             title="Copy to repository"
+                            tone="purple"
                             onClick={() => { setCopyTarget(snap); setCopyDestRepoId(""); setCopyDone(false); }}
-                            className="p-1.5 rounded text-gray-400 hover:text-purple-400 hover:bg-gray-800 transition-colors"
                             disabled={otherRepos.length === 0}
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                              <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z" />
-                              <path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z" />
-                            </svg>
-                          </button>
-                          <button
+                            icon={
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z" />
+                                <path d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z" />
+                              </svg>
+                            }
+                          />
+                          <ActionButton
+                            label="Delete"
                             title={repo?.readOnly ? "This repository is read-only" : "Delete snapshot"}
+                            tone="red"
                             onClick={() => setDeleteTarget(snap)}
                             disabled={repo?.readOnly ?? false}
-                            className="p-1.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent"
-                          >
-                            <TrashIcon className="w-4 h-4" />
-                          </button>
+                            icon={<TrashIcon className="w-4 h-4" />}
+                          />
                         </div>
                       </td>
                     )}

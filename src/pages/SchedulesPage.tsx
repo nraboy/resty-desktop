@@ -5,6 +5,7 @@ import { getTrayEnabled, listBackupPlans, listRepos, listSchedules, removeSchedu
 import type { BackupPlan, Repository, Schedule } from "../lib/types";
 import { formatTimestamp, isOverdue } from "../lib/format";
 import Button from "../components/Button";
+import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import { TrashIcon, PencilIcon, WarningIcon } from "../components/icons";
@@ -278,23 +279,21 @@ export default function SchedulesPage() {
               </div>
 
               {!selectMode && (
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <ActionButton
+                    label="Delete"
+                    title="Delete schedule"
+                    tone="red"
                     onClick={() => setDeleteTarget(sched)}
-                    className="text-gray-500 hover:text-red-300"
-                  >
-                    <TrashIcon className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                    icon={<TrashIcon className="w-4 h-4" />}
+                  />
+                  <ActionButton
+                    label="Edit"
+                    title="Edit schedule"
+                    tone="blue"
                     onClick={() => navigate(`/schedules/${sched.id}`)}
-                    className="text-gray-500 hover:text-blue-400"
-                  >
-                    <PencilIcon className="w-4 h-4" />
-                  </Button>
+                    icon={<PencilIcon className="w-4 h-4" />}
+                  />
                   <button
                     onClick={() => handleToggle(sched)}
                     disabled={toggling === sched.id}

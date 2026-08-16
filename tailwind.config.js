@@ -3,6 +3,16 @@ export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
+      screens: {
+        // Reveal text labels beside row-action icons above this width. The app's window
+        // never goes below tauri.conf.json's minWidth (1280), so stock sm/md/lg/xl are all
+        // permanently true here — this is the one breakpoint that actually toggles. It's in
+        // logical (CSS) px, same units as minWidth; see docs/frontend.md for the units
+        // caveat (a physical 1920px monitor is often well under 1920 logical px). Kept close
+        // to the 1280 minimum on purpose so the toggle is reachable on a laptop's built-in
+        // display without maximizing — raise it if labels feel like they show too eagerly.
+        wide: "1300px",
+      },
       colors: {
         blue: {
           300: "rgb(var(--tw-blue-300) / <alpha-value>)",
@@ -28,6 +38,12 @@ export default {
           500: "rgb(var(--tw-amber-500) / <alpha-value>)",
           700: "rgb(var(--tw-amber-700) / <alpha-value>)",
           900: "rgb(var(--tw-amber-900) / <alpha-value>)",
+        },
+        purple: {
+          400: "rgb(var(--tw-purple-400) / <alpha-value>)",
+        },
+        yellow: {
+          400: "rgb(var(--tw-yellow-400) / <alpha-value>)",
         },
         gray: {
           50:  "rgb(var(--tw-gray-50)  / <alpha-value>)",

@@ -58,6 +58,8 @@ const TEXT_SHADES = {
   green: ["300", "400", "500"],
   red: ["300", "400", "500"],
   amber: ["300", "400", "500"],
+  purple: ["400"],
+  yellow: ["400"],
 };
 
 function textColors(palette: Record<string, Rgb>): Array<[string, Rgb]> {

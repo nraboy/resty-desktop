@@ -20,6 +20,34 @@ Tailwind directives + global styles
 
 ## components/
 
+### `ActionButton.tsx`
+
+Canonical row-action button (Edit/Delete/Restore/Browse/Search/etc. inside a table row or card
+list): renders an icon plus a text `label`, where the label and a neutral `border-gray-700`
+outline are both a pure CSS reveal (`hidden wide:inline` / `wide:border-gray-700`) at the `wide`
+Tailwind breakpoint (`tailwind.config.js`, `theme.extend.screens.wide = "1300px"`, kept close to
+the 1280 window minimum so the toggle is reachable on a laptop's built-in display) — icon-only
+and borderless below it, icon + text + outline above it, no resize listener or re-render on drag
+(the border is always present but `border-transparent` below `wide`, so it never shifts layout
+when it becomes visible). `label` should stay one word wherever the action allows it (`"Edit"`,
+`"Delete"`, `"Restore"`) since it becomes inline button text, not just a tooltip; it's also the
+accessible name (`title`/`aria-label`) unless an optional `title` prop overrides it — use that
+override to keep a longer, more specific hover string ("Browse files", "Delete snapshot") or a
+disabled-state explanation ("This repository is read-only") without lengthening the visible
+button text. `tone` (`blue`/`green`/`purple`/`yellow`/`red`) sets the hover color, matching the
+per-action colors already established (blue = navigate/search, green = restore/run, purple =
+copy/mirror, yellow = retention, red = destructive). Replaces the two icon-only treatments this
+project used to have — bare `p-1.5` buttons in tables and `<Button variant="ghost" size="sm">` in
+card lists — as the one shared row-action shape; don't reintroduce either at a new call site.
+Why a number close to `1280` and not a round physical-resolution number like `1920`: Tailwind breakpoints (like
+Tauri's `minWidth`/`minHeight` window config) are in *logical* (CSS) px, which OS display scaling
+divides down from physical resolution, so a physical 1920px monitor is very often a
+1280-1536px logical viewport (e.g. a MacBook Pro 14" is 1512 logical regardless of its 3024px
+panel) — a 1920 breakpoint would rarely or never fire on a laptop's built-in display. Also worth
+knowing: because the app's window can never go below `tauri.conf.json`'s `minWidth: 1280`, every
+*stock* Tailwind breakpoint below `2xl:1536` is permanently true and therefore useless here —
+`wide` is the only breakpoint in this codebase that actually toggles.
+
 ### `Button.tsx`
 
 primary/secondary/danger/ghost variants
@@ -34,7 +62,7 @@ Empty list placeholder
 
 ### `icons.tsx`
 
-Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, ChevronRightIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningSolid, SearchIcon, RestoreIcon, LockIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs.
+Canonical glyph icons — the single source of truth for every icon used in more than one place (TrashIcon, PencilIcon, XIcon, ChevronDownIcon, ChevronRightIcon, CheckIcon, WarningIcon, the solid status set CheckCircle/XCircle/MinusCircle/WarningSolid, SearchIcon, RestoreIcon, LockIcon). Same meaning must always use the same drawing: add a new icon here (or import an existing one) rather than copy-pasting an inline `<svg>` at point of use. Single-use decorative illustrations (e.g. the empty-state search magnifiers with their strokeWidth variation, Sidebar nav glyphs) stay inline in their page. The duplicated per-page `FileIcon`/`DirIcon` pairs remain an accepted, deferred duplication — see docs/decisions.md. Style split: outline-stroke icons for actions (delete/edit/close, banner warnings, inline confirm ticks, select chevrons) and solid-20 icons for compact row actions and modal-header status glyphs. Row-action glyphs (Edit/Delete/Restore/etc. inside a table row or card list) are wrapped in `ActionButton.tsx`, not a bare `<button>` or `<Button variant="ghost" size="sm">` — see that entry for the responsive icon+label pattern.
 
 ### `ImportExportCard.tsx`
 

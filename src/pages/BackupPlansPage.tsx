@@ -7,6 +7,7 @@ import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
 import { formatDuration } from "../lib/format";
 import { needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
+import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
@@ -407,52 +408,48 @@ export default function BackupPlansPage() {
               </div>
               {!selectMode && (
               <div className="flex items-center gap-2 flex-shrink-0">
-                <Button
-                  variant="ghost"
-                  size="sm"
+                <ActionButton
+                  label="Edit"
                   title="Edit plan"
+                  tone="blue"
                   onClick={() => navigate(`/backup-plans/${plan.id}`)}
-                  className="text-gray-500 hover:text-blue-400"
-                >
-                  <PencilIcon className="w-4 h-4" />
-                </Button>
+                  icon={<PencilIcon className="w-4 h-4" />}
+                />
                 {hasRetentionRules(plan) && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <ActionButton
+                    label="Retention"
                     title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : "Apply retention policy"}
+                    tone="yellow"
                     disabled={planRepoReadOnly(plan)}
                     onClick={() => openRetentionModal(plan)}
-                    className="text-gray-500 hover:text-yellow-400"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-                    </svg>
-                  </Button>
+                    icon={
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                      </svg>
+                    }
+                  />
                 )}
-                <Button
-                  variant="ghost"
-                  size="sm"
+                <ActionButton
+                  label="Run"
                   title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : "Run backup now"}
+                  tone="green"
                   disabled={planRepoReadOnly(plan)}
                   onClick={() => openBackupModal(plan)}
-                  className="text-gray-500 hover:text-green-400"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664zM21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
+                  icon={
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664zM21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  }
+                />
+                <ActionButton
+                  label="Delete"
                   title="Delete plan"
+                  tone="red"
                   onClick={() => setDeleteTarget(plan)}
-                  className="text-gray-500 hover:text-red-300"
-                >
-                  <TrashIcon className="w-4 h-4" />
-                </Button>
+                  icon={<TrashIcon className="w-4 h-4" />}
+                />
               </div>
               )}
             </div>

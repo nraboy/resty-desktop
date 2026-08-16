@@ -40,6 +40,7 @@ import {
 } from "../lib/backends";
 import { formatRelative, formatRepoSize, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
+import ActionButton from "../components/ActionButton";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
@@ -906,8 +907,8 @@ export default function RepositoriesPage() {
                   <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
                 </div>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-4">
                   <div className="text-right min-w-[150px]">
                     {repo.id in statsMap ? (
                       statsMap[repo.id] ? (
@@ -942,51 +943,47 @@ export default function RepositoriesPage() {
                       <p className="text-xs text-gray-500 animate-pulse">loading…</p>
                     )}
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <ActionButton
+                    label="Refresh"
+                    title="Refresh stats"
+                    tone="blue"
                     disabled={refreshingAll || statsRefreshing.includes(repo.id)}
                     onClick={(e) => handleRefreshRow(e, repo)}
-                    className="text-gray-500 hover:text-blue-400"
-                    title="Refresh stats"
-                  >
-                    <svg
-                      className={`w-4 h-4 ${statsRefreshing.includes(repo.id) ? "animate-spin" : ""}`}
-                      fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  </Button>
+                    icon={
+                      <svg
+                        className={`w-4 h-4 ${statsRefreshing.includes(repo.id) ? "animate-spin" : ""}`}
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    }
+                  />
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <ActionButton
+                    label="Search"
+                    title="Search Files…"
+                    tone="blue"
                     onClick={(e) => {
                       e.stopPropagation();
                       navigate(`/snapshots/${repo.id}/search`);
                     }}
-                    className="text-gray-500 hover:text-blue-400"
-                    title="Search Files…"
-                  >
-                    <SearchIcon className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                    icon={<SearchIcon className="w-4 h-4" />}
+                  />
+                  <ActionButton
+                    label="Rename"
+                    tone="blue"
                     onClick={(e) => {
                       e.stopPropagation();
                       openEditModal(repo);
                     }}
-                    className="text-gray-500 hover:text-blue-400"
-                    title="Rename"
-                  >
-                    <PencilIcon className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                    icon={<PencilIcon className="w-4 h-4" />}
+                  />
+                  <ActionButton
+                    label="Mirror"
+                    title={repos.every((r) => r.id === repo.id || r.readOnly) ? "No writable destination repository available" : "Mirror to another repository"}
+                    tone="purple"
                     disabled={repos.every((r) => r.id === repo.id || r.readOnly)}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1001,27 +998,23 @@ export default function RepositoriesPage() {
                       setMirrorOutcome(null);
                       setMirrorFailureError("");
                     }}
-                    className="text-gray-500 hover:text-purple-400"
-                    title={repos.every((r) => r.id === repo.id || r.readOnly) ? "No writable destination repository available" : "Mirror to another repository"}
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                    </svg>
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                    icon={
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                      </svg>
+                    }
+                  />
+                  <ActionButton
+                    label="Remove"
+                    tone="red"
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeleteTarget(repo);
                       setDeleteError("");
                     }}
-                    className="text-gray-500 hover:text-red-300"
-                    title="Remove"
-                  >
-                    <TrashIcon className="w-4 h-4" />
-                  </Button>
+                    icon={<TrashIcon className="w-4 h-4" />}
+                  />
                 </div>
               </div>
             </div>

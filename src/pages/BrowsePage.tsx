@@ -6,6 +6,7 @@ import type { Snapshot } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import { formatSize, formatDateOnly } from "../lib/format";
 import Button from "../components/Button";
+import ActionButton from "../components/ActionButton";
 import ContextMenu from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -381,7 +382,7 @@ export default function BrowsePage() {
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
-              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24">Actions</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24 wide:w-auto">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800">
@@ -433,13 +434,12 @@ export default function BrowsePage() {
                     {entry.mtime ? formatDateOnly(entry.mtime) : "—"}
                   </td>
                   <td className="px-4 py-2.5">
-                    <button
-                      title="Restore"
+                    <ActionButton
+                      label="Restore"
+                      tone="green"
                       onClick={() => { setRestoreTarget(entry); setTargetDir(defaultTargetDir); setStripLeadingPath(true); }}
-                      className="p-1.5 rounded text-gray-400 hover:text-green-400 hover:bg-gray-800 transition-colors"
-                    >
-                      <RestoreIcon className="w-4 h-4" />
-                    </button>
+                      icon={<RestoreIcon className="w-4 h-4" />}
+                    />
                   </td>
                 </tr>
               ))

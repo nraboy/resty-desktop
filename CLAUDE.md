@@ -39,6 +39,7 @@ src/
   main.tsx              # React entry; suppresses context menu globally
   index.css             # Tailwind directives + global styles
   components/
+    ActionButton.tsx      # Canonical row-action button: icon + label, label reveals as text at the `wide` breakpoint — see docs/frontend.md
     Button.tsx            # primary/secondary/danger/ghost variants
     ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen
     EmptyState.tsx        # Empty list placeholder

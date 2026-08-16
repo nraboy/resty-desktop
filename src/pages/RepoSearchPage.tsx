@@ -472,7 +472,7 @@ export default function RepoSearchPage() {
                             {entry.snapshotShortId}
                           </span>
                           <span className="w-16 shrink-0 text-right tabular-nums whitespace-nowrap">{formatSize(entry.size)}</span>
-                          <span className="hidden sm:inline w-40 shrink-0 text-right tabular-nums whitespace-nowrap">
+                          <span className="w-40 shrink-0 text-right tabular-nums whitespace-nowrap">
                             {entry.mtime ? formatDate(entry.mtime) : "—"}
                           </span>
                           <ChevronRightIcon className="w-4 h-4 text-gray-500 group-hover:text-gray-400 transition-colors flex-shrink-0" />
