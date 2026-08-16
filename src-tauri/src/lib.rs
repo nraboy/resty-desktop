@@ -4,7 +4,7 @@ mod gpu_compat;
 mod scheduler;
 mod tasks;
 
-use commands::{auth, backup_plan, browse, cache, repo, repo_locks, schedule, snapshot, transfer};
+use commands::{auth, backup_plan, browse, cache, notify, repo, repo_locks, schedule, snapshot, transfer};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -534,6 +534,9 @@ pub fn run() {
             repo::set_remote_auto_refresh,
             repo::get_auto_indexing,
             repo::set_auto_indexing,
+            // notifications
+            notify::get_notification_settings,
+            notify::set_notification_settings,
             repo::check_repo,
             repo::prune_all_repos,
             repo::prune_repo,

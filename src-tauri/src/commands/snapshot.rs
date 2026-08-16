@@ -486,13 +486,18 @@ pub async fn execute_backup(
             &history_id, repo_id, plan_id, None, started_at, 0.0, 0, 0, 0, Some(e.as_str()),
         );
         let _ = app.emit("backup:history-updated", ());
-        use tauri_plugin_notification::NotificationExt;
-        let _ = app.notification().builder().title("Backup failed").body(&e).show();
+        super::notify::notify(app, db, super::notify::NotifyCategory::Failures, "Backup failed", &e);
         return Err(e);
     }
 
     let restic_path = super::get_restic_path(db);
     let compression = db.get_setting("compression", "auto").unwrap_or_else(|_| "auto".to_string());
+
+    // Deliberately the repo's *name*, not `repo.path` — a REST repo's path can carry inline
+    // userinfo credentials (`rest:https://user:PASS@host/repo`), which must never land in an
+    // OS notification body. Falls back to repo_id (opaque, never secret) if the lookup fails.
+    let repo_display = db.get_repo_name(repo_id).unwrap_or_else(|_| repo_id.to_string());
+    super::notify::notify(app, db, super::notify::NotifyCategory::Started, "Backup started", &repo_display);
 
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
     for tag in &tags {
@@ -682,7 +687,6 @@ pub async fn execute_backup(
 
     let duration = started.elapsed().as_secs_f64();
 
-    use tauri_plugin_notification::NotificationExt;
     use rand::Rng;
     let history_id: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
@@ -723,14 +727,9 @@ pub async fn execute_backup(
             // doesn't cover manual runs, so this stays the one signal both share.
             let _ = app.emit("backup:history-updated", ());
 
-            let body = format!(
-                "{} new, {} changed · {:.1}s",
-                files_new, files_changed, duration
-            );
-            let _ = app.notification().builder()
-                .title("Backup completed")
-                .body(&body)
-                .show();
+            let category = super::notify::classify_success(files_new, files_changed);
+            let body = format!("{} new, {} changed · {:.1}s", files_new, files_changed, duration);
+            super::notify::notify(app, db, category, "Backup completed", &body);
 
             Ok(stdout.clone())
         }
@@ -747,15 +746,12 @@ pub async fn execute_backup(
             let _ = app.emit("backup:history-updated", ());
 
             if was_cancelled {
-                let _ = app.notification().builder()
-                    .title("Backup cancelled")
-                    .body("The backup was cancelled before it finished.")
-                    .show();
+                super::notify::notify(
+                    app, db, super::notify::NotifyCategory::Failures,
+                    "Backup cancelled", "The backup was cancelled before it finished.",
+                );
             } else {
-                let _ = app.notification().builder()
-                    .title("Backup failed")
-                    .body(err)
-                    .show();
+                super::notify::notify(app, db, super::notify::NotifyCategory::Failures, "Backup failed", err);
             }
 
             Err(err.clone())

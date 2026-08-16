@@ -21,7 +21,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | File picker | `tauri-plugin-dialog` (xdg-desktop-portal backend on Linux, not GTK; see docs/decisions.md) |
 | Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
-| Notifications | `tauri-plugin-notification` — shown on backup success/failure |
+| Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/failure, each gated by a global setting (`commands/notify.rs`) |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 3 (macOS/Windows only), opt-in, stores the *derived* master key; see docs/data.md |
@@ -83,6 +83,7 @@ src-tauri/
       auth.rs               # Setup/unlock/lock master password; auto-unlock — see docs/data.md
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
+      notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
@@ -192,6 +193,12 @@ Any new command doing DB work slow enough to notice should be `async fn` + `spaw
 These were deliberately kept as-is after prior audits raised them. Read the linked entry before
 proposing a change — several are pinned by a named test or reference a confirmed regression.
 
+- Notification preferences have no "Warnings" category — restic ≥0.17 (this app's own minimum
+  supported version) always exits non-zero for the one condition it would represent (per-file read
+  errors during an otherwise-successful backup), so `execute_backup`'s exit-0 success path can never
+  observe `error_count > 0`. Re-adding it needs `execute_backup` to specifically detect restic exit
+  code 3 and reclassify that case (a `backup_history`/LogsPage semantics change, not just a
+  notification one) — not a trivial toggle re-add.
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`

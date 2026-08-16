@@ -5,6 +5,7 @@ pub mod browse;
 pub mod cache;
 pub mod crypto;
 pub mod keychain;
+pub mod notify;
 pub mod repo;
 pub mod repo_locks;
 pub mod schedule;

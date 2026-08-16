@@ -735,6 +735,19 @@ impl AppDb {
         Ok(repos)
     }
 
+    /// Repo display name only — deliberately separate from `get_full_repo`, whose `path` can
+    /// carry inline REST userinfo credentials (`rest:https://user:PASS@host/repo`) and must
+    /// never be used in a notification body. See `notify::notify`'s "Backup started" call site.
+    pub fn get_repo_name(&self, repo_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT name FROM repositories WHERE id = ?1",
+            params![repo_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn get_full_repo(&self, repo_id: &str, key: &[u8; 32]) -> Result<FullRepository, String> {
         let (path, nonce, ciphertext, read_only, cred_nonce, cred_ciphertext) = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1161,6 +1174,30 @@ impl AppDb {
         }
     }
 
+    /// Reads several `app_settings` keys under a single mutex acquisition/query, rather than one
+    /// `get_setting` (one lock + one query each) per key — used by `notify::load`, which would
+    /// otherwise take the shared `AppDb` mutex 5 times per notification (up to 10 times per
+    /// backup). Keys absent from the table are simply absent from the returned map; callers
+    /// apply their own per-key defaults.
+    pub fn get_settings(&self, keys: &[&str]) -> Result<std::collections::HashMap<String, String>, String> {
+        // An empty slice would otherwise build `WHERE key IN ()` — a SQL syntax error.
+        if keys.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT key, value FROM app_settings WHERE key IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(keys.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -1168,6 +1205,26 @@ impl AppDb {
             params![key, value],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Writes several `app_settings` keys atomically in one transaction — used by
+    /// `notify::save`, which writes five keys per call. Without this, two overlapping
+    /// `set_notification_settings` invocations (Tauri offloads sync commands to its own thread
+    /// pool with no ordering guarantee between separate invoke calls) could interleave their
+    /// five individual `set_setting` writes, leaving `app_settings` holding a mix of fields from
+    /// two different saves rather than either call's value cleanly winning.
+    pub fn set_settings(&self, entries: &[(&str, &str)]) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (key, value) in entries {
+            tx.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -2425,6 +2482,14 @@ mod tests {
         assert!(!mk.is_locked());
         mk.clear().unwrap();
         assert!(mk.is_locked());
+    }
+
+    #[test]
+    fn get_settings_with_empty_keys_returns_ok_empty_map() {
+        // Would otherwise build `WHERE key IN ()` — a SQL syntax error.
+        let db = test_db();
+        let rows = db.get_settings(&[]).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]

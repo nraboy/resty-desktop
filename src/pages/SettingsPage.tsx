@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setLaunchAtLogin, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getNotificationSettings, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setLaunchAtLogin, setNotificationSettings, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
+import type { NotificationSettings } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import { useActivity } from "../lib/activity";
@@ -12,6 +13,13 @@ import Input from "../components/Input";
 import Modal from "../components/Modal";
 import ImportExportCard from "../components/ImportExportCard";
 import { ChevronDownIcon, CheckIcon, WarningIcon } from "../components/icons";
+
+const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  started: false,
+  successChanged: true,
+  successUnchanged: false,
+  failures: true,
+};
 
 const THEMES: { value: Theme; label: string; description: string }[] = [
   { value: "system", label: "System", description: "Follow the OS appearance" },
@@ -71,6 +79,25 @@ export default function SettingsPage() {
   const [autoUnlockSupported, setAutoUnlockSupported] = useState(false);
   const [autoIndexing, setAutoIndexingLocal] = useState(false);
   const [remoteAutoRefresh, setRemoteAutoRefreshLocal] = useState(false);
+  const [notifications, setNotificationsLocal] = useState<NotificationSettings>(DEFAULT_NOTIFICATION_SETTINGS);
+  // Mirrors `notifications` synchronously so updateNotifications can read/merge the latest value
+  // without a functional setState updater — React.StrictMode (main.tsx) intentionally
+  // double-invokes updater functions in dev, and the IPC save below must fire exactly once per
+  // click, so the merge + side effect live in the plain event-handler body, not inside a setter.
+  const notificationsRef = useRef(notifications);
+  // Saves are full-object writes, so two independently in-flight saves can't be reconciled by
+  // reverting individual fields (a later save's payload may already embed an earlier save's
+  // change). These two refs serialize saves instead: at most one setNotificationSettings call is
+  // ever in flight, and it always sends the latest merged state — see runNotificationsSaveLoop.
+  const notificationsSavingRef = useRef(false);
+  const notificationsDirtyRef = useRef(false);
+  // One-way "user touched this" latch for the mount-effect load below. Unlike the two refs
+  // above, it is never cleared once set — the saving/dirty flags both return to false once
+  // runNotificationsSaveLoop drains, so a slow initial getNotificationSettings() resolving
+  // *after* a completed save would still pass a guard on them and overwrite the just-persisted
+  // state with the stale pre-change value. Once the user has clicked any checkbox, the save
+  // loop is the sole source of truth for this card.
+  const notificationsTouchedRef = useRef(false);
 
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -94,6 +121,14 @@ export default function SettingsPage() {
     getAutoUnlockSupported().then(setAutoUnlockSupported).catch(() => {});
     getAutoIndexing().then(setAutoIndexingLocal).catch(() => {});
     getRemoteAutoRefresh().then(setRemoteAutoRefreshLocal).catch(() => {});
+    getNotificationSettings().then((v) => {
+      // Discard this stale read if the user already changed something before it resolved —
+      // applying it here would clobber whatever the user set, and the save loop that change
+      // triggered already reflects it correctly.
+      if (notificationsTouchedRef.current) return;
+      notificationsRef.current = v;
+      setNotificationsLocal(v);
+    }).catch(() => {});
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -175,6 +210,61 @@ export default function SettingsPage() {
       // app_settings row.
       getLaunchAtLogin().then(setLaunchAtLoginLocal).catch(() => {});
     }
+  };
+
+  // Runs at most one setNotificationSettings call at a time, always sending the latest merged
+  // state. A per-field local revert on failure can't be made correct here — saves send the whole
+  // object, so a later save's payload can already embed an earlier save's change, and reverting
+  // that field locally would then contradict what the later save actually persisted. Resyncing
+  // from the server on failure sidesteps that entirely: it's correct regardless of what any other
+  // in-flight or already-committed save did.
+  const runNotificationsSaveLoop = async () => {
+    if (notificationsSavingRef.current) return;
+    notificationsSavingRef.current = true;
+    try {
+      while (notificationsDirtyRef.current) {
+        notificationsDirtyRef.current = false;
+        const snapshot = notificationsRef.current;
+        try {
+          await setNotificationSettings(snapshot);
+        } catch (err: any) {
+          setError(String(err));
+          // Only resync if nothing newer is already queued (e.g. the user made another change
+          // while this save was in flight, setting the flag back to true) — otherwise the loop's
+          // next iteration will resend that fresher state anyway, and overwriting
+          // notificationsRef with the server's (older) value here would silently discard it.
+          if (!notificationsDirtyRef.current) {
+            try {
+              const server = await getNotificationSettings();
+              // Re-check after this await too — a change can just as easily land during the
+              // resync fetch itself, not only during the save above.
+              if (!notificationsDirtyRef.current) {
+                notificationsRef.current = server;
+                setNotificationsLocal(server);
+              }
+            } catch {
+              // Best effort — leave the optimistic UI as-is if the resync read itself fails.
+            }
+          }
+        }
+      }
+    } finally {
+      notificationsSavingRef.current = false;
+    }
+  };
+
+  // Merges against notificationsRef (not a functional setState updater — React.StrictMode
+  // double-invokes those in dev, which would fire the IPC save twice per click) so two
+  // checkboxes clicked in quick succession each build on the other's just-applied change rather
+  // than a stale closure. The actual save is handed off to runNotificationsSaveLoop, which
+  // serializes it against any other in-flight save.
+  const updateNotifications = (patch: Partial<NotificationSettings>) => {
+    notificationsTouchedRef.current = true;
+    const next = { ...notificationsRef.current, ...patch };
+    notificationsRef.current = next;
+    notificationsDirtyRef.current = true;
+    setNotificationsLocal(next);
+    void runNotificationsSaveLoop();
   };
 
   const handleClearCache = async () => {
@@ -567,6 +657,56 @@ export default function SettingsPage() {
               </p>
             )}
           </div>
+        </div>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Notifications</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Choose which desktop notifications appear for backups — manual and scheduled alike.
+          Muting a category only hides the notification; the backup still shows up in Recent Logs
+          and the Activity panel either way.
+        </p>
+        <div className="grid grid-cols-3 gap-x-6 gap-y-2">
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+            <input
+              type="checkbox"
+              className="w-4 h-4 accent-blue-500"
+              checked={notifications.started}
+              onChange={(e) => updateNotifications({ started: e.target.checked })}
+            />
+            Backup started
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+            <input
+              type="checkbox"
+              className="w-4 h-4 accent-blue-500"
+              checked={notifications.successChanged}
+              onChange={(e) => updateNotifications({ successChanged: e.target.checked })}
+            />
+            Success (files changed)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+            <input
+              type="checkbox"
+              className="w-4 h-4 accent-blue-500"
+              checked={notifications.successUnchanged}
+              onChange={(e) => updateNotifications({ successUnchanged: e.target.checked })}
+            />
+            Success (no files changed)
+          </label>
+          <label
+            className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer"
+            title="Includes cancelled backups."
+          >
+            <input
+              type="checkbox"
+              className="w-4 h-4 accent-blue-500"
+              checked={notifications.failures}
+              onChange={(e) => updateNotifications({ failures: e.target.checked })}
+            />
+            Failures
+          </label>
         </div>
       </div>
 

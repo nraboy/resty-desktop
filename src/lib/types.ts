@@ -87,6 +87,16 @@ export interface SnapshotStats {
   totalFileCount: number;
 }
 
+/** Global notification toggles, gating the five `.show()` sites in execute_backup (Rust) —
+ * see notify.rs. Applies to manual and scheduled backups alike; muting a category only hides
+ * the desktop notification, never the Recent Logs entry or Activity panel event. */
+export interface NotificationSettings {
+  started: boolean;
+  successChanged: boolean;
+  successUnchanged: boolean;
+  failures: boolean;
+}
+
 export interface BackupHistoryEntry {
   id: string;
   repoId: string;

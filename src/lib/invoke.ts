@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -154,6 +154,12 @@ export const getAutoIndexing = (): Promise<boolean> =>
 
 export const setAutoIndexing = (value: boolean): Promise<void> =>
   invoke("set_auto_indexing", { value });
+
+export const getNotificationSettings = (): Promise<NotificationSettings> =>
+  invoke("get_notification_settings");
+
+export const setNotificationSettings = (value: NotificationSettings): Promise<void> =>
+  invoke("set_notification_settings", { value });
 
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
