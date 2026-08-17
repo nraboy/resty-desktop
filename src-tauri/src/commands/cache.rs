@@ -883,35 +883,26 @@ impl AppDb {
         Ok(())
     }
 
+    /// Removes the repo row plus the small, PK-indexed cache rows keyed directly by
+    /// `repo_id` (`browse_cache_status`, `snapshots_cache`, `repo_stats_cache`) — all
+    /// bounded by this repo's snapshot count, so this stays fast even for a
+    /// long-lived repo. Deliberately does **not** cascade into `browse_cache_files`/
+    /// `indexed_snapshots` (keyed by `snapshot_id`, not `repo_id`): those can hold one
+    /// row per file across every indexed snapshot, so for a repo with a lot of
+    /// indexing history that delete can be enormous and slow — this used to run
+    /// inline here, making "remove repository" hang for minutes. Deleting
+    /// `snapshots_cache` above is what turns those rows into orphans (no remaining
+    /// `snapshots_cache` entry references their `snapshot_id`), which "Clean Orphaned
+    /// Data" (`clean_cache`) already exists to sweep up on the user's own schedule —
+    /// see its doc comment for the matching orphan definition.
     pub fn remove_repo(&self, repo_id: &str) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM repositories WHERE id = ?1", params![repo_id])
             .map_err(|e| e.to_string())?;
 
-        // Cascade cleanup: remove browse cache entries for this repo's snapshots.
-        // browse_cache_status is keyed by (repo_id, snapshot_id).
         tx.execute(
             "DELETE FROM browse_cache_status WHERE repo_id = ?1",
-            params![repo_id],
-        )
-        .map_err(|e| e.to_string())?;
-
-        // browse_cache_files/indexed_snapshots are keyed by snapshot_id without
-        // repo_id, so we delete all rows for snapshots that belong to this repo
-        // (via snapshots_cache) before that table itself is cleared below.
-        tx.execute(
-            "DELETE FROM browse_cache_files WHERE snap IN (
-                SELECT id FROM indexed_snapshots WHERE snapshot_id IN
-                    (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)
-             )",
-            params![repo_id],
-        )
-        .map_err(|e| e.to_string())?;
-
-        tx.execute(
-            "DELETE FROM indexed_snapshots WHERE snapshot_id IN
-                (SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1)",
             params![repo_id],
         )
         .map_err(|e| e.to_string())?;
@@ -2567,8 +2558,13 @@ pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub fn clean_cache(db: tauri::State<'_, AppDb>) -> Result<(u64, u64), String> {
-    db.clean_cache()
+pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, u64), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.clean_cache()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

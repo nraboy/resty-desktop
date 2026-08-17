@@ -311,8 +311,13 @@ pub async fn add_repo(
 }
 
 #[tauri::command]
-pub async fn remove_repo(db: State<'_, AppDb>, repo_id: String) -> Result<(), String> {
-    db.remove_repo(&repo_id)
+pub async fn remove_repo(app: tauri::AppHandle, repo_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<AppDb>();
+        db.remove_repo(&repo_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
