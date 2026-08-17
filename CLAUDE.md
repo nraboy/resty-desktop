@@ -220,6 +220,9 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `list_snapshots`, `get_snapshot_index_status`, `get_repo_stats` don't emit on the `task` bus
 - `get_repo_stats` is cache-only and must never fall through to a live `restic stats` call
 - `browse_cache_files.parent_path` duplicates a prefix of `path` on purpose (index speed)
+- `remove_repo` deliberately does **not** cascade into `browse_cache_files`/`indexed_snapshots`
+  (keyed by `snapshot_id`, not `repo_id`); that delete was unbounded and made repo removal hang
+  for minutes. `clean_cache` sweeps the resulting orphans — see docs/data.md.
 - Stored repo size (`ResticStats.raw_size`) comes from `restic stats --mode raw-data`, not a `du`/filesystem walk (works for remote repos too); a failed raw-data call is non-fatal to the refresh
 - File search uses `LIKE '%query%'` (leading wildcard, no index) — accepted, not an oversight
 - `cached_at` columns are written but not read yet — kept for a future TTL feature

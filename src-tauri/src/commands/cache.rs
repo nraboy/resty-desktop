@@ -3599,6 +3599,74 @@ mod tests {
         assert_eq!(count_rows(&db, "browse_cache_status"), 1);
     }
 
+    fn sample_file_entry() -> FileEntry {
+        FileEntry {
+            name: "secret.txt".to_string(),
+            path: "/home/secret.txt".to_string(),
+            entry_type: "file".to_string(),
+            size: Some(123),
+            mtime: None,
+            mode: None,
+        }
+    }
+
+    /// Pins the contract `remove_repo`'s doc comment relies on: it no longer cascades
+    /// into `browse_cache_files`/`indexed_snapshots` directly, but the rows it leaves
+    /// behind must be exactly what `clean_cache`'s orphan sweep picks up next.
+    #[test]
+    fn remove_repo_leaves_file_rows_for_clean_cache() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+
+        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+
+        db.remove_repo("repo1").unwrap();
+
+        // Directly repo_id-keyed rows are gone immediately.
+        assert_eq!(count_rows(&db, "repositories"), 0);
+        assert_eq!(count_rows(&db, "snapshots_cache"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+
+        // File rows are left behind, now orphaned, for clean_cache to sweep.
+        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+
+        let (removed, _size) = db.clean_cache().unwrap();
+        assert!(removed >= 2, "expected clean_cache to remove the orphaned file rows, got {removed}");
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+    }
+
+    /// `browse_cache_files`/`indexed_snapshots` are keyed by `snapshot_id` alone, with
+    /// no `repo_id` column — two repos that happen to share a snapshot id (e.g. the
+    /// same underlying repo added twice) share those index rows too. Removing one repo
+    /// must not delete indexing the other repo still relies on; only clean_cache's
+    /// "nothing left references this snapshot_id" sweep may do that.
+    #[test]
+    fn remove_repo_keeps_file_rows_shared_with_another_repo() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "shared00000000000");
+        seed_snapshot(&db, "repo2", "shared00000000000");
+        db.set_browse_status("repo1", "shared00000000000", "complete").unwrap();
+        db.set_browse_status("repo2", "shared00000000000", "complete").unwrap();
+        db.insert_browse_files("shared00000000000", &[sample_file_entry()]).unwrap();
+
+        db.remove_repo("repo1").unwrap();
+
+        // repo2's snapshots_cache row still references the shared snapshot_id, so
+        // clean_cache must leave the file rows alone.
+        let (removed, _size) = db.clean_cache().unwrap();
+        assert_eq!(removed, 0, "file rows still referenced by repo2 must survive");
+        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+    }
+
     // ── migration regression ─────────────────────────────────────────────────
 
     /// Simulate an existing v0.1.0 database (user_version 0, JSON-blob cache
