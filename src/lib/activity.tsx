@@ -132,6 +132,12 @@ export interface ActivityState {
    *  Lets the Settings "Prune All" modal be dismissed without cancelling the operation, matching
    *  activeIndexBatches' survive-navigation behavior. */
   activePrune: ActivePrune | null;
+  /** The currently-running "Clean Orphaned Data" run (Settings), if any — derived from `kind:
+   *  "cleanup"` task events, single-in-flight app-wide (CleanupHandle busy flag), see
+   *  reduceCleanup. Unlike most rows in this file it is gated by nothing — every click emits,
+   *  including a run that finds 0 orphans, so an already-clean database still flashes a
+   *  near-instant row. That's intentional for a manual, user-initiated click. */
+  activeCleanup: ActiveCleanup | null;
   /** Next three enabled, due schedules, soonest first. */
   upcoming: UpcomingBackup[];
   /** Last three backup history entries, newest first. */
@@ -202,8 +208,8 @@ export function standaloneSnapshotIndexes(
 /** The fields activeTaskCount reads — a Pick so callers (and unit tests) don't have to supply
  *  the setter/functions in the full ActivityState. */
 export type ActiveTaskCountState = Pick<ActivityState,
-  "indexing" | "activeBackup" | "activePrune" | "statsRefreshing" | "activeIndexBatches"
-  | "activeSnapshotIndexes" | "activeMirrors" | "statsRefreshAllProgress">;
+  "indexing" | "activeBackup" | "activePrune" | "activeCleanup" | "statsRefreshing"
+  | "activeIndexBatches" | "activeSnapshotIndexes" | "activeMirrors" | "statsRefreshAllProgress">;
 
 /** Number of background tasks the Activity panel surfaces — drives the Sidebar's footer status
  *  strip and the panel's own empty-state, from one shared computation so they can't drift.
@@ -222,6 +228,7 @@ export function activeTaskCount(state: ActiveTaskCountState): number {
     (state.indexing != null ? 1 : 0) +
     (state.activeBackup != null ? 1 : 0) +
     (state.activePrune != null ? 1 : 0) +
+    (state.activeCleanup != null ? 1 : 0) +
     state.activeIndexBatches.length +
     state.activeMirrors.length +
     standaloneSnapshotIndexes(state.activeIndexBatches, state.activeSnapshotIndexes).length +
@@ -430,6 +437,51 @@ export function reducePrune(state: ActivePrune | null, event: TaskEvent): Active
   }
 }
 
+/** The "Clean Orphaned Data" run (Settings), if one is in progress — derived from `kind:
+ *  "cleanup"` task events. Single-in-flight app-wide, like `ActivePrune` (backed by the same
+ *  busy-flag pattern — see `CleanupHandle` in cache.rs), so a single nullable rather than a Map.
+ *  Unlike prune, `itemsTotal` is known before any batch runs (from `pending_orphan_row_count`) —
+ *  the backend's `Started` event itself carries no progress (`OperationCtx::new`'s initial event
+ *  never does, see tasks.rs's `build_event`), but it's immediately followed by one `Progress`
+ *  event carrying the real total before the drain loop's first batch, so a cleanup row is never
+ *  visibly stuck at itemsTotal: 0 the way a single-repo prune's indeterminate row is. */
+export interface ActiveCleanup {
+  operationId: string;
+  itemsDone: number;
+  itemsTotal: number;
+}
+
+/** Pure reducer over `cleanup`-kind task events, modeled directly on `reducePrune` — same
+ *  single-in-flight-app-wide shape and the same `operationId` guard against a stale event from a
+ *  just-superseded run touching a freshly started one. Exported for a unit test (see
+ *  activity.test.ts). */
+export function reduceCleanup(state: ActiveCleanup | null, event: TaskEvent): ActiveCleanup | null {
+  if (event.kind !== "cleanup") return state;
+  switch (event.phase) {
+    case "started":
+      // Matches reducePrune: always zeroed, regardless of anything on event.progress.
+      // The backend's Started event never carries progress in practice (OperationCtx::new's
+      // initial event always sends progress: None — see tasks.rs's build_event) — clean_cache
+      // emits the real total via an immediate follow-up Progress event instead (see
+      // ActiveCleanup's doc comment), so this case doesn't need to read one.
+      return { operationId: event.operationId, itemsDone: 0, itemsTotal: 0 };
+    case "progress":
+      if (!state || state.operationId !== event.operationId) return state;
+      return {
+        ...state,
+        itemsDone: event.progress?.itemsDone ?? state.itemsDone,
+        itemsTotal: event.progress?.itemsTotal ?? state.itemsTotal,
+      };
+    case "finished":
+    case "failed":
+    case "cancelled":
+      if (!state || state.operationId !== event.operationId) return state;
+      return null;
+    default:
+      return state; // "pending"/"cancelling" — cleanup never emits pending; cancelling is local UI state
+  }
+}
+
 /** A queued or running mirror (RepositoriesPage's "Mirror to another repository") — derived from
  *  its `task` op. `status` starts "queued" on a "pending" event and flips to "running" once
  *  "started" arrives, mirroring `ActiveIndexBatch`'s same two-state shape. No `itemsDone`/
@@ -578,6 +630,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [indexing, setIndexing] = useState<{ cached: number; total: number } | null>(null);
   const [activeBackup, setActiveBackup] = useState<ActiveScheduledBackup | null>(null);
   const [activePrune, setActivePrune] = useState<ActivePrune | null>(null);
+  const [activeCleanup, setActiveCleanup] = useState<ActiveCleanup | null>(null);
   const [upcoming, setUpcoming] = useState<UpcomingBackup[]>([]);
   const [recentLogs, setRecentLogs] = useState<BackupHistoryEntry[]>([]);
   const [statsRefreshing, setStatsRefreshing] = useState<string[]>([]);
@@ -606,6 +659,9 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   // activePrune is derived from this on every "task" event via reducePrune; same
   // compare-by-reference discipline as the refs above.
   const pruneRef = useRef<ActivePrune | null>(null);
+  // activeCleanup is derived from this on every "task" event via reduceCleanup; same
+  // compare-by-reference discipline as pruneRef above.
+  const cleanupRef = useRef<ActiveCleanup | null>(null);
   // activeMirrors is derived from this on every "task" event via reduceMirror; same
   // compare-by-reference discipline as indexBatchesRef above (a Map, since multiple mirrors
   // can be queued/running at once — see reduceMirror's doc comment).
@@ -668,6 +724,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       if (nextPrune !== pruneRef.current) {
         pruneRef.current = nextPrune;
         setActivePrune(nextPrune);
+      }
+      const nextCleanup = reduceCleanup(cleanupRef.current, e.payload);
+      if (nextCleanup !== cleanupRef.current) {
+        cleanupRef.current = nextCleanup;
+        setActiveCleanup(nextCleanup);
       }
       const nextMirrors = reduceMirror(mirrorsRef.current, e.payload);
       if (nextMirrors !== mirrorsRef.current) {
@@ -765,9 +826,9 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   return (
     <ActivityContext.Provider
       value={{
-        indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, statsFailed,
-        activeIndexBatches, activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, clockTick,
-        statsRefreshAllProgress, setStatsRefreshAllProgress,
+        indexing, activeBackup, activePrune, activeCleanup, upcoming, recentLogs, statsRefreshing,
+        statsFailed, activeIndexBatches, activeSnapshotIndexes, activeMirrors, indexBatchRepoNames,
+        clockTick, statsRefreshAllProgress, setStatsRefreshAllProgress,
       }}
     >
       {children}

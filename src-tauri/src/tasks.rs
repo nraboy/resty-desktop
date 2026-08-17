@@ -41,6 +41,11 @@ pub enum TaskKind {
     // Operation Event Bus section for the covered-operation list).
     #[allow(dead_code)]
     Init,
+    /// The "Clean Orphaned Data" button (`clean_cache`, commands/cache.rs). Unlike every
+    /// other kind, this is app-wide rather than per-repo — it emits `repo_id: ""`, since
+    /// orphaned cache rows aren't scoped to one repository. Consumers that key off
+    /// `repoId` must not assume this kind carries a real one.
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

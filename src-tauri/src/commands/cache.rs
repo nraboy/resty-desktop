@@ -11,11 +11,24 @@ use super::browse::FileEntry;
 use super::crypto;
 use super::repo::ResticStats;
 use super::snapshot::Snapshot;
-use crate::tasks::{new_task_slot, TaskSlot};
+use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress, TaskSlot};
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
 /// never drift — the Logs page never shows rows the trim would have deleted.
 const BACKUP_HISTORY_LIMIT: i64 = 1000;
+
+/// Rows deleted per `drain_orphans` call by the synchronous, single-call
+/// `AppDb::clean_cache` (tests, and any other non-`spawn_blocking` caller). The
+/// `clean_cache` Tauri command uses the same batch size for its own incremental loop
+/// — see `commands/cache.rs`'s command-level `clean_cache` for why batching matters.
+const CLEAN_CACHE_BATCH_ROWS: usize = 5_000;
+
+/// One `drain_orphans` call's result. `more_remaining` tells the caller whether to
+/// call again.
+pub struct DrainBatch {
+    pub rows_deleted: u64,
+    pub more_remaining: bool,
+}
 
 /// (salt, verification_nonce, verification_ciphertext) from the `master_key` table.
 type MasterKeyRow = (Vec<u8>, Vec<u8>, Vec<u8>);
@@ -403,6 +416,33 @@ impl PruneHandle {
     }
 }
 
+/// App-state handle for the "Clean Orphaned Data" button (`clean_cache`). Unlike
+/// every other handle in this file, cleanup never shells out to restic — there's no
+/// child process to track or kill, so `cancelled` alone is the entire cancel path,
+/// checked between `drain_orphans` batches. Cancelling loses no work: each batch
+/// commits independently and the `orphaned_at` marks persist, so the next click
+/// resumes exactly where the previous run stopped.
+pub struct CleanupHandle {
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while a cleanup is running. Serializes clicks so two concurrent
+    /// clean_cache calls can't both drain and double-count — same busy-guard
+    /// pattern as PruneHandle/BackupHandle.
+    pub busy: std::sync::atomic::AtomicBool,
+    /// Identity of the currently-running operation on the `task` event bus, if
+    /// any — read by `stop_cleanup` to emit a `Cancelling` event. See tasks.rs.
+    pub current_task: TaskSlot,
+}
+
+impl CleanupHandle {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            busy: std::sync::atomic::AtomicBool::new(false),
+            current_task: new_task_slot(),
+        }
+    }
+}
+
 pub struct RestoreHandle {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -741,6 +781,14 @@ impl AppDb {
         // only the restore-size figure it already had. See docs/restic.md.
         let _ = conn.execute_batch(
             "ALTER TABLE repo_stats_cache ADD COLUMN raw_size INTEGER;",
+        );
+        // Additive, nullable — unix-seconds timestamp set once a snapshot's browse-cache rows
+        // are known to be orphaned (its id no longer appears in any repo's snapshots_cache).
+        // NULL means "not orphaned". Used by mark_orphans/drain_orphans to delete
+        // browse_cache_files in bounded batches instead of one unbounded transaction — see
+        // clean_cache's doc comment and docs/data.md.
+        let _ = conn.execute_batch(
+            "ALTER TABLE indexed_snapshots ADD COLUMN orphaned_at INTEGER;",
         );
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
@@ -2274,6 +2322,20 @@ impl AppDb {
 
     // ── global clear ─────────────────────────────────────────────────────────
 
+    /// Wipes every cache table (all rebuilt on next use — see docs/data.md). Deliberately
+    /// does **not** `VACUUM`: each `DELETE FROM table;` here has no `WHERE` clause, so
+    /// SQLite's truncate optimization deallocates the whole table in one step regardless
+    /// of row count — cheap and fast no matter how large the cache was. `VACUUM` is a
+    /// different cost entirely: it rewrites every live page in the database, scaling with
+    /// total DB size rather than rows deleted, and holds the same single `AppDb` connection
+    /// mutex for however long that takes — on a multi-GB database, long enough to be the
+    /// same class of freeze `clean_cache`'s old unbounded transaction caused (see its own
+    /// doc comment). `VACUUM` isn't batchable the way a row-scoped delete is either (it
+    /// would need `auto_vacuum = INCREMENTAL`, a real schema change, not just chunking).
+    /// `compress_database` ("Compress Database") already exists as the dedicated place for
+    /// that cost — reclaiming space is deliberately its job alone, not an implicit side
+    /// effect of clearing data here. Run it after this if the freed space needs to be
+    /// returned to the OS.
     pub fn clear_cache(&self) -> Result<u64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
@@ -2284,23 +2346,39 @@ impl AppDb {
              DELETE FROM repo_stats_cache;",
         )
         .map_err(|e| e.to_string())?;
-        // VACUUM rewrites all live pages into the WAL (in WAL mode). Checkpoint
-        // afterwards moves those compacted pages into the main file and truncates
-        // the WAL, so both files end up small.
-        conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
         Ok(self.checkpoint_and_size(&conn))
     }
 
-    /// Remove only orphaned cache rows, leaving live caches intact. Returns
-    /// `(rows_deleted, db_size_bytes)`. Orphans are:
-    ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
-    ///     exists in `repositories` (e.g. a deleted repo),
-    ///   - `browse_cache_files` / `browse_cache_status` / `indexed_snapshots`
-    ///     rows whose `snapshot_id` is not referenced by any remaining
-    ///     `snapshots_cache` entry.
-    pub fn clean_cache(&self) -> Result<(u64, u64), String> {
+    /// Deletes the small repo-keyed orphan rows (`snapshots_cache`/`repo_stats_cache`
+    /// whose `repo_id` no longer exists — e.g. a removed repo), then, using that
+    /// now-up-to-date `snapshots_cache`, marks every `indexed_snapshots` row no longer
+    /// referenced by *any* repo (stamping `orphaned_at`) and deletes every
+    /// `browse_cache_status` row in the same position. Does **not** touch
+    /// `browse_cache_files`; `drain_orphans` does that, in bounded batches. Returns the
+    /// number of rows actually deleted this call (repo-keyed + status rows) — marking
+    /// alone isn't counted, since nothing is removed until `drain_orphans` retires it.
+    ///
+    /// The repo-keyed sweep must run **before** the orphan check below, in the same
+    /// transaction: removing a dead repo's `snapshots_cache` row is what turns its
+    /// snapshot's `browse_cache_status`/`indexed_snapshots` rows into orphans in the
+    /// first place. Reversing the order would leave last call's dead-repo rows
+    /// invisible to this call's orphan check for one extra call.
+    ///
+    /// `snapshots_cache` is global, not per-repo, so "referenced" means "referenced by
+    /// *any* repo" — this preserves clean_cache's original semantics where two repos
+    /// sharing a snapshot id (no `repo_id` column on `browse_cache_files`/
+    /// `indexed_snapshots`) keep each other's rows alive. See
+    /// `remove_repo_keeps_file_rows_shared_with_another_repo`.
+    ///
+    /// Idempotent: re-running only advances `indexed_snapshots` rows currently `NULL`,
+    /// and un-marks anything that reappeared in `snapshots_cache` since being marked
+    /// (e.g. a repo re-added between runs) — its `browse_cache_status` row is already
+    /// gone by then, so it simply re-indexes, which is correct since its file rows may
+    /// already be partially drained.
+    pub fn mark_orphans(&self) -> Result<u64, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = timestamp();
         let mut removed = 0u64;
 
         removed += tx
@@ -2310,7 +2388,6 @@ impl AppDb {
                 [],
             )
             .map_err(|e| e.to_string())? as u64;
-
         removed += tx
             .execute(
                 "DELETE FROM repo_stats_cache
@@ -2319,24 +2396,14 @@ impl AppDb {
             )
             .map_err(|e| e.to_string())? as u64;
 
-        removed += tx
-            .execute(
-                "DELETE FROM browse_cache_files
-                 WHERE snap IN (
-                     SELECT id FROM indexed_snapshots
-                     WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)
-                 )",
-                [],
-            )
-            .map_err(|e| e.to_string())? as u64;
-
-        removed += tx
-            .execute(
-                "DELETE FROM indexed_snapshots
-                 WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)",
-                [],
-            )
-            .map_err(|e| e.to_string())? as u64;
+        tx.execute(
+            "UPDATE indexed_snapshots
+             SET orphaned_at = ?1
+             WHERE orphaned_at IS NULL
+               AND snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)",
+            params![now],
+        )
+        .map_err(|e| e.to_string())?;
 
         removed += tx
             .execute(
@@ -2346,9 +2413,126 @@ impl AppDb {
             )
             .map_err(|e| e.to_string())? as u64;
 
+        // Un-mark anything that reappeared in snapshots_cache since being marked.
+        tx.execute(
+            "UPDATE indexed_snapshots
+             SET orphaned_at = NULL
+             WHERE orphaned_at IS NOT NULL
+               AND snapshot_id IN (SELECT snapshot_id FROM snapshots_cache)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
         tx.commit().map_err(|e| e.to_string())?;
-        // Checkpoint under the still-held lock so the size read sees exactly
-        // what's on disk, with no background WAL writes racing in between.
+        Ok(removed)
+    }
+
+    /// Number of `browse_cache_files` rows still waiting on `drain_orphans` — i.e. rows
+    /// belonging to a snapshot `mark_orphans` has already marked. Used to give a
+    /// progress bar a denominator; a run's actual `rows_deleted` total can slightly
+    /// exceed this by the end (it also counts the retired `indexed_snapshots` rows and
+    /// `mark_orphans`'s own repo-keyed/status deletions) — callers should clamp for
+    /// display rather than try to make the two sums match exactly.
+    pub fn pending_orphan_row_count(&self) -> Result<u64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM browse_cache_files
+             WHERE snap IN (SELECT id FROM indexed_snapshots WHERE orphaned_at IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Deletes up to `max_rows` orphaned `browse_cache_files` rows (marked by a prior
+    /// `mark_orphans` call) in one short transaction, and retires any `indexed_snapshots`
+    /// row left with zero file rows. Call repeatedly (checking `more_remaining`) to
+    /// drain a large backlog without holding the single `AppDb` connection mutex for
+    /// more than one batch at a time — see `clean_cache`'s doc comment for why that
+    /// matters. Does not repeat `mark_orphans`'s repo-keyed sweep; call that first.
+    pub fn drain_orphans(&self, max_rows: usize) -> Result<DrainBatch, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut removed = 0u64;
+
+        // Bounded file-row delete. SQLite only accepts LIMIT on DELETE when built
+        // with SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which rusqlite's `bundled`
+        // feature does not set — hence the rowid subquery form.
+        // browse_cache_files has PK (snap, path), not INTEGER PRIMARY KEY, so it's
+        // a rowid table and this works.
+        //
+        // Must run before the indexed_snapshots cleanup below in the same
+        // transaction: if reversed, a marked snapshot's mapping row would be
+        // dropped while its file rows still exist, making them unreachable by
+        // every future query (they're looked up via `snap`, which comes from
+        // this mapping) — an unrecoverable leak, not just a slower sweep.
+        removed += tx
+            .execute(
+                "DELETE FROM browse_cache_files WHERE rowid IN (
+                     SELECT rowid FROM browse_cache_files
+                     WHERE snap IN (SELECT id FROM indexed_snapshots WHERE orphaned_at IS NOT NULL)
+                     LIMIT ?1
+                 )",
+                params![max_rows as i64],
+            )
+            .map_err(|e| e.to_string())? as u64;
+
+        // Retire marked snapshots that now have zero file rows left.
+        removed += tx
+            .execute(
+                "DELETE FROM indexed_snapshots
+                 WHERE orphaned_at IS NOT NULL
+                   AND id NOT IN (SELECT DISTINCT snap FROM browse_cache_files)",
+                [],
+            )
+            .map_err(|e| e.to_string())? as u64;
+
+        let more_remaining: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM browse_cache_files
+                     WHERE snap IN (SELECT id FROM indexed_snapshots WHERE orphaned_at IS NOT NULL)
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(DrainBatch { rows_deleted: removed, more_remaining })
+    }
+
+    /// Remove only orphaned cache rows, leaving live caches intact, in a single
+    /// synchronous call. Returns `(rows_deleted, db_size_bytes)`. Orphans are:
+    ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
+    ///     exists in `repositories` (e.g. a deleted repo),
+    ///   - `browse_cache_files` / `browse_cache_status` / `indexed_snapshots`
+    ///     rows whose `snapshot_id` is not referenced by any remaining
+    ///     `snapshots_cache` entry.
+    ///
+    /// Internally this is `mark_orphans` followed by `drain_orphans` looped to
+    /// completion — the same primitives the `clean_cache` Tauri command uses, except
+    /// this method runs the whole sweep in one call with no batching pause, so it's
+    /// only appropriate for callers (this module's tests) that don't need to keep the
+    /// `AppDb` connection mutex free while it runs. The async command wraps
+    /// `mark_orphans`/`drain_orphans` itself instead, yielding between batches — see
+    /// its doc comment.
+    ///
+    /// Only exercised directly by this module's tests today (`cargo clippy
+    /// --all-targets` still flags it dead-code from the non-test lib target) — kept as
+    /// a `pub fn` rather than `#[cfg(test)]`-gated since it's the natural non-batched
+    /// building block any future non-UI caller (e.g. a CLI/debug command) would want.
+    #[allow(dead_code)]
+    pub fn clean_cache(&self) -> Result<(u64, u64), String> {
+        let mut removed = self.mark_orphans()?;
+        loop {
+            let batch = self.drain_orphans(CLEAN_CACHE_BATCH_ROWS)?;
+            removed += batch.rows_deleted;
+            if !batch.more_remaining {
+                break;
+            }
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let size = self.checkpoint_and_size(&conn);
         Ok((removed, size))
     }
@@ -2557,14 +2741,124 @@ pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// "Clean Orphaned Data" — mark, then drain in `CLEAN_CACHE_BATCH_ROWS`-row batches,
+/// yielding the `AppDb` connection mutex between batches so a large backlog (recorded
+/// in practice at 100K+ rows) never freezes the app the way the old single-transaction
+/// sweep could. See `AppDb::mark_orphans`/`drain_orphans` for the mechanism and
+/// `AppDb::clean_cache` for the synchronous, non-batched equivalent used by tests.
+/// Signature and return shape (`rows_deleted`, `db_size_bytes`) are unchanged from
+/// before batching, so the `invoke.ts` wrapper and Settings UI need no changes.
 #[tauri::command]
-pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, u64), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let db = app.state::<AppDb>();
-        db.clean_cache()
+pub async fn clean_cache(
+    app: tauri::AppHandle,
+    cleanup_handle: tauri::State<'_, CleanupHandle>,
+) -> Result<(u64, u64), String> {
+    use std::sync::atomic::Ordering;
+
+    if cleanup_handle
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A cleanup is already running".to_string());
+    }
+    struct BusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _busy = BusyGuard(&cleanup_handle.busy);
+    cleanup_handle.cancelled.store(false, Ordering::SeqCst);
+
+    let app_for_db = app.clone();
+    let marked = tauri::async_runtime::spawn_blocking(move || {
+        app_for_db.state::<AppDb>().mark_orphans()
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    let app_for_db = app.clone();
+    let total = tauri::async_runtime::spawn_blocking(move || {
+        app_for_db.state::<AppDb>().pending_orphan_row_count()
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // repo_id is deliberately "" — cleanup is app-wide, not scoped to one repo. See
+    // TaskKind::Cleanup's doc comment.
+    let task_ctx = OperationCtx::new(
+        app.clone(),
+        TaskKind::Cleanup,
+        String::new(),
+        None,
+        TaskOrigin::Manual,
+        Some(cleanup_handle.current_task.clone()),
+    );
+    let progress = task_ctx.progress_emitter();
+    // OperationCtx::new's Started event always carries progress: None (see
+    // build_event) — items_total is already known at this point (from
+    // pending_orphan_row_count above), so emit it immediately rather than
+    // leaving the frontend at itemsTotal: 0 until the first batch round-trips.
+    let mut removed = marked;
+    progress.emit(TaskProgress {
+        items_done: Some(removed),
+        items_total: Some(total),
+        ..Default::default()
+    });
+
+    let result: Result<(), String> = loop {
+        if cleanup_handle.cancelled.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        let app_for_db = app.clone();
+        let batch = match tauri::async_runtime::spawn_blocking(move || {
+            app_for_db.state::<AppDb>().drain_orphans(CLEAN_CACHE_BATCH_ROWS)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => break Err(e),
+            Err(e) => break Err(e),
+        };
+        removed += batch.rows_deleted;
+        progress.emit(TaskProgress {
+            items_done: Some(removed),
+            items_total: Some(total),
+            ..Default::default()
+        });
+        if !batch.more_remaining {
+            break Ok(());
+        }
+        // Release the blocking-pool thread so a command already queued on the
+        // AppDb mutex gets scheduled before we come back around for the next
+        // batch — the whole point of batching in the first place.
+        tokio::task::yield_now().await;
+    };
+
+    let cancelled = cleanup_handle.cancelled.load(Ordering::SeqCst);
+    match &result {
+        Ok(_) if cancelled => task_ctx.cancelled(),
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
+    }
+    result?;
+
+    let size = tauri::async_runtime::spawn_blocking(move || app.state::<AppDb>().get_size())
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok((removed, size))
+}
+
+#[tauri::command]
+pub async fn stop_cleanup(
+    app: tauri::AppHandle,
+    cleanup_handle: tauri::State<'_, CleanupHandle>,
+) -> Result<(), String> {
+    emit_cancelling(&app, &cleanup_handle.current_task);
+    cleanup_handle.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2943,6 +3237,43 @@ mod tests {
             .query_row("SELECT raw_size FROM repo_stats_cache WHERE repo_id = 'repoA'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(raw_size, None);
+    }
+
+    #[test]
+    fn init_schema_adds_orphaned_at_column_to_existing_indexed_snapshots() {
+        // Simulate an install that already has `indexed_snapshots` from before
+        // `orphaned_at` existed (the pre-clean_cache-batching shape).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE indexed_snapshots (
+                 id           INTEGER PRIMARY KEY,
+                 snapshot_id  TEXT NOT NULL UNIQUE
+             );
+             INSERT INTO indexed_snapshots (snapshot_id) VALUES ('aaaa111100000000');",
+        )
+        .unwrap();
+
+        AppDb::init_schema(&conn).expect("init_schema should migrate the existing table");
+        // Idempotent: a second call (every subsequent app startup) must not error.
+        AppDb::init_schema(&conn).expect("init_schema must be idempotent");
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(indexed_snapshots)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(cols.contains(&"orphaned_at".to_string()));
+
+        let orphaned_at: Option<i64> = conn
+            .query_row(
+                "SELECT orphaned_at FROM indexed_snapshots WHERE snapshot_id = 'aaaa111100000000'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned_at, None, "pre-existing row must default to not-orphaned");
     }
 
     #[test]
@@ -3665,6 +3996,183 @@ mod tests {
         assert_eq!(removed, 0, "file rows still referenced by repo2 must survive");
         assert_eq!(count_rows(&db, "browse_cache_files"), 1);
         assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+    }
+
+    // ── mark_orphans / drain_orphans (batched clean_cache primitives) ─────────
+
+    fn file_entries(n: usize) -> Vec<FileEntry> {
+        (0..n)
+            .map(|i| FileEntry {
+                name: format!("f{i}.txt"),
+                path: format!("/home/f{i}.txt"),
+                entry_type: "file".to_string(),
+                size: Some(1),
+                mtime: None,
+                mode: None,
+            })
+            .collect()
+    }
+
+    fn orphaned_at_of(db: &AppDb, snapshot_id: &str) -> Option<i64> {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT orphaned_at FROM indexed_snapshots WHERE snapshot_id = ?1",
+                rusqlite::params![snapshot_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn mark_orphans_stamps_and_drops_status_without_touching_file_rows() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
+        db.mark_orphans().unwrap();
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+        // File rows untouched by mark_orphans — that's drain_orphans's job.
+        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+    }
+
+    #[test]
+    fn mark_orphans_is_idempotent() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+
+        db.mark_orphans().unwrap();
+        let first_stamp = orphaned_at_of(&db, "aaaa111100000000");
+        assert_eq!(db.mark_orphans().unwrap(), 0, "second call should mark 0 more");
+        assert_eq!(
+            orphaned_at_of(&db, "aaaa111100000000"),
+            first_stamp,
+            "an existing mark must not be restamped"
+        );
+    }
+
+    #[test]
+    fn mark_orphans_never_marks_a_snapshot_shared_with_another_repo() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "shared00000000000");
+        seed_snapshot(&db, "repo2", "shared00000000000");
+        db.insert_browse_files("shared00000000000", &[sample_file_entry()]).unwrap();
+
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+
+        assert!(
+            orphaned_at_of(&db, "shared00000000000").is_none(),
+            "still referenced by repo2's snapshots_cache — must not be marked"
+        );
+    }
+
+    #[test]
+    fn mark_orphans_unmarks_a_resurrected_snapshot() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
+
+        // Repo re-added, snapshot re-appears in snapshots_cache.
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.mark_orphans().unwrap();
+
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
+        // Its status row was dropped when it was marked and isn't restored —
+        // resurrected snapshots re-index rather than being trusted as still cached.
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+    }
+
+    #[test]
+    fn drain_orphans_respects_max_rows_and_only_retires_the_snapshot_on_the_final_batch() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+
+        let batch1 = db.drain_orphans(2).unwrap();
+        assert_eq!(batch1.rows_deleted, 2);
+        assert!(batch1.more_remaining);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1, "snapshot has 1 file row left");
+
+        let batch2 = db.drain_orphans(2).unwrap();
+        assert_eq!(batch2.rows_deleted, 2, "1 remaining file row + the retired indexed_snapshots row");
+        assert!(!batch2.more_remaining);
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+    }
+
+    #[test]
+    fn drain_orphans_resumes_after_being_interrupted() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(5)).unwrap();
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+
+        // Stop after one batch, as if the button were clicked again later.
+        let batch1 = db.drain_orphans(2).unwrap();
+        assert!(batch1.more_remaining);
+
+        // Resume: drain to completion.
+        let mut total = batch1.rows_deleted;
+        loop {
+            let batch = db.drain_orphans(2).unwrap();
+            total += batch.rows_deleted;
+            if !batch.more_remaining {
+                break;
+            }
+        }
+        assert_eq!(total, 6, "5 file rows + 1 retired indexed_snapshots row");
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+    }
+
+    #[test]
+    fn drain_orphans_leaves_a_live_snapshots_file_rows_untouched() {
+        let db = test_db();
+        seed_repo(&db, "live-repo");
+        seed_snapshot(&db, "live-repo", "aaaa111100000000");
+        db.set_browse_status("live-repo", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+
+        seed_repo(&db, "dead-repo");
+        seed_snapshot(&db, "dead-repo", "bbbb222200000000");
+        db.insert_browse_files("bbbb222200000000", &file_entries(3)).unwrap();
+        db.remove_repo("dead-repo").unwrap();
+
+        db.mark_orphans().unwrap();
+        loop {
+            let batch = db.drain_orphans(2).unwrap();
+            if !batch.more_remaining {
+                break;
+            }
+        }
+
+        // The live snapshot's index survives a full mark+drain untouched.
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 1);
     }
 
     // ── migration regression ─────────────────────────────────────────────────

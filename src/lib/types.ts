@@ -183,7 +183,7 @@ export const MIRROR_ALREADY_ACTIVE_ERROR = "MirrorAlreadyActive";
 export type TaskKind =
   | "backup" | "restore" | "restorePath" | "copy" | "mirror" | "prune"
   | "forget" | "tag" | "check" | "diff" | "index" | "unlock" | "stats"
-  | "testConnection" | "browse" | "init";
+  | "testConnection" | "browse" | "init" | "cleanup";
 export type TaskPhase =
   | "pending" | "started" | "progress" | "cancelling" | "cancelled" | "finished" | "failed";
 // "pending" (queued, not yet running) is emitted by "Index All" batches waiting

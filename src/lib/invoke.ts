@@ -354,6 +354,8 @@ export const clearBrowseCache = (): Promise<number> =>
 export const cleanCache = (): Promise<[number, number]> =>
   invoke("clean_cache");
 
+export const stopCleanup = (): Promise<void> => invoke("stop_cleanup");
+
 export const compressDatabase = (): Promise<number> =>
   invoke("compress_database");
 

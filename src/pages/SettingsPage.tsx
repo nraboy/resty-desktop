@@ -12,6 +12,7 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import ImportExportCard from "../components/ImportExportCard";
+import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, WarningIcon } from "../components/icons";
 
@@ -30,7 +31,7 @@ const THEMES: { value: Theme; label: string; description: string }[] = [
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
-  const { activePrune } = useActivity();
+  const { activePrune, activeCleanup } = useActivity();
   const [resticPath, setResticPathLocal] = useState("restic");
   const [compression, setCompression] = useState("auto");
   const [restorePath, setRestorePathLocal] = useState("");
@@ -1033,7 +1034,7 @@ export default function SettingsPage() {
           <strong className="text-gray-400"> Clean Orphaned Data</strong> removes only orphaned entries left
           behind by deleted repositories and forgotten snapshots,
           <strong className="text-gray-400"> Clear All Cache</strong> wipes everything (rebuilt on
-          next use), and
+          next use, run Compress Database afterward to reclaim the freed space), and
           <strong className="text-gray-400"> Compress Database</strong> reclaims disk space left
           behind by deleted rows without removing any data.
         </p>
@@ -1068,6 +1069,20 @@ export default function SettingsPage() {
             </span>
           )}
         </div>
+        {activeCleanup && (
+          <div className="mt-3 max-w-xs space-y-1">
+            <ProgressBar
+              percent={
+                activeCleanup.itemsTotal > 0
+                  ? Math.min(100, (activeCleanup.itemsDone / activeCleanup.itemsTotal) * 100)
+                  : 0
+              }
+            />
+            <p className="text-xs text-gray-500">
+              {activeCleanup.itemsDone.toLocaleString()} orphaned entries removed
+            </p>
+          </div>
+        )}
         {cacheOpError && <p className="text-sm text-red-300 mt-3">{cacheOpError}</p>}
         {dbSize !== null && (
           <p className="text-xs text-gray-500 mt-3">Current DB Size: {formatBytes(dbSize)}</p>

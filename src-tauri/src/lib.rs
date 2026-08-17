@@ -398,6 +398,7 @@ pub fn run() {
             app.manage(cache::MirrorHandle::new());
             app.manage(cache::BackupHandle::new());
             app.manage(cache::PruneHandle::new());
+            app.manage(cache::CleanupHandle::new());
             app.manage(cache::RestoreHandle::new());
             app.manage(cache::IndexHandle::new());
             app.manage(repo_locks::RepoLocks::new());
@@ -591,6 +592,7 @@ pub fn run() {
             // cache
             cache::clear_browse_cache,
             cache::clean_cache,
+            cache::stop_cleanup,
             cache::compress_database,
             cache::get_db_size,
             cache::list_backup_history,

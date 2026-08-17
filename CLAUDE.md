@@ -172,7 +172,9 @@ never instead of, existing detailed feeds (`backup:progress`, etc.). Envelope: `
 concurrent operations), `kind`, `phase` (`started`|`progress`|`cancelling`|`cancelled`|
 `finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at`. Every
 restic-shelling operation is wired via `OperationCtx`, except pure-DB reads (`list_snapshots`,
-`get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick.
+`get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
+(`clean_cache`, the "Clean Orphaned Data" button) is the one kind that emits `repoId: ""` — it
+never shells out to restic and isn't scoped to a single repo; every other kind carries a real one.
 
 ## Security Architecture
 
@@ -222,7 +224,21 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `browse_cache_files.parent_path` duplicates a prefix of `path` on purpose (index speed)
 - `remove_repo` deliberately does **not** cascade into `browse_cache_files`/`indexed_snapshots`
   (keyed by `snapshot_id`, not `repo_id`); that delete was unbounded and made repo removal hang
-  for minutes. `clean_cache` sweeps the resulting orphans — see docs/data.md.
+  for minutes. `clean_cache` sweeps the resulting orphans in bounded batches — see docs/data.md.
+  Retention (`apply_retention`) is the more common orphan source in practice, not repo removal.
+- `clean_cache` is `mark_orphans` (instant — stamps `indexed_snapshots.orphaned_at`, drops
+  `browse_cache_status`) followed by `drain_orphans` looped in `CLEAN_CACHE_BATCH_ROWS`-row
+  batches, each its own transaction, yielding the `AppDb` connection mutex between batches — the
+  same one-transaction-holds-everything problem `remove_repo`'s old cascade had, fixed by
+  batching the delete instead of shrinking it. Marking before any file-row delete means an
+  interrupted run (Stop, crash, quit) never leaves a snapshot claiming to be indexed with its
+  file rows partially gone — see cache.rs's doc comments on both functions.
+- `clear_cache` ("Clear All Cache") deliberately does **not** `VACUUM` — its `DELETE FROM table;`
+  calls have no `WHERE` clause, so SQLite's truncate optimization already makes them cheap
+  regardless of row count; `VACUUM` scales with total DB size instead and would hold the same
+  `AppDb` connection mutex for however long that takes, the same freeze class `clean_cache`'s old
+  unbounded transaction caused. Reclaiming space is `compress_database` ("Compress Database")'s job
+  alone — see docs/decisions.md.
 - Stored repo size (`ResticStats.raw_size`) comes from `restic stats --mode raw-data`, not a `du`/filesystem walk (works for remote repos too); a failed raw-data call is non-fatal to the refresh
 - File search uses `LIKE '%query%'` (leading wildcard, no index) — accepted, not an oversight
 - `cached_at` columns are written but not read yet — kept for a future TTL feature

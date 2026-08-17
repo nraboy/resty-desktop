@@ -178,9 +178,18 @@ unambiguous — a *running* mirror is killed immediately, a *queued* one never s
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**Frontend scope — six stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
+**`clean_cache` (`TaskKind::Cleanup`, the "Clean Orphaned Data" button) is wired despite shelling
+out to nothing** — the one deliberate exception to "restic-shelling operation" as the wiring
+criterion. It's wired anyway because it's a user-bounded, click-triggered operation that can run
+for minutes on a large backlog (batched `DELETE`s over a possibly-huge `browse_cache_files`), the
+same shape as prune or a backup, not a database read like `list_snapshots`/`get_repo_stats` above.
+It's also the one kind that emits `repoId: ""` — cleanup isn't scoped to a single repository, so
+consumers keying off `repoId` must not assume every kind carries a real one.
+
+**Frontend scope — seven stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
 `index`'s batch-level progress, the scheduler-backup `activeBackup` row, `prune`'s
-`activePrune` row, and mirror's `activeMirrors`); everything else still emits into the void.**
+`activePrune` row, mirror's `activeMirrors`, and cleanup's `activeCleanup` row); everything else
+still emits into the void.**
 `src/lib/types.ts`
 mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, reduceMirror, activeTaskCount, standaloneSnapshotIndexes, type StatsOpsState, type ActiveTaskCountState } from "./activity";
+import { reduceStatsOps, initialStatsOpsState, reduceIndexBatches, reduceSnapshotIndexes, reduceSchedulerBackup, reducePrune, reduceCleanup, reduceMirror, activeTaskCount, standaloneSnapshotIndexes, type StatsOpsState, type ActiveTaskCountState } from "./activity";
 import type { TaskEvent } from "./types";
 
 function taskEvent(overrides: Partial<TaskEvent>): TaskEvent {
@@ -411,6 +411,71 @@ describe("reducePrune", () => {
   });
 });
 
+describe("reduceCleanup", () => {
+  it("starts a row with zeroed progress — the backend's Started event never carries progress", () => {
+    // OperationCtx::new's initial event always sends progress: None (see tasks.rs's
+    // build_event) — even though mark_orphans/pending_orphan_row_count already know the
+    // total by the time clean_cache constructs the OperationCtx. A started event carrying
+    // progress inline would be a different backend design; it isn't this one.
+    const state = reduceCleanup(null, taskEvent({
+      kind: "cleanup", operationId: "op1", phase: "started",
+      progress: { itemsDone: 42, itemsTotal: 12000 },
+    }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 0, itemsTotal: 0 });
+  });
+
+  it("picks up the real total from the progress event clean_cache emits immediately after Started", () => {
+    // clean_cache (cache.rs) emits one progress event right after constructing the
+    // OperationCtx, before the drain loop's first batch, specifically so the row isn't
+    // visibly stuck at itemsTotal: 0 — this is that event.
+    let state = reduceCleanup(null, taskEvent({ kind: "cleanup", operationId: "op1", phase: "started" }));
+    state = reduceCleanup(state, taskEvent({
+      kind: "cleanup", operationId: "op1", phase: "progress",
+      progress: { itemsDone: 0, itemsTotal: 12000 },
+    }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 0, itemsTotal: 12000 });
+  });
+
+  it("updates itemsDone/itemsTotal on a later matching progress event", () => {
+    let state = reduceCleanup(null, taskEvent({ kind: "cleanup", operationId: "op1", phase: "started" }));
+    state = reduceCleanup(state, taskEvent({
+      kind: "cleanup", operationId: "op1", phase: "progress",
+      progress: { itemsDone: 0, itemsTotal: 12000 },
+    }));
+    state = reduceCleanup(state, taskEvent({
+      kind: "cleanup", operationId: "op1", phase: "progress",
+      progress: { itemsDone: 5000, itemsTotal: 12000 },
+    }));
+    expect(state).toEqual({ operationId: "op1", itemsDone: 5000, itemsTotal: 12000 });
+  });
+
+  it("ignores a progress event for a different (stale) operationId", () => {
+    const state = reduceCleanup(null, taskEvent({ kind: "cleanup", operationId: "op1", phase: "started" }));
+    const result = reduceCleanup(state, taskEvent({
+      kind: "cleanup", operationId: "opStale", phase: "progress",
+      progress: { itemsDone: 9999, itemsTotal: 9999 },
+    }));
+    expect(result).toBe(state);
+  });
+
+  it.each(["finished", "failed", "cancelled"] as const)("clears on a matching %s event", (phase) => {
+    const state = reduceCleanup(null, taskEvent({ kind: "cleanup", operationId: "op1", phase: "started" }));
+    const result = reduceCleanup(state, taskEvent({ kind: "cleanup", operationId: "op1", phase }));
+    expect(result).toBeNull();
+  });
+
+  it("ignores a terminal event for a different (stale) operationId", () => {
+    const state = reduceCleanup(null, taskEvent({ kind: "cleanup", operationId: "op1", phase: "started" }));
+    const result = reduceCleanup(state, taskEvent({ kind: "cleanup", operationId: "opStale", phase: "finished" }));
+    expect(result).toBe(state);
+  });
+
+  it("ignores non-cleanup task kinds", () => {
+    const result = reduceCleanup(null, taskEvent({ kind: "backup", phase: "started" }));
+    expect(result).toBeNull();
+  });
+});
+
 describe("reduceMirror", () => {
   const empty = new Map();
 
@@ -483,6 +548,7 @@ describe("activeTaskCount", () => {
     indexing: null,
     activeBackup: null,
     activePrune: null,
+    activeCleanup: null,
     statsRefreshing: [],
     activeIndexBatches: [],
     activeSnapshotIndexes: [],
@@ -508,6 +574,12 @@ describe("activeTaskCount", () => {
   it("counts a prune as one task", () => {
     expect(activeTaskCount(buildState({
       activePrune: { operationId: "op1", itemsDone: 0, itemsTotal: 3, repoLabel: "repoA" },
+    }))).toBe(1);
+  });
+
+  it("counts a cleanup run as one task", () => {
+    expect(activeTaskCount(buildState({
+      activeCleanup: { operationId: "op1", itemsDone: 100, itemsTotal: 5000 },
     }))).toBe(1);
   });
 

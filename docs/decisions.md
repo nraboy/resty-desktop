@@ -111,6 +111,37 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 - **`browse_cache_files.parent_path` duplicates a prefix of `path` on every row, on purpose.** It
   backs the `(snap, parent_path)` directory-listing index — a deliberate storage-for-speed
   trade-off, and the single largest contributor to that table's size. Acceptable.
+- **`clean_cache` ("Clean Orphaned Data") batches its delete instead of running one transaction**
+  (`AppDb::mark_orphans` + `AppDb::drain_orphans`, looped) because a single unbounded transaction
+  held the shared `AppDb` connection mutex for the whole delete — the exact failure that made the
+  old inline `remove_repo` cascade hang the app for minutes (see its own settled-decision entry).
+  Batching keeps the same total work but releases the mutex every `CLEAN_CACHE_BATCH_ROWS` (5,000)
+  rows, so the app never perceives a freeze even on a 100K+-row backlog. Marking (stamping
+  `indexed_snapshots.orphaned_at`, dropping `browse_cache_status`) always happens before any
+  `browse_cache_files` row is touched, specifically so an interrupted run — Stop, crash, quit — can
+  never leave a snapshot claiming to be indexed with its file rows partially deleted; worst case is
+  a re-index, never inconsistent state. **An automatic version of this on the 60s cache-warmer tick
+  was deliberately deferred**, not built here: `AppDb::evict_snapshots` empties a repo's entire
+  `snapshots_cache` and leaves it empty for up to 60s until the warmer repopulates it, during which
+  every snapshot in that repo looks orphaned to `mark_orphans`'s query. That race already exists in
+  the manual button today (hitting it needs a click inside a narrow window), so this change neither
+  introduces nor fixes it — but running the same logic automatically every tick would make it
+  routine instead of rare, so automation needs its own guard (skip marking on any tick where a repo
+  has no positive evidence of a current snapshot list) before it's safe to build. Don't wire
+  `trigger_cleanup` into `cache_warmer.rs` without that guard and its own tests.
+- **`clear_cache` ("Clear All Cache") deliberately does not `VACUUM`** — it used to, and the delete
+  itself was never the risk (every `DELETE FROM table;` here has no `WHERE` clause, so SQLite's
+  truncate optimization deallocates the whole table in one step regardless of row count — cheap no
+  matter how large the cache was). The `VACUUM` was: it rewrites every live page in the database,
+  scaling with total DB size rather than rows deleted, and held the same single `AppDb` connection
+  mutex for however long that took — on a multi-GB database, long enough to be the same class of
+  freeze `clean_cache`'s old unbounded transaction caused (see its own entry above), just triggered
+  by a different button. Unlike that fix, this one isn't batchable — `VACUUM` would need
+  `auto_vacuum = INCREMENTAL` (a real schema change, not just chunking) to reclaim space
+  incrementally. `compress_database` ("Compress Database") already exists as the dedicated,
+  expected-to-be-slow place for that cost; Clear All Cache no longer pays it as a silent side
+  effect of a button whose actual job is wiping data, not compacting the file. Run Compress Database
+  afterward to reclaim the freed space. Don't re-add the `VACUUM` here.
 - **File search (`search_browse_files`/`search_repo_files`) uses `path LIKE '%query%'`** — the
   leading wildcard means SQLite can't use the index and does a full scan. This is a known,
   accepted cost (not an oversight): it's exactly why those two search commands are `async` +

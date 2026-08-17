@@ -61,7 +61,7 @@
 // resets it to closed.
 import { useEffect, useRef, useState } from "react";
 import { useActivity, activeTaskCount, standaloneSnapshotIndexes } from "../lib/activity";
-import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune } from "../lib/invoke";
+import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune, stopCleanup } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
@@ -95,8 +95,9 @@ interface ActivityPanelProps {
 
 export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
   const {
-    indexing, activeBackup, activePrune, upcoming, recentLogs, statsRefreshing, activeIndexBatches,
-    activeSnapshotIndexes, activeMirrors, indexBatchRepoNames, statsRefreshAllProgress,
+    indexing, activeBackup, activePrune, activeCleanup, upcoming, recentLogs, statsRefreshing,
+    activeIndexBatches, activeSnapshotIndexes, activeMirrors, indexBatchRepoNames,
+    statsRefreshAllProgress,
   } = useActivity();
   const panelRef = useRef<HTMLElement>(null);
 
@@ -123,7 +124,7 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
   // Shared computation (activity.tsx) — the Sidebar's status strip and this panel's empty-state
   // derive from the same counter, so they can't disagree. Includes queued batches/mirrors.
   const hasActive = activeTaskCount({
-    indexing, activeBackup, activePrune, statsRefreshing, activeIndexBatches,
+    indexing, activeBackup, activePrune, activeCleanup, statsRefreshing, activeIndexBatches,
     activeSnapshotIndexes, activeMirrors, statsRefreshAllProgress,
   }) > 0;
 
@@ -144,6 +145,13 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
   useEffect(() => {
     if (!activePrune) setStoppingPrune(false);
   }, [activePrune]);
+
+  // Same pattern, for the cleanup row below — resets once activeCleanup clears (its `task` op
+  // reached a terminal phase: finished, failed, or this very cancel).
+  const [stoppingCleanup, setStoppingCleanup] = useState(false);
+  useEffect(() => {
+    if (!activeCleanup) setStoppingCleanup(false);
+  }, [activeCleanup]);
 
   // Same pattern as stoppingScheduled above, generalized to a set since multiple "Index All"
   // batches can be stopping independently at once. cancel_index_batch(operationId) takes effect
@@ -341,6 +349,44 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
                     : activePrune.itemsTotal > 0
                     ? `${activePrune.itemsDone} / ${activePrune.itemsTotal} repos`
                     : "Pruning…"}
+                </p>
+              </div>
+            )}
+            {activeCleanup && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-gray-200 truncate">Cleaning up cache</p>
+                  <button
+                    onClick={async () => {
+                      setStoppingCleanup(true);
+                      try {
+                        await stopCleanup();
+                      } catch {
+                        // Same rollback rationale as the other Stop buttons in this panel — the
+                        // cancel call itself failed, cleanup is still running untouched, so
+                        // don't leave Stop stuck disabled with no way to retry.
+                        setStoppingCleanup(false);
+                      }
+                    }}
+                    disabled={stoppingCleanup}
+                    title="Stop"
+                    aria-label="Stop"
+                    className="text-red-300 hover:text-red-200 flex-shrink-0 disabled:opacity-50"
+                  >
+                    <StopIcon />
+                  </button>
+                </div>
+                <ProgressBar
+                  percent={
+                    activeCleanup.itemsTotal > 0
+                      ? Math.min(100, (activeCleanup.itemsDone / activeCleanup.itemsTotal) * 100)
+                      : 0
+                  }
+                />
+                <p className="text-xs text-gray-500">
+                  {stoppingCleanup
+                    ? "Stopping…"
+                    : `${activeCleanup.itemsDone.toLocaleString()} orphaned entries removed`}
                 </p>
               </div>
             )}
