@@ -17,6 +17,7 @@ import { needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
 
 type ExcludeMode = "simple" | "expert";
@@ -47,6 +48,17 @@ const WEBHOOK_PROVIDER_LABELS: Record<WebhookProvider, string> = {
   slack: "Slack",
   teams: "Teams",
   custom: "Custom JSON",
+};
+
+/** Labels aligned with the Settings page's notification category wording. Webhook
+ *  "Success" deliberately isn't split into changed/unchanged like Settings' two
+ *  success categories are — the payload already carries filesNew/filesChanged for
+ *  downstream filtering. Webhook "Failures" also deliberately excludes user-cancelled
+ *  backups, unlike the Settings category of the same name — see the tooltips below. */
+const WEBHOOK_STAGE_LABELS: Record<"started" | "completed" | "failed", string> = {
+  started: "Backup started",
+  completed: "Success",
+  failed: "Failures",
 };
 
 const EXCLUDE_SUGGESTIONS = [
@@ -931,7 +943,9 @@ export default function BackupPlanEditPage() {
                       </span>
                     </div>
                     {selectedStages.length > 0 ? (
-                      <p className="text-xs text-gray-500 mt-0.5">On {selectedStages.join(", ")}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        On {selectedStages.map((s) => WEBHOOK_STAGE_LABELS[s]).join(", ")}
+                      </p>
                     ) : (
                       <p className="text-xs text-amber-400 mt-0.5">
                         No stages selected — never fires.
@@ -986,6 +1000,7 @@ export default function BackupPlanEditPage() {
         title={editingWebhookId ? "Edit Webhook" : "Add Webhook"}
         open={webhookModalOpen}
         onClose={closeWebhookModal}
+        maxWidth="max-w-lg"
       >
         <div className="space-y-4">
           <Input
@@ -1028,7 +1043,21 @@ export default function BackupPlanEditPage() {
                     onChange={() => toggleDraftStage(stage)}
                     className="rounded bg-gray-700 border-gray-600"
                   />
-                  {stage === "started" ? "Started" : stage === "completed" ? "Completed" : "Failed"}
+                  {stage === "completed" || stage === "failed" ? (
+                    <Tooltip
+                      content={
+                        stage === "completed"
+                          ? "Fires for both changed and unchanged runs — unlike Settings' notifications, this isn't split into two categories. The payload includes file counts if you need to filter downstream."
+                          : "Unlike Settings' Failures notification, this does not fire for a backup you cancelled yourself."
+                      }
+                    >
+                      <span className="underline decoration-dotted underline-offset-2">
+                        {WEBHOOK_STAGE_LABELS[stage]}
+                      </span>
+                    </Tooltip>
+                  ) : (
+                    WEBHOOK_STAGE_LABELS[stage]
+                  )}
                 </label>
               ))}
             </div>
@@ -1071,9 +1100,7 @@ export default function BackupPlanEditPage() {
                   .filter((stage) => draftStages[stage])
                   .map((stage) => (
                     <div key={stage} className="mb-2 last:mb-0">
-                      <p className="text-xs text-gray-500 mb-1">
-                        {stage === "started" ? "Started" : stage === "completed" ? "Completed" : "Failed"}
-                      </p>
+                      <p className="text-xs text-gray-500 mb-1">{WEBHOOK_STAGE_LABELS[stage]}</p>
                       <pre className="text-xs font-mono bg-gray-950 border border-gray-700 rounded-lg p-3 overflow-x-auto text-gray-300 whitespace-pre-wrap">
                         {webhookPreview[stage]}
                       </pre>

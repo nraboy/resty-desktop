@@ -594,7 +594,7 @@ export default function SnapshotsPage() {
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
                   {!selectMode && (
-                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20 wide:w-auto">Actions</th>
+                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20 wide:w-auto text-right">Actions</th>
                   )}
                 </tr>
               </thead>
@@ -693,7 +693,7 @@ export default function SnapshotsPage() {
                     </td>
                     {!selectMode && (
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 justify-end">
                           <ActionButton
                             label="Browse"
                             title="Browse files"

@@ -382,7 +382,7 @@ export default function BrowsePage() {
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
-              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24 wide:w-auto">Actions</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24 wide:w-auto text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800">
@@ -433,7 +433,7 @@ export default function BrowsePage() {
                   <td className="px-4 py-2.5 text-gray-500 text-xs">
                     {entry.mtime ? formatDateOnly(entry.mtime) : "—"}
                   </td>
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-2.5 text-right">
                     <ActionButton
                       label="Restore"
                       tone="green"
