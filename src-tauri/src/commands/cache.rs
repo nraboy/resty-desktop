@@ -11,10 +11,7 @@ use super::browse::FileEntry;
 use super::crypto;
 use super::repo::ResticStats;
 use super::snapshot::Snapshot;
-use crate::tasks::{
-    emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress,
-    TaskProgressEmitter, TaskSlot,
-};
+use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress, TaskSlot};
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
 /// never drift — the Logs page never shows rows the trim would have deleted.
@@ -25,24 +22,6 @@ const BACKUP_HISTORY_LIMIT: i64 = 1000;
 /// `clean_cache` Tauri command uses the same batch size for its own incremental loop
 /// — see `commands/cache.rs`'s command-level `clean_cache` for why batching matters.
 const CLEAN_CACHE_BATCH_ROWS: usize = 5_000;
-
-/// Used by `cache_warmer`'s automatic drain tick. A run's total pending row count above
-/// this is treated as a genuine catch-up drain and surfaced on the `task` bus (Activity
-/// panel); at or below it, the tick stays silent — the routine, steady-state case (a
-/// retention run's worth of orphans, typically a few thousand rows) shouldn't flash a row
-/// in the panel every minute forever. The manual "Clean Orphaned Data" button has no such
-/// gate — every click emits, since it's already a user-initiated action.
-pub(crate) const CLEANUP_VISIBILITY_THRESHOLD_ROWS: u64 = 10_000;
-
-/// How often (in 60s ticks) the automatic drain also attempts a full `mark_orphans` sweep,
-/// as a backstop beyond the diff-based marking `set_snapshots` does on every refresh.
-/// Catches anything that doesn't flow through a diff-aware `set_snapshots` call —
-/// `AppDb::evict_snapshots` (called by several sites, not only a failure fallback — see
-/// `all_repos_have_cached_snapshots`'s doc comment) and anything orphaned before this
-/// feature existed. Gated on `all_repos_have_cached_snapshots`, so "attempts": a tick where
-/// that check fails just retries at the next multiple of this constant. 30 ticks ≈ 30
-/// minutes.
-pub(crate) const CLEANUP_RECONCILE_EVERY_N_TICKS: u64 = 30;
 
 /// One `drain_orphans` call's result. `more_remaining` tells the caller whether to
 /// call again.
@@ -1828,69 +1807,6 @@ impl AppDb {
         Ok(count > 0)
     }
 
-    /// True only if every repo in `repositories` currently has at least one
-    /// `snapshots_cache` row. A repo with genuinely zero backups yet also fails this
-    /// (indistinguishable from one whose cache is merely stale) and is treated the same
-    /// conservative way — that costs nothing real, since a never-backed-up repo has no
-    /// `indexed_snapshots` history to wrongly protect against.
-    ///
-    /// This predicate exists for the periodic `mark_orphans` backstop
-    /// (`cache_warmer.rs`'s `run_cleanup_drain`), and *only* for that — `set_snapshots`'s
-    /// diff-based marking needs no such gate, since it only ever compares two lists it
-    /// holds simultaneously for the one repo it's about to update, never inferring
-    /// anything from another repo's state. `mark_orphans` is different: it's a full-table
-    /// reconciliation across *every* repo's `snapshots_cache` at once, so its correctness
-    /// genuinely depends on all of them reflecting current truth, not just the repo any
-    /// particular caller happens to be thinking about. `AppDb::evict_snapshots` — called
-    /// unconditionally on success by `delete_snapshot` and by `copy_snapshot`/`mirror_repo`
-    /// for their destination repo, and as a re-fetch-failure fallback by `execute_backup`
-    /// and `apply_retention` — empties a repo's `snapshots_cache` with no replacement, and
-    /// nothing repopulates it until the next successful refresh.
-    /// If the app closes shortly after (a plausible, ordinary sequence: delete a snapshot,
-    /// quit) and reopens locked, `refresh_all_snapshots` bails immediately (no master key
-    /// yet) — but `run_cleanup_drain` was deliberately written to need no master-key check
-    /// at all (marking and draining touch no repo secrets), so without a gate the backstop
-    /// would run against that stale, empty state on the very first tick and mark every one
-    /// of that repo's indexed snapshots orphaned, even though nothing about them actually
-    /// changed. This is exactly the `evict_snapshots` staleness race the diff-based
-    /// redesign was built to eliminate — the backstop, being a scan rather than a diff,
-    /// reintroduces it unless gated. See docs/decisions.md.
-    ///
-    /// The actual production gate is `mark_orphans_if_all_repos_fresh`, which runs this
-    /// same check but inside its own transaction rather than as a separate call — a
-    /// separate call here, with the caller deciding afterward whether to invoke
-    /// `mark_orphans`, would leave a TOCTOU window between the check and the mark (see that
-    /// method's doc comment). This standalone form exists for the direct unit tests that
-    /// exercise the predicate on its own, and any future non-gated caller that just wants
-    /// the read — not currently called from production code, hence the dead-code allow.
-    #[allow(dead_code)]
-    pub fn all_repos_have_cached_snapshots(&self) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        Self::all_repos_have_cached_snapshots_query(&conn)
-    }
-
-    /// Shared query behind `all_repos_have_cached_snapshots` and
-    /// `mark_orphans_if_all_repos_fresh` — takes a plain `&Connection`, but callers can
-    /// pass `&tx` (a `rusqlite::Transaction`) just as well, since `Transaction` derefs to
-    /// `Connection` and Rust coerces the reference at the call site. That's what lets
-    /// `mark_orphans_if_all_repos_fresh` run this inside its own already-open transaction
-    /// (closing the TOCTOU gap a separate connection-locking call would leave; see that
-    /// method's doc comment) while `all_repos_have_cached_snapshots` keeps a simple
-    /// standalone-`Connection` form for callers (and tests) that just need the read.
-    fn all_repos_have_cached_snapshots_query(
-        conn: &rusqlite::Connection,
-    ) -> Result<bool, String> {
-        conn.query_row(
-            "SELECT NOT EXISTS(
-                 SELECT 1 FROM repositories
-                 WHERE id NOT IN (SELECT DISTINCT repo_id FROM snapshots_cache)
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())
-    }
-
     /// Returns cached snapshots for a repo as structs directly — no JSON string
     /// round-trip (the caller previously re-parsed a serialized string this method
     /// produced; see `list_snapshots` in `snapshot.rs`).
@@ -1924,41 +1840,11 @@ impl AppDb {
     }
 
     /// Full replace: clears existing snapshot rows for this repo, then inserts all from JSON.
-    ///
-    /// Also the primary orphan-detection point for automatic cleanup: before the `DELETE`,
-    /// this repo's *current* snapshot ids are read; any that don't appear in the freshly
-    /// parsed list are candidates. A candidate is only actually marked (`indexed_snapshots
-    /// .orphaned_at` stamped, its `browse_cache_status` row dropped) if no *other* repo's
-    /// `snapshots_cache` still references it either — `browse_cache_files`/`indexed_snapshots`
-    /// have no `repo_id` column, so two app-level repo entries pointing at the same underlying
-    /// restic repository share cached file rows for a shared snapshot id (see
-    /// `remove_repo_keeps_file_rows_shared_with_another_repo`), and one repo's snapshot list
-    /// dropping an id must not orphan file rows the other still needs.
-    ///
-    /// This is a direct diff — both the old and new lists are in hand in the same
-    /// transaction — not an inference from the current state of `snapshots_cache`, which is
-    /// what makes it safe to run on every refresh with no staleness guard: unlike a periodic
-    /// scan, there's no window where a transiently-empty cache could be misread as "nothing
-    /// references this snapshot anymore". `drain_orphans` (see its doc comment) does the
-    /// actual, batched `browse_cache_files` deletion later; this only marks.
     pub fn set_snapshots(&self, repo_id: &str, json: &str) -> Result<(), String> {
         let rows = parse_snapshot_rows(json)?;
         let now = timestamp();
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        let old_ids: std::collections::HashSet<String> = {
-            let mut stmt = tx
-                .prepare_cached("SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1")
-                .map_err(|e| e.to_string())?;
-            let mapped = stmt
-                .query_map(params![repo_id], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?;
-            mapped
-        };
-
         tx.execute(
             "DELETE FROM snapshots_cache WHERE repo_id = ?1",
             params![repo_id],
@@ -1987,95 +1873,6 @@ impl AppDb {
                 .map_err(|e| e.to_string())?;
             }
         }
-
-        let new_ids: std::collections::HashSet<&str> =
-            rows.iter().map(|s| s.id.as_str()).collect();
-        // Suspect-fetch guard: *multiple* cached snapshots vanishing in one refresh (down
-        // to a completely empty list) is far more likely to be a spurious restic result
-        // (an eventually-consistent remote backend momentarily returning an empty listing,
-        // still exit-0) than that many snapshots genuinely vanishing at once — `forget`
-        // normally drops a handful per retention run, not the repo's entire history
-        // simultaneously. Deliberately narrow: this only catches the fully-empty shape,
-        // not a partial/truncated-but-non-empty listing (e.g. 1 of 50 snapshots returned)
-        // — a general "suspiciously smaller than before" heuristic would risk false
-        // positives against a legitimate large retention drop, and is harder to calibrate
-        // than "did it go all the way to zero." Scoped to `old_ids.len() > 1` specifically
-        // so it doesn't catch the very common, completely ordinary case of a
-        // single-snapshot repo losing its one snapshot (e.g. a fresh repo, or `keep-last 1`
-        // retention) — that transition marks immediately as before. Diffing already trusts
-        // a successful restic call as ground truth (this table has always been fully
-        // replaced on every call, before this marking logic existed), so this doesn't add
-        // a new kind of risk, but marking amplifies a spurious result's consequence from
-        // "cosmetic, self-healing on the next successful refresh" to "an entire repo's
-        // browse cache is destroyed, forcing a full re-index" — worth specifically
-        // guarding the one shape of that mistake that's both cheap to detect and
-        // catastrophic if wrong. Skip marking (not the `snapshots_cache` replace above,
-        // which already happened) when this looks suspect.
-        //
-        // A genuinely, permanently emptied repo isn't marked here, and — unlike the
-        // original design intent — isn't a guaranteed catch by the periodic `mark_orphans`
-        // backstop either: that backstop is itself gated on every repo currently having at
-        // least one `snapshots_cache` row (see `AppDb::all_repos_have_cached_snapshots`),
-        // and this repo's own now-permanently-empty cache means it never satisfies that
-        // gate again, potentially blocking the backstop indefinitely (for every repo, not
-        // just this one — the gate has no finer granularity, since `indexed_snapshots`
-        // carries no `repo_id` to scope it by). The manual "Clean Orphaned Data" button
-        // remains the guaranteed path for this case — it calls `mark_orphans` directly,
-        // ungated. Accepted: a permanently-emptied repo is rare, and the failure mode is
-        // "orphaned rows linger until a manual click," not data loss.
-        let suspect_fetch = old_ids.len() > 1 && rows.is_empty();
-        let candidates: Vec<&String> = if suspect_fetch {
-            Vec::new()
-        } else {
-            old_ids
-                .iter()
-                .filter(|id| !new_ids.contains(id.as_str()))
-                .collect()
-        };
-
-        if !candidates.is_empty() {
-            // Purely anonymous `?` placeholders, bound positionally — same convention as
-            // the other dynamic IN-lists in this file (e.g. get_settings above).
-            let placeholders = candidates.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let mark_sql = format!(
-                "UPDATE indexed_snapshots
-                 SET orphaned_at = ?
-                 WHERE orphaned_at IS NULL
-                   AND snapshot_id IN ({placeholders})
-                   AND snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)"
-            );
-            let mut mark_params: Vec<&dyn rusqlite::ToSql> = vec![&now];
-            mark_params.extend(candidates.iter().map(|id| *id as &dyn rusqlite::ToSql));
-            tx.execute(&mark_sql, mark_params.as_slice())
-                .map_err(|e| e.to_string())?;
-
-            let status_sql = format!(
-                "DELETE FROM browse_cache_status
-                 WHERE snapshot_id IN ({placeholders})
-                   AND snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache)"
-            );
-            tx.execute(&status_sql, rusqlite::params_from_iter(candidates.iter()))
-                .map_err(|e| e.to_string())?;
-        }
-
-        // Un-mark anything that reappeared — same resurrection handling mark_orphans gives
-        // (its own final step, identical query): a snapshot marked orphaned by an earlier
-        // diff (from this repo or another) that's now back in some repo's snapshots_cache
-        // (this call's fresh insert, most likely) loses its mark. Its browse_cache_status
-        // row is already gone from whenever it was marked and isn't restored here, so it
-        // re-indexes rather than being trusted as still cached — correct, since its file
-        // rows may already be partially drained. Runs unconditionally, not gated on
-        // `candidates` being non-empty, since the reappearing snapshot may have been marked
-        // by a different repo's diff entirely.
-        tx.execute(
-            "UPDATE indexed_snapshots
-             SET orphaned_at = NULL
-             WHERE orphaned_at IS NOT NULL
-               AND snapshot_id IN (SELECT snapshot_id FROM snapshots_cache)",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -2581,53 +2378,6 @@ impl AppDb {
     pub fn mark_orphans(&self) -> Result<u64, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let removed = Self::mark_orphans_tx(&tx)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(removed)
-    }
-
-    /// Same reconciliation as `mark_orphans`, but atomically gated: within the *same*
-    /// transaction, first checks that every repo currently has at least one
-    /// `snapshots_cache` row (see `all_repos_have_cached_snapshots`'s doc comment for why),
-    /// and only proceeds with the actual marking if that holds — otherwise the transaction
-    /// commits with no changes and this returns `Ok(0)`, indistinguishable from "ran and
-    /// found nothing" to a caller that doesn't need to tell the two apart (`run_cleanup_drain`
-    /// doesn't).
-    ///
-    /// Used exclusively by the automatic tick's periodic backstop
-    /// (`cache_warmer.rs::run_cleanup_drain`). The manual "Clean Orphaned Data" button keeps
-    /// calling the plain `mark_orphans` above, unconditionally — its existing contract (pinned
-    /// by five tests since before this gate existed) is to always attempt a real
-    /// reconciliation, and gating it too would mean it could silently do nothing whenever *any*
-    /// repo happens to have never been backed up yet, which would look like the button is
-    /// broken for a real, pending backlog elsewhere. Automation gets the caution; the manual
-    /// override stays unconditional.
-    ///
-    /// Doing the check and the marking as two separate calls (a pre-check, then a
-    /// conditionally-called `mark_orphans`) would leave a real, if narrow, TOCTOU window:
-    /// `AppDb` shares one connection behind one Rust `Mutex`, released between separate method
-    /// calls, during which a concurrent `evict_snapshots` (from a delete/copy/mirror completing
-    /// at that exact moment) could flip a repo from "fresh" to "empty" after the check passed
-    /// but before marking actually ran. One transaction closes that gap entirely.
-    pub fn mark_orphans_if_all_repos_fresh(&self) -> Result<u64, String> {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        let safe = Self::all_repos_have_cached_snapshots_query(&tx)?;
-        if !safe {
-            tx.commit().map_err(|e| e.to_string())?; // no-op — nothing was written
-            return Ok(0);
-        }
-
-        let removed = Self::mark_orphans_tx(&tx)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(removed)
-    }
-
-    /// Shared body for `mark_orphans`/`mark_orphans_if_all_repos_fresh` — everything from
-    /// here on is identical between the ungated and gated entry points; only what happens
-    /// *before* this runs differs.
-    fn mark_orphans_tx(tx: &rusqlite::Transaction) -> Result<u64, String> {
         let now = timestamp();
         let mut removed = 0u64;
 
@@ -2673,34 +2423,8 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
 
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(removed)
-    }
-
-    /// Cheap existence check — is any `indexed_snapshots` row currently marked? Used by
-    /// the cache-warmer tick to bail out before paying for `pending_orphan_row_count`'s
-    /// `COUNT(*)` on the common tick where nothing is marked at all.
-    ///
-    /// Deliberately checks `indexed_snapshots` directly rather than joining through
-    /// `browse_cache_files` (as `drain_orphans`'s own `more_remaining` check does): a
-    /// snapshot indexed via `insert_browse_files` with an empty `entries` slice (an empty
-    /// directory, or every path fully excluded) gets an `indexed_snapshots` row —
-    /// `intern_snapshot` runs unconditionally before the per-chunk loop — with **zero**
-    /// `browse_cache_files` rows. If this check joined through `browse_cache_files` the
-    /// way `more_remaining` does, such a snapshot marked orphaned would never register as
-    /// "pending" here, so `run_cleanup_drain` would bail out before ever calling
-    /// `drain_orphans` — the only code that retires a marked `indexed_snapshots` row — and
-    /// that row would linger forever on the automatic tick (the manual `clean_cache`
-    /// button has no such gate, so it isn't affected). Checking `indexed_snapshots`
-    /// directly instead is both correct and, incidentally, cheaper (that table is small,
-    /// one row per snapshot, no join needed at all).
-    pub fn has_pending_orphans(&self) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM indexed_snapshots WHERE orphaned_at IS NOT NULL)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())
     }
 
     /// Number of `browse_cache_files` rows still waiting on `drain_orphans` — i.e. rows
@@ -3007,90 +2731,6 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
         .collect()
 }
 
-/// How `run_drain_loop` stopped. Callers decide what each outcome means for their own
-/// `OperationCtx` (finished/cancelled/failed) and return value — this only reports what
-/// happened during the drain itself.
-pub(crate) enum DrainOutcome {
-    /// `more_remaining` went false — nothing orphaned is left.
-    Finished,
-    /// `CleanupHandle::cancelled` was seen before or during a batch.
-    Cancelled,
-    /// `max_batches` was reached with more still remaining — the caller decides whether
-    /// that's fine (the automatic tick: try again next tick) or worth surfacing.
-    BatchLimitReached,
-    /// A DB error or `spawn_blocking` join failure.
-    Error(String),
-}
-
-/// The batch-drain mechanism shared by the manual `clean_cache` command and the automatic
-/// tick's `run_cleanup_drain` (`cache_warmer.rs`) — repeatedly call `AppDb::drain_orphans`,
-/// accumulate rows removed, check `CleanupHandle::cancelled` between batches, optionally
-/// emit progress, and yield the blocking-pool thread between batches so a command already
-/// queued on the `AppDb` connection mutex gets scheduled before the next batch starts (the
-/// whole point of batching — see `AppDb::clean_cache`'s doc comment).
-///
-/// Deliberately the *only* place this loop is written: the manual and automatic paths
-/// used to each carry their own copy, and the two had already drifted (the automatic copy
-/// gained a `has_pending_orphans` bail-out the manual one never needed) — exactly the
-/// silent-divergence risk a shared core avoids going forward.
-///
-/// `progress`: `None` for an invisible (sub-threshold) automatic drain — the drain still
-/// proceeds identically, it just emits nothing on the `task` bus.
-/// `max_batches`: `None` runs until nothing orphaned is left — what **both** current
-/// callers pass, `clean_cache` and `run_cleanup_drain` (`cache_warmer.rs`) alike, so
-/// neither ever produces `DrainOutcome::BatchLimitReached` today (each has its own
-/// `unreachable!()` guard on that arm, deliberately not folded into `Finished` — see
-/// docs/decisions.md for the incident that guard exists to prevent). The automatic tick
-/// briefly *did* pass `Some(n)` here, capping itself at a fixed row count per 60s tick;
-/// that was removed, not adjusted, because the cap's own justification (avoiding delay to
-/// the next tick's refresh) didn't hold up — `trigger_cleanup_drain` is fire-and-forget
-/// and never blocked that refresh regardless. `Some(n)` remains here as a real capability
-/// for a future caller that genuinely needs bounded batches — just not because the
-/// automatic tick used to be one.
-pub(crate) async fn run_drain_loop(
-    app: &tauri::AppHandle,
-    cleanup_handle: &CleanupHandle,
-    progress: Option<&TaskProgressEmitter<tauri::AppHandle>>,
-    mut removed: u64,
-    total: u64,
-    max_batches: Option<u32>,
-) -> (u64, DrainOutcome) {
-    let mut batches_done = 0u32;
-    loop {
-        if cleanup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-            return (removed, DrainOutcome::Cancelled);
-        }
-        let app2 = app.clone();
-        let batch = match tauri::async_runtime::spawn_blocking(move || {
-            app2.state::<AppDb>().drain_orphans(CLEAN_CACHE_BATCH_ROWS)
-        })
-        .await
-        {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) => return (removed, DrainOutcome::Error(e)),
-            Err(e) => return (removed, DrainOutcome::Error(e.to_string())),
-        };
-        removed += batch.rows_deleted;
-        if let Some(p) = progress {
-            p.emit(TaskProgress {
-                items_done: Some(removed),
-                items_total: Some(total),
-                ..Default::default()
-            });
-        }
-        if !batch.more_remaining {
-            return (removed, DrainOutcome::Finished);
-        }
-        batches_done += 1;
-        if let Some(max) = max_batches {
-            if batches_done >= max {
-                return (removed, DrainOutcome::BatchLimitReached);
-            }
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
 #[tauri::command]
 pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -3160,40 +2800,48 @@ pub async fn clean_cache(
     // build_event) — items_total is already known at this point (from
     // pending_orphan_row_count above), so emit it immediately rather than
     // leaving the frontend at itemsTotal: 0 until the first batch round-trips.
-    let removed = marked;
+    let mut removed = marked;
     progress.emit(TaskProgress {
         items_done: Some(removed),
         items_total: Some(total),
         ..Default::default()
     });
 
-    // No batch cap — the manual button always runs to completion in one call.
-    let (removed, outcome) =
-        run_drain_loop(&app, &cleanup_handle, Some(&progress), removed, total, None).await;
-
-    // Both match arms below treat BatchLimitReached as its own case, deliberately not
-    // folded into Finished — same reasoning as run_cleanup_drain's identical guard
-    // (cache_warmer.rs): the manual button also passes max_batches: None a few lines
-    // above, so this is currently unreachable, but folding it into "finished"/"success"
-    // is exactly the bug that shipped on the automatic path (see docs/decisions.md) —
-    // a capped run would silently report completion while a real remainder was still
-    // queued. If a batch cap is ever added here, this panic is what stops that regression
-    // from landing silently; the caller needs to add a real "still working" representation
-    // first, not just widen these match arms.
-    let result: Result<(), String> = match &outcome {
-        DrainOutcome::Finished | DrainOutcome::Cancelled => Ok(()),
-        DrainOutcome::Error(e) => Err(e.clone()),
-        DrainOutcome::BatchLimitReached => {
-            unreachable!("clean_cache calls run_drain_loop with max_batches: None")
+    let result: Result<(), String> = loop {
+        if cleanup_handle.cancelled.load(Ordering::SeqCst) {
+            break Ok(());
         }
+        let app_for_db = app.clone();
+        let batch = match tauri::async_runtime::spawn_blocking(move || {
+            app_for_db.state::<AppDb>().drain_orphans(CLEAN_CACHE_BATCH_ROWS)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => break Err(e),
+            Err(e) => break Err(e),
+        };
+        removed += batch.rows_deleted;
+        progress.emit(TaskProgress {
+            items_done: Some(removed),
+            items_total: Some(total),
+            ..Default::default()
+        });
+        if !batch.more_remaining {
+            break Ok(());
+        }
+        // Release the blocking-pool thread so a command already queued on the
+        // AppDb mutex gets scheduled before we come back around for the next
+        // batch — the whole point of batching in the first place.
+        tokio::task::yield_now().await;
     };
-    match &outcome {
-        DrainOutcome::Cancelled => task_ctx.cancelled(),
-        DrainOutcome::Finished => task_ctx.finished(),
-        DrainOutcome::Error(e) => task_ctx.failed(e.clone()),
-        DrainOutcome::BatchLimitReached => {
-            unreachable!("clean_cache calls run_drain_loop with max_batches: None")
-        }
+
+    let cancelled = cleanup_handle.cancelled.load(Ordering::SeqCst);
+    match &result {
+        Ok(_) if cancelled => task_ctx.cancelled(),
+        Ok(_) => task_ctx.finished(),
+        Err(e) => task_ctx.failed(e.clone()),
     }
     result?;
 
@@ -4525,297 +4173,6 @@ mod tests {
         assert_eq!(count_rows(&db, "browse_cache_files"), 3);
         assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
         assert_eq!(count_rows(&db, "browse_cache_status"), 1);
-    }
-
-    // ── set_snapshots diff-based marking ────────────────────────────────────
-
-    /// Builds a `restic snapshots --json`-shaped array for `set_snapshots`/`append_snapshots`
-    /// out of however many snapshot ids are given — `seed_snapshot` above is the one-id form
-    /// of this same shape.
-    fn snapshots_json(ids: &[&str]) -> String {
-        let entries: Vec<String> = ids
-            .iter()
-            .map(|id| {
-                format!(
-                    r#"{{"id":"{id}","short_id":"{id}","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]}}"#
-                )
-            })
-            .collect();
-        format!("[{}]", entries.join(","))
-    }
-
-    #[test]
-    fn set_snapshots_marks_a_dropped_snapshot_unreferenced_elsewhere() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-        db.set_browse_status("repo1", "bbbb222200000000", "complete").unwrap();
-
-        // Retention drops bbbb from the fresh list — same repo, next refresh.
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_some());
-        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
-        // Diff-based marking only marks; drain_orphans still owns the actual file-row delete.
-        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
-    }
-
-    #[test]
-    fn set_snapshots_does_not_mark_a_dropped_snapshot_still_referenced_by_another_repo() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["shared00000000000"])).unwrap();
-        db.set_snapshots("repo2", &snapshots_json(&["shared00000000000"])).unwrap();
-        db.insert_browse_files("shared00000000000", &[sample_file_entry()]).unwrap();
-
-        // repo1's list drops the shared snapshot; repo2's snapshots_cache row still exists.
-        db.set_snapshots("repo1", &snapshots_json(&[])).unwrap();
-
-        assert!(
-            orphaned_at_of(&db, "shared00000000000").is_none(),
-            "still referenced by repo2 — must not be marked"
-        );
-        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
-    }
-
-    #[test]
-    fn set_snapshots_marks_nothing_when_the_new_list_is_a_superset() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
-
-        // A new backup added bbbb; aaaa is still present too.
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-
-        assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
-    }
-
-    #[test]
-    fn set_snapshots_called_twice_with_the_same_list_is_idempotent() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        let first_stamp = orphaned_at_of(&db, "bbbb222200000000");
-        assert!(first_stamp.is_some());
-
-        // Same list again — nothing new to diff, existing mark must not be disturbed.
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        assert_eq!(orphaned_at_of(&db, "bbbb222200000000"), first_stamp);
-    }
-
-    #[test]
-    fn set_snapshots_unmarks_a_snapshot_that_reappears_in_a_later_refresh() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-        db.set_browse_status("repo1", "bbbb222200000000", "complete").unwrap();
-
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_some());
-
-        // bbbb reappears in a later refresh (e.g. restored, or the earlier fetch was stale).
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_none());
-        // Its status row was dropped when marked and isn't restored — it re-indexes, same
-        // resurrection contract mark_orphans already gives (see
-        // mark_orphans_unmarks_a_resurrected_snapshot).
-        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
-    }
-
-    /// A non-empty snapshot list dropping to completely empty in one refresh is treated as
-    /// a suspect fetch (e.g. a remote backend's momentary incomplete listing, still exit-0)
-    /// rather than proof every snapshot vanished — marking is skipped for that call, even
-    /// though `snapshots_cache` itself is still fully replaced (unchanged existing
-    /// behavior). This is what stops a single spurious restic response from destroying an
-    /// entire repo's browse cache and forcing a full re-index.
-    #[test]
-    fn set_snapshots_does_not_mark_when_a_non_empty_list_drops_to_completely_empty() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000", "bbbb222200000000"]))
-            .unwrap();
-        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-
-        db.set_snapshots("repo1", &snapshots_json(&[])).unwrap();
-
-        assert_eq!(count_rows(&db, "snapshots_cache"), 0, "the cache replace itself is unaffected");
-        assert!(orphaned_at_of(&db, "aaaa111100000000").is_none(), "suspect fetch — not marked yet");
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_none(), "suspect fetch — not marked yet");
-        assert_eq!(count_rows(&db, "browse_cache_files"), 2, "nothing drained either");
-
-        // A genuinely emptied repo can still be cleaned up via mark_orphans directly (the
-        // manual "Clean Orphaned Data" button always calls this, ungated) — the automatic
-        // tick's periodic backstop additionally requires all_repos_have_cached_snapshots
-        // to hold across every repo first (see that method's doc comment for why this
-        // specific repo's own now-empty cache can end up blocking it indefinitely).
-        db.mark_orphans().unwrap();
-        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_some());
-    }
-
-    #[test]
-    fn has_pending_orphans_reflects_drain_orphans_more_remaining() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
-        assert!(!db.has_pending_orphans().unwrap());
-
-        db.set_snapshots("repo1", &snapshots_json(&[])).unwrap();
-        assert!(db.has_pending_orphans().unwrap());
-
-        loop {
-            let batch = db.drain_orphans(10).unwrap();
-            if !batch.more_remaining {
-                break;
-            }
-        }
-        assert!(!db.has_pending_orphans().unwrap());
-    }
-
-    /// Regression for a snapshot indexed with zero `browse_cache_files` rows (an empty
-    /// directory, or every path fully excluded) — `intern_snapshot` still runs, so
-    /// `indexed_snapshots` gets a row even though nothing was ever inserted into
-    /// `browse_cache_files`. `has_pending_orphans` must still see it as pending once
-    /// orphaned, or `run_cleanup_drain`'s bail-out would never call `drain_orphans` and the
-    /// row would linger forever on the automatic tick.
-    #[test]
-    fn has_pending_orphans_sees_an_orphaned_snapshot_with_zero_file_rows() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("aaaa111100000000", &[]).unwrap();
-        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
-        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
-
-        db.set_snapshots("repo1", &snapshots_json(&[])).unwrap();
-        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
-        assert!(
-            db.has_pending_orphans().unwrap(),
-            "an orphan with zero file rows must still count as pending work"
-        );
-
-        let batch = db.drain_orphans(10).unwrap();
-        assert!(!batch.more_remaining);
-        assert_eq!(count_rows(&db, "indexed_snapshots"), 0, "the mapping row must still be retired");
-        assert!(!db.has_pending_orphans().unwrap());
-    }
-
-    #[test]
-    fn all_repos_have_cached_snapshots_true_when_every_repo_has_a_row() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.set_snapshots("repo2", &snapshots_json(&["bbbb222200000000"])).unwrap();
-        assert!(db.all_repos_have_cached_snapshots().unwrap());
-    }
-
-    #[test]
-    fn all_repos_have_cached_snapshots_false_when_one_repo_has_no_rows() {
-        // Simulates AppDb::evict_snapshots having wiped a repo's snapshots_cache (e.g. via
-        // delete_snapshot) with nothing having repopulated it yet.
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        // repo2 never got a set_snapshots call — same end state as an eviction with no
-        // subsequent refresh.
-        assert!(!db.all_repos_have_cached_snapshots().unwrap());
-    }
-
-    #[test]
-    fn all_repos_have_cached_snapshots_true_with_no_repos_at_all() {
-        let db = test_db();
-        assert!(db.all_repos_have_cached_snapshots().unwrap());
-    }
-
-    #[test]
-    fn all_repos_have_cached_snapshots_false_after_evict_snapshots_empties_one_repo() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.set_snapshots("repo2", &snapshots_json(&["bbbb222200000000"])).unwrap();
-        assert!(db.all_repos_have_cached_snapshots().unwrap());
-
-        db.evict_snapshots("repo1").unwrap();
-        assert!(!db.all_repos_have_cached_snapshots().unwrap());
-    }
-
-    #[test]
-    fn mark_orphans_if_all_repos_fresh_marks_normally_when_safe() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-        // bbbb was indexed once but never appeared in this repo's snapshots_cache — same
-        // "already orphaned" shape mark_orphans's other tests use.
-
-        db.mark_orphans_if_all_repos_fresh().unwrap();
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_some());
-    }
-
-    /// The regression this whole gate exists for: simulates AppDb::evict_snapshots leaving
-    /// one repo's snapshots_cache empty (e.g. delete_snapshot's unconditional wipe) with
-    /// nothing having refreshed it yet. mark_orphans_if_all_repos_fresh must do nothing at
-    /// all in that state — not even to unrelated repos — rather than treat the empty repo's
-    /// entire indexed history as orphaned.
-    #[test]
-    fn mark_orphans_if_all_repos_fresh_marks_nothing_when_one_repo_is_stale() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
-        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
-        db.set_snapshots("repo2", &snapshots_json(&["bbbb222200000000"])).unwrap();
-
-        // repo2's cache gets wiped with nothing having refreshed it since — the exact
-        // evict_snapshots aftermath this gate protects against.
-        db.evict_snapshots("repo2").unwrap();
-
-        let removed = db.mark_orphans_if_all_repos_fresh().unwrap();
-        assert_eq!(removed, 0);
-        assert!(
-            orphaned_at_of(&db, "aaaa111100000000").is_none(),
-            "repo1's live snapshot must not be marked just because repo2's cache is stale"
-        );
-        assert_eq!(count_rows(&db, "browse_cache_status"), 1);
-        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
-    }
-
-    #[test]
-    fn mark_orphans_if_all_repos_fresh_resumes_once_the_stale_repo_refreshes() {
-        let db = test_db();
-        seed_repo(&db, "repo1");
-        seed_repo(&db, "repo2");
-        db.set_snapshots("repo1", &snapshots_json(&["aaaa111100000000"])).unwrap();
-        db.insert_browse_files("bbbb222200000000", &[sample_file_entry()]).unwrap();
-        db.set_snapshots("repo2", &snapshots_json(&["cccc333300000000"])).unwrap();
-        db.evict_snapshots("repo2").unwrap();
-
-        assert_eq!(db.mark_orphans_if_all_repos_fresh().unwrap(), 0);
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_none(), "still blocked while repo2 is stale");
-
-        // repo2 gets a real refresh — the gate opens back up.
-        db.set_snapshots("repo2", &snapshots_json(&["cccc333300000000"])).unwrap();
-        db.mark_orphans_if_all_repos_fresh().unwrap();
-        assert!(orphaned_at_of(&db, "bbbb222200000000").is_some());
     }
 
     // ── migration regression ─────────────────────────────────────────────────

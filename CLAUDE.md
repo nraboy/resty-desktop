@@ -193,9 +193,6 @@ Full detail (schema, migrations, stale-while-revalidate patterns, cache warmer):
 Retain always: single SQLite `app_data.db` via `AppDb`, one shared `Mutex<Connection>` — a slow
 synchronous query on a core async-runtime thread starves every other `AppDb`-touching command.
 Any new command doing DB work slow enough to notice should be `async fn` + `spawn_blocking`.
-Orphaned cache rows (stranded `browse_cache_files`/`indexed_snapshots` — chiefly from retention)
-are cleaned both manually (Settings' "Clean Orphaned Data") and automatically (the 60s cache-warmer
-tick, no toggle) — see the `clean_cache`/automatic-cleanup bullets below and docs/decisions.md.
 
 ## Settled decisions — do not re-flag without reading `docs/decisions.md`
 
@@ -236,28 +233,6 @@ proposing a change — several are pinned by a named test or reference a confirm
   batching the delete instead of shrinking it. Marking before any file-row delete means an
   interrupted run (Stop, crash, quit) never leaves a snapshot claiming to be indexed with its
   file rows partially gone — see cache.rs's doc comments on both functions.
-- Orphan cleanup also runs automatically, with no settings toggle: `AppDb::set_snapshots` marks
-  orphans itself via a direct old-vs-new diff (both lists already in hand in the same transaction
-  it replaces a repo's `snapshots_cache` rows in) rather than a periodic guard-based scan — this is
-  what lets it run on every refresh with no staleness window to worry about (unlike a scan, which
-  would misread `evict_snapshots`'s transiently-empty `snapshots_cache` as mass orphaning). Every
-  `set_snapshots` caller (the cache-warmer tick, `apply_retention`, manual `refresh_snapshots`)
-  benefits automatically. `cache_warmer.rs`'s `trigger_cleanup_drain` then just drains what's
-  already marked each tick, sharing `CleanupHandle` with the manual button (so the two can never
-  run concurrently and confuse the frontend's single-slot `ActiveCleanup`), plus a periodic full
-  `mark_orphans` backstop (`CLEANUP_RECONCILE_EVERY_N_TICKS`) for orphans that don't flow through
-  a diff-aware `set_snapshots` call — `evict_snapshots` (several call sites, not just a failure
-  path) can leave a repo's cache empty across an app restart. Unlike the diff, this backstop *is*
-  a "does the cache look trustworthy" scan, so it needs its own guard:
-  `AppDb::mark_orphans_if_all_repos_fresh` checks every repo has cached snapshots and performs the
-  reconciliation atomically, in one transaction — not a separate check-then-call, which would leave
-  a TOCTOU gap given the app's single shared connection releases its lock between calls. See
-  docs/decisions.md — this is not optional and closes a real data-loss path. A drain runs to full
-  completion in one call (no per-tick batch cap — one existed briefly and caused a confirmed
-  regression: it made a large backlog falsely report "finished" mid-drain, so a manual click
-  afterward found and removed the remainder the automatic tick hadn't gotten to yet; see
-  docs/decisions.md) and only appears on the `task` bus once it exceeds
-  `CLEANUP_VISIBILITY_THRESHOLD_ROWS` rows.
 - `clear_cache` ("Clear All Cache") deliberately does **not** `VACUUM` — its `DELETE FROM table;`
   calls have no `WHERE` clause, so SQLite's truncate optimization already makes them cheap
   regardless of row count; `VACUUM` scales with total DB size instead and would hold the same

@@ -178,19 +178,13 @@ unambiguous — a *running* mirror is killed immediately, a *queued* one never s
 Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
 two categories.
 
-**`TaskKind::Cleanup` is wired despite shelling out to nothing** — the one deliberate exception to
-"restic-shelling operation" as the wiring criterion, and the one kind that emits `repoId: ""`
-(cleanup isn't scoped to a single repository, so consumers keying off `repoId` must not assume
-every kind carries a real one). It has two origins: `clean_cache` (the manual "Clean Orphaned Data"
-button, `TaskOrigin::Manual`) is a user-bounded, click-triggered operation that can run for minutes
-on a large backlog — the same shape as prune or a backup — and every click emits, unconditionally.
-`cache_warmer.rs`'s `run_cleanup_drain` (`TaskOrigin::Background`) is the automatic tick-driven
-drain — unlike `refresh_all_snapshots`'s tick, which stays off the bus entirely as "continuous
-background work" (see above), this one *is* eligible for the bus because it's gated: only a run
-whose pending total exceeds `CLEANUP_VISIBILITY_THRESHOLD_ROWS` emits anything at all, so the
-routine steady-state case (silent) never floods it, and only a genuine catch-up drain does. Both
-origins share one `CleanupHandle`, so at most one cleanup operation — manual or automatic — is
-ever the active one on the bus; see docs/decisions.md for the full design.
+**`clean_cache` (`TaskKind::Cleanup`, the "Clean Orphaned Data" button) is wired despite shelling
+out to nothing** — the one deliberate exception to "restic-shelling operation" as the wiring
+criterion. It's wired anyway because it's a user-bounded, click-triggered operation that can run
+for minutes on a large backlog (batched `DELETE`s over a possibly-huge `browse_cache_files`), the
+same shape as prune or a backup, not a database read like `list_snapshots`/`get_repo_stats` above.
+It's also the one kind that emits `repoId: ""` — cleanup isn't scoped to a single repository, so
+consumers keying off `repoId` must not assume every kind carries a real one.
 
 **Frontend scope — seven stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
 `index`'s batch-level progress, the scheduler-backup `activeBackup` row, `prune`'s
