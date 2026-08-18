@@ -120,14 +120,61 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `indexed_snapshots.orphaned_at`, dropping `browse_cache_status`) always happens before any
   `browse_cache_files` row is touched, specifically so an interrupted run — Stop, crash, quit — can
   never leave a snapshot claiming to be indexed with its file rows partially deleted; worst case is
-  a re-index, never inconsistent state. **An automatic version of this on the 60s cache-warmer tick
-  was attempted, then deliberately rolled back** (see git history around the "Automate
-  orphaned-cache cleanup" commit and its revert) — not because batching itself was wrong, but
-  because making cleanup automatic multiplied the blast radius of the wipe race described below to
-  the point where compensating for it (a staleness-flag table, a migration seed, an in-flight-index
-  guard) cost more complexity than the feature was worth. Manual-button-only stays the deliberate
-  choice until there's a real need to revisit it — don't re-add a ticker-driven drain without
-  re-reading that history first.
+  a re-index, never inconsistent state.
+- **Orphan cleanup is now automatic** (`cache_warmer.rs`'s `maybe_run_cleanup`, every 5th 60s
+  tick — ~5 minutes) as well as manual, sharing one `run_cleanup` with the button. **A first
+  attempt at this was built and deliberately rolled back** (see git history around the "Automate
+  orphaned-cache cleanup" commit and its revert) — not because automating was the wrong idea, but
+  because at that time `AppDb::evict_snapshots` (below) could still manufacture an artificially
+  empty `snapshots_cache`, and compensating for that under an unattended ticker (a staleness-flag
+  table, a migration seed, an in-flight-index guard) cost more complexity than the feature was
+  worth. The second attempt only became viable *after* `evict_snapshots` was removed outright, not
+  by adding more guards on top of the first attempt's shape — with no path left that can present
+  "haven't looked yet" as "confirmed empty," the earlier guards were compensating for a bug that no
+  longer exists, not a real freshness requirement, so they were not rebuilt.
+
+  The two failure modes here are asymmetric and both recoverable, which is what makes a modest
+  automatic cadence a reasonable trade: over-cleaning (marking something actually still live)
+  costs a re-index — restic's repository itself is never touched — and under-cleaning (missing a
+  real orphan) costs disk space until the next sweep, automatic or manual, self-heals it, since
+  every sweep re-derives the answer from scratch rather than trusting a prior one. Two things are
+  still worth being deliberate about, though: `maybe_run_cleanup` skips its tick outright (never
+  queues for later) whenever the app is locked, since cleanup needs no master key and would
+  otherwise run against the DB it's not supposed to touch while locked; and it consults
+  `AppDb::has_cleanup_work()` — a cheap read-only `EXISTS` probe — before paying for `mark_orphans`'s
+  write transaction, since "nothing to do" is the overwhelming common case on a 5-minute cadence.
+  That probe duplicates `mark_orphans`'s own conditions and has no other way to stay honest than a
+  test that runs both and compares (`has_cleanup_work_agrees_with_mark_and_drain`, cache.rs) — any
+  future change to what `mark_orphans` considers an orphan must update both.
+
+  Deliberately **not** built: any notion of "only clean up once every repo's cache is confirmed
+  fresh." A repo that hasn't refreshed this process (remote with `remote_auto_refresh` off,
+  unreachable, or simply not yet ticked) keeps its last-written `snapshots_cache` rows rather than
+  losing them — see `evict_snapshots`'s removal below — so it only ever causes the harmless
+  under-cleaning failure mode, not the harmful over-cleaning one. Gating on a freshness signal
+  would only be needed to close an over-cleaning path, and there isn't one left to close. Also
+  deliberately **not** built: a Settings toggle to disable automatic cleanup — unlike auto-indexing
+  or remote auto-refresh, it shells out to nothing and only ever deletes rows nothing references,
+  so there's no real cost for a toggle to guard against; the manual button remains for anyone who
+  wants to force a sweep on demand.
+- **`intern_snapshot` upserts and clears `orphaned_at` instead of `INSERT OR IGNORE`ing, to close a
+  narrow race automatic cleanup makes marginally easier to hit: a snapshot marked orphaned by
+  `mark_orphans`, then resurrected (back in `snapshots_cache`) and re-indexed while a
+  `drain_orphans` batch loop for it is still in flight.** Without the fix, indexing would silently
+  reuse the still-marked row and write `browse_cache_files` rows the concurrent drain is deleting
+  out from under it, leaving a snapshot `browse_cache_status = complete` with some file rows gone
+  and nothing left to notice or retry it — the one failure mode in this whole feature that doesn't
+  self-heal on the next sweep. Reaching it is narrow: the dominant orphan sources (`delete_snapshot`,
+  `apply_retention`) go through `restic forget` and can never resurrect, and a failed listing never
+  writes the cache at all (`set_snapshots` only runs inside `if let Ok(json)`), so it takes a repo
+  actually removed-and-re-added, or one whose contents genuinely changed, landing inside an
+  in-progress drain. This is a **pre-existing** race, reachable today via the manual button (since
+  `trigger_sweep` already spawns indexing detached) — not something automatic cleanup introduced —
+  fixed here because the code was already being touched, not because it was blocking. Fixed at the
+  source (indexing a snapshot is proof it's live, full stop) rather than with a coordination guard
+  between indexing and cleanup — deliberately not the in-flight-index-vs-drain guard shape the
+  first, rolled-back automation attempt used; that guard was compensating for the `evict_snapshots`
+  wipe bug across the board, where this is a one-line fix for one specific interleaving.
 - **`AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it) was
   removed outright, not just left unautomated.** It used to be called by `delete_snapshot`,
   `copy_snapshot`, `mirror_repo`, and as a re-fetch-failure fallback by `execute_backup`/

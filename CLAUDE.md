@@ -233,12 +233,30 @@ proposing a change — several are pinned by a named test or reference a confirm
   batching the delete instead of shrinking it. Marking before any file-row delete means an
   interrupted run (Stop, crash, quit) never leaves a snapshot claiming to be indexed with its
   file rows partially gone — see cache.rs's doc comments on both functions.
-- Orphan cleanup is **manual-button-only, deliberately** — `mark_orphans`/`drain_orphans` are
-  called from nowhere except the "Clean Orphaned Data" command. An automatic ticker-driven
-  version was built and then rolled back (see docs/decisions.md) because making cleanup
-  automatic multiplied the blast radius of a wipe-race bug enough that compensating for it cost
-  more complexity than the feature was worth. Don't re-add a ticker-driven drain without reading
-  that history first.
+- Orphan cleanup runs two ways: the "Clean Orphaned Data" button (`clean_cache`, `origin:
+  Manual`) and, since `evict_snapshots`'s removal made it safe, an automatic tick in
+  `cache_warmer.rs` every 5th 60s cycle (`maybe_run_cleanup`, `origin: Background`). Both call
+  the same `run_cleanup` (`commands/cache.rs`); `CleanupHandle.busy` serializes them against
+  each other. An earlier ticker-driven attempt was built and rolled back before this one — see
+  docs/decisions.md for why that round was unsafe and what changed since. `maybe_run_cleanup`
+  skips its tick (never queues) while the app is locked, or when `AppDb::has_cleanup_work()` — a
+  cheap read-only `EXISTS` probe, kept in sync with `mark_orphans` by
+  `has_cleanup_work_agrees_with_mark_and_drain` — finds nothing to do; there is no Settings
+  toggle, since cleanup shells out to nothing and only deletes rows nothing references. Don't
+  gate this on per-repo cache freshness — a repo that hasn't refreshed yet (remote with
+  `remote_auto_refresh` off, unreachable, or just locked) keeps its last-written
+  `snapshots_cache` rows rather than losing them, so the failure mode is under-cleanup, which
+  the next sweep (automatic or manual) self-heals; see docs/decisions.md. `maybe_run_cleanup`
+  spawns its `run_cleanup` call detached (like `trigger_sweep` above it) rather than awaiting it
+  inline, so a large backlog draining over several batches never stalls that tick's own
+  `refresh_all_snapshots`/index sweep — `busy`'s `compare_exchange` inside `run_cleanup` is what
+  keeps two runs from overlapping, not the call site, so detaching doesn't change serialization.
+  `intern_snapshot` (used by every indexing write) upserts and clears `orphaned_at` on conflict
+  instead of `INSERT OR IGNORE`ing, so a snapshot that resurfaces in `snapshots_cache` and gets
+  re-indexed while a `drain_orphans` batch loop for it is still running is un-marked before any
+  file rows are written — without this, indexing would write into a row a concurrent drain is
+  still deleting from, leaving it `browse_cache_status = complete` with rows silently missing and
+  nothing left to retry it. Don't revert that upsert back to `INSERT OR IGNORE` — see docs/decisions.md.
 - `AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it)
   was removed outright, not just left unused — it's what created the wipe race above. `set_snapshots`
   is diff-based (deletes only confirmed-dropped ids, upserts every id in the fresh listing) rather

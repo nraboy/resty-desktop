@@ -9,12 +9,17 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 use crate::commands::browse::run_full_index;
-use crate::commands::cache::{AppDb, IndexHandle, MasterKey};
+use crate::commands::cache::{run_cleanup, AppDb, CleanupHandle, IndexHandle, MasterKey};
 use crate::commands::repo::run_restic_with_path;
 use crate::commands::repo_locks::RepoLocks;
 use crate::tasks::{OperationCtx, TaskKind, TaskOrigin};
 
 const REMOTE_PREFIXES: &[&str] = &["s3:", "sftp:", "rest:", "azure:", "gs:", "b2:", "rclone:"];
+
+// 60s ticks -> every 5th tick is ~5 minutes. Orphans are never urgent, so a
+// modest, non-configurable cadence is preferred over a Settings toggle — see
+// CLAUDE.md's "Settled decisions".
+const CLEANUP_EVERY_N_TICKS: u32 = 5;
 
 pub(crate) fn is_remote(path: &str) -> bool {
     REMOTE_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -38,10 +43,15 @@ pub fn spawn(app: tauri::AppHandle) {
         refresh_all_snapshots(&app, &mut snapshot_hashes).await;
         trigger_sweep(&app, &running);
 
+        let mut tick: u32 = 0;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
             refresh_all_snapshots(&app, &mut snapshot_hashes).await;
             trigger_sweep(&app, &running);
+            tick = tick.wrapping_add(1);
+            if tick.is_multiple_of(CLEANUP_EVERY_N_TICKS) {
+                maybe_run_cleanup(&app).await;
+            }
         }
     });
 }
@@ -111,6 +121,46 @@ async fn refresh_all_snapshots(app: &tauri::AppHandle, snapshot_hashes: &mut Has
             }
         }
     }
+}
+
+/// Runs the same routine as the "Clean Orphaned Data" button, on the warmer's tick —
+/// see `run_cleanup`'s doc comment for the mechanism. Deliberately bails out rather than
+/// queueing in every skip case below: orphans are never urgent, and there is always
+/// another tick five minutes away.
+///
+/// Safe by construction, not by a staleness gate: `set_snapshots`/`remove_snapshot_from_
+/// cache`/etc. can no longer manufacture an artificially-empty `snapshots_cache` (the bug
+/// that made automatic cleanup unsafe the first time — see docs/decisions.md), so a repo
+/// that hasn't refreshed yet just has a stale-but-present cache, which can only cause
+/// under-cleanup — self-healed by the next sweep, automatic or manual. The one thing that
+/// still needs an explicit check is the lock: cleanup shells out to nothing and needs no
+/// master key, so unlike `refresh_all_snapshots` it will not stop on its own when locked.
+///
+/// The actual drain (`run_cleanup`) is spawned detached, not awaited, so a large backlog
+/// (100K+ rows observed in practice, draining over multiple batches) never stalls this
+/// loop's own 60s snapshot refresh and index sweep — the same reason `trigger_sweep`
+/// above spawns detached rather than being awaited inline. Safe to overlap with a manual
+/// click or a still-draining previous tick: `run_cleanup`'s `CleanupHandle.busy`
+/// `compare_exchange` is checked from *inside* that call, so whichever run got there
+/// first proceeds and the other's call returns `Err` immediately — nothing queues.
+async fn maybe_run_cleanup(app: &tauri::AppHandle) {
+    if app.state::<MasterKey>().get().is_err() {
+        return; // locked — nothing should touch the DB automatically until unlock
+    }
+    // Cheap pre-check to avoid spawning a task we'd immediately abandon — not the real
+    // guard, which is run_cleanup's own busy compare_exchange (see doc comment above).
+    if app.state::<CleanupHandle>().busy.load(Ordering::SeqCst) {
+        return;
+    }
+    let app2 = app.clone();
+    let has_work = tauri::async_runtime::spawn_blocking(move || app2.state::<AppDb>().has_cleanup_work()).await;
+    if !matches!(has_work, Ok(Ok(true))) {
+        return; // nothing to do, or the probe failed — either way, wait for the next tick
+    }
+    let app_for_cleanup = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_cleanup(app_for_cleanup, TaskOrigin::Background).await;
+    });
 }
 
 /// Starts a file-indexing sweep if auto_indexing is enabled and one is not

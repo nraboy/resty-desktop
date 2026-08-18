@@ -1394,8 +1394,17 @@ impl AppDb {
         tx: &rusqlite::Transaction,
         snapshot_id: &str,
     ) -> Result<i64, String> {
+        // Upsert, not `INSERT OR IGNORE`: if this snapshot's row was already marked
+        // `orphaned_at` by a `mark_orphans` scan (e.g. it briefly dropped out of
+        // `snapshots_cache` and came back while a `drain_orphans` batch loop was still
+        // running), indexing it here is proof it is live again and the mark must be
+        // cleared *before* any `browse_cache_files` rows are written below — otherwise a
+        // concurrent drain would delete file rows out from under this call, and since the
+        // resulting `browse_cache_status` reads "complete", nothing would ever retry it.
+        // See docs/decisions.md.
         tx.execute(
-            "INSERT OR IGNORE INTO indexed_snapshots (snapshot_id) VALUES (?1)",
+            "INSERT INTO indexed_snapshots (snapshot_id) VALUES (?1)
+             ON CONFLICT(snapshot_id) DO UPDATE SET orphaned_at = NULL",
             params![snapshot_id],
         )
         .map_err(|e| e.to_string())?;
@@ -2479,6 +2488,41 @@ impl AppDb {
         Ok(removed)
     }
 
+    /// Cheap read-only probe for "would `mark_orphans`/`drain_orphans` find anything to do
+    /// right now?" — no transaction, just a boolean `EXISTS` chain. Used to keep the
+    /// automatic cleanup tick (`cache_warmer.rs`) from paying for a write transaction on
+    /// every 5-minute tick when there is nothing to clean, which is the overwhelmingly
+    /// common case. The "Clean Orphaned Data" button does not call this — a manual click
+    /// always runs for real, since the user explicitly asked for work and expects a task
+    /// row plus a refreshed DB size regardless of whether anything was found.
+    ///
+    /// The five clauses mirror `mark_orphans`'s four statements exactly, plus a fifth for
+    /// "already marked and still awaiting `drain_orphans`" (covers a run interrupted before
+    /// it finished draining). This duplication is the one real maintenance hazard here:
+    /// **any new statement added to `mark_orphans` needs a matching clause added here**,
+    /// or this probe can go stale and start saying "nothing to do" when there is. Pinned by
+    /// `has_cleanup_work_agrees_with_mark_and_drain` below rather than left to this comment
+    /// alone.
+    pub fn has_cleanup_work(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT
+               EXISTS(SELECT 1 FROM snapshots_cache
+                        WHERE repo_id NOT IN (SELECT id FROM repositories))
+               OR EXISTS(SELECT 1 FROM repo_stats_cache
+                        WHERE repo_id NOT IN (SELECT id FROM repositories))
+               OR EXISTS(SELECT 1 FROM indexed_snapshots
+                        WHERE orphaned_at IS NULL
+                          AND snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache))
+               OR EXISTS(SELECT 1 FROM browse_cache_status
+                        WHERE snapshot_id NOT IN (SELECT snapshot_id FROM snapshots_cache))
+               OR EXISTS(SELECT 1 FROM indexed_snapshots WHERE orphaned_at IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     /// Number of `browse_cache_files` rows still waiting on `drain_orphans` — i.e. rows
     /// belonging to a snapshot `mark_orphans` has already marked. Used to give a
     /// progress bar a denominator; a run's actual `rows_deleted` total can slightly
@@ -2802,20 +2846,20 @@ pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// "Clean Orphaned Data" — mark, then drain in `CLEAN_CACHE_BATCH_ROWS`-row batches,
-/// yielding the `AppDb` connection mutex between batches so a large backlog (recorded
-/// in practice at 100K+ rows) never freezes the app the way the old single-transaction
-/// sweep could. See `AppDb::mark_orphans`/`drain_orphans` for the mechanism and
-/// `AppDb::clean_cache` for the synchronous, non-batched equivalent used by tests.
-/// Signature and return shape (`rows_deleted`, `db_size_bytes`) are unchanged from
-/// before batching, so the `invoke.ts` wrapper and Settings UI need no changes.
-#[tauri::command]
-pub async fn clean_cache(
-    app: tauri::AppHandle,
-    cleanup_handle: tauri::State<'_, CleanupHandle>,
-) -> Result<(u64, u64), String> {
+/// Shared body behind both the "Clean Orphaned Data" button (`clean_cache`, `origin:
+/// Manual`) and the automatic tick (`cache_warmer.rs`'s `maybe_run_cleanup`, `origin:
+/// Background`): mark, then drain in `CLEAN_CACHE_BATCH_ROWS`-row batches, yielding the
+/// `AppDb` connection mutex between batches so a large backlog (recorded in practice at
+/// 100K+ rows) never freezes the app the way the old single-transaction sweep could. See
+/// `AppDb::mark_orphans`/`drain_orphans` for the mechanism and `AppDb::clean_cache` for
+/// the synchronous, non-batched equivalent used by tests. The `busy` guard on
+/// `CleanupHandle` is what actually serializes a manual click against an automatic tick
+/// (or either against itself) — whichever gets here first wins, the other bails out
+/// immediately. Returns rows removed.
+pub(crate) async fn run_cleanup(app: tauri::AppHandle, origin: TaskOrigin) -> Result<u64, String> {
     use std::sync::atomic::Ordering;
 
+    let cleanup_handle = app.state::<CleanupHandle>();
     if cleanup_handle
         .busy
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2853,7 +2897,7 @@ pub async fn clean_cache(
         TaskKind::Cleanup,
         String::new(),
         None,
-        TaskOrigin::Manual,
+        origin,
         Some(cleanup_handle.current_task.clone()),
     );
     let progress = task_ctx.progress_emitter();
@@ -2905,7 +2949,16 @@ pub async fn clean_cache(
         Err(e) => task_ctx.failed(e.clone()),
     }
     result?;
+    Ok(removed)
+}
 
+/// "Clean Orphaned Data" button — thin wrapper over `run_cleanup` with `origin: Manual`,
+/// plus the DB-size readout the Settings UI shows afterward. Signature and return shape
+/// (`rows_deleted`, `db_size_bytes`) are unchanged from before extraction, so the
+/// `invoke.ts` wrapper and Settings UI need no changes.
+#[tauri::command]
+pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, u64), String> {
+    let removed = run_cleanup(app.clone(), TaskOrigin::Manual).await?;
     let size = tauri::async_runtime::spawn_blocking(move || app.state::<AppDb>().get_size())
         .await
         .map_err(|e| e.to_string())??;
@@ -4300,6 +4353,200 @@ mod tests {
         // Its status row was dropped when it was marked and isn't restored —
         // resurrected snapshots re-index rather than being trusted as still cached.
         assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+    }
+
+    #[test]
+    fn intern_snapshot_via_insert_browse_files_clears_an_orphan_mark() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
+
+        // Simulate resurrection + re-indexing while a drain would still be pending:
+        // repo re-added, snapshot back in snapshots_cache, then indexed again.
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(2)).unwrap();
+
+        assert!(
+            orphaned_at_of(&db, "aaaa111100000000").is_none(),
+            "re-indexing a resurrected snapshot must clear its orphan mark immediately, \
+             not wait for the next mark_orphans pass"
+        );
+        // A drain running right now must not delete the file rows indexing just wrote
+        // (the original sample_file_entry() row plus the 2 from file_entries(2)).
+        let batch = db.drain_orphans(100).unwrap();
+        assert_eq!(batch.rows_deleted, 0);
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+    }
+
+    #[test]
+    fn intern_snapshot_via_insert_browse_files_is_unaffected_for_an_unmarked_snapshot() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        let id_before = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1",
+                rusqlite::params!["aaaa111100000000"],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+
+        // Indexing the same, still-live snapshot again (e.g. a re-index) must not
+        // duplicate the row or disturb an already-NULL mark.
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+        let id_after = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1",
+                rusqlite::params!["aaaa111100000000"],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(id_before, id_after);
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
+    }
+
+    // ── has_cleanup_work ─────────────────────────────────────────────────────
+
+    #[test]
+    fn has_cleanup_work_false_on_a_clean_db() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+
+        assert!(!db.has_cleanup_work().unwrap());
+    }
+
+    #[test]
+    fn has_cleanup_work_true_for_a_dead_repos_snapshots_cache_row() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        // Simulate a dead repo row without going through remove_repo, which would
+        // already clean this up — mirrors mark_orphans's first DELETE clause directly.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM repositories WHERE id = 'repo1'", [])
+            .unwrap();
+
+        assert!(db.has_cleanup_work().unwrap());
+    }
+
+    #[test]
+    fn has_cleanup_work_true_for_an_unreferenced_indexed_snapshot() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+
+        assert!(db.has_cleanup_work().unwrap());
+    }
+
+    #[test]
+    fn has_cleanup_work_true_for_an_orphaned_browse_cache_status_row() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        // Remove only the snapshots_cache row directly, leaving browse_cache_status
+        // behind unmarked — isolates mark_orphans's third DELETE clause.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM snapshots_cache WHERE snapshot_id = 'aaaa111100000000'",
+                [],
+            )
+            .unwrap();
+
+        assert!(db.has_cleanup_work().unwrap());
+    }
+
+    #[test]
+    fn has_cleanup_work_true_when_something_is_already_marked_and_awaiting_drain() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+
+        // Marking already retired browse_cache_status/repo-keyed rows — the only thing
+        // still standing is the orphaned_at stamp itself, awaiting drain_orphans.
+        assert!(db.has_cleanup_work().unwrap());
+    }
+
+    /// The property that actually matters: `has_cleanup_work` must never say "nothing to
+    /// do" while `mark_orphans`/`drain_orphans` would in fact find something, across a
+    /// spread of fixture states. This is what catches the probe drifting out of sync with
+    /// `mark_orphans` as the source of truth — see `has_cleanup_work`'s doc comment.
+    #[test]
+    fn has_cleanup_work_agrees_with_mark_and_drain() {
+        // Case 1: clean DB — probe false, and running for real confirms nothing found.
+        {
+            let db = test_db();
+            seed_repo(&db, "repo1");
+            seed_snapshot(&db, "repo1", "aaaa111100000000");
+            db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+            db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+
+            assert!(!db.has_cleanup_work().unwrap());
+            assert_eq!(db.mark_orphans().unwrap(), 0);
+            assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
+            assert_eq!(db.drain_orphans(100).unwrap().rows_deleted, 0);
+        }
+
+        // Case 2: a dead-repo orphan exists — probe true, and running for real finds it.
+        {
+            let db = test_db();
+            seed_repo(&db, "repo1");
+            seed_snapshot(&db, "repo1", "aaaa111100000000");
+            db.insert_browse_files("aaaa111100000000", &[sample_file_entry()]).unwrap();
+            db.remove_repo("repo1").unwrap();
+
+            assert!(db.has_cleanup_work().unwrap());
+            let marked = db.mark_orphans().unwrap();
+            let drained = db.drain_orphans(100).unwrap();
+            assert!(marked > 0 || drained.rows_deleted > 0);
+        }
+
+        // Case 3: already marked, mid-drain — probe stays true until fully drained.
+        {
+            let db = test_db();
+            seed_repo(&db, "repo1");
+            seed_snapshot(&db, "repo1", "aaaa111100000000");
+            db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+            db.remove_repo("repo1").unwrap();
+            db.mark_orphans().unwrap();
+
+            assert!(db.has_cleanup_work().unwrap());
+            db.drain_orphans(1).unwrap(); // partial drain, one file row left
+            assert!(
+                db.has_cleanup_work().unwrap(),
+                "still-marked row awaiting drain must keep the probe true"
+            );
+            let batch = db.drain_orphans(100).unwrap();
+            assert!(!batch.more_remaining);
+            assert!(!db.has_cleanup_work().unwrap());
+        }
     }
 
     #[test]

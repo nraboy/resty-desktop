@@ -1039,7 +1039,15 @@ export default function SettingsPage() {
           behind by deleted rows without removing any data.
         </p>
         <div className="flex items-center gap-3">
-          <Button variant="secondary" onClick={handleCleanCache} loading={cleaningCache}>
+          <Button
+            variant="secondary"
+            onClick={handleCleanCache}
+            // Also loading while an automatic background cleanup is draining
+            // (activeCleanup) — without this, clicking mid-drain surfaced
+            // run_cleanup's busy guard as a visible "already running" error for
+            // something that isn't really a user error.
+            loading={cleaningCache || activeCleanup != null}
+          >
             Clean Orphaned Data
           </Button>
           <Button variant="secondary" onClick={handleClearCache} loading={clearingCache}>
