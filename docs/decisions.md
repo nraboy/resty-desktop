@@ -120,15 +120,126 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `indexed_snapshots.orphaned_at`, dropping `browse_cache_status`) always happens before any
   `browse_cache_files` row is touched, specifically so an interrupted run — Stop, crash, quit — can
   never leave a snapshot claiming to be indexed with its file rows partially deleted; worst case is
-  a re-index, never inconsistent state. **An automatic version of this on the 60s cache-warmer tick
-  was deliberately deferred**, not built here: `AppDb::evict_snapshots` empties a repo's entire
-  `snapshots_cache` and leaves it empty for up to 60s until the warmer repopulates it, during which
-  every snapshot in that repo looks orphaned to `mark_orphans`'s query. That race already exists in
-  the manual button today (hitting it needs a click inside a narrow window), so this change neither
-  introduces nor fixes it — but running the same logic automatically every tick would make it
-  routine instead of rare, so automation needs its own guard (skip marking on any tick where a repo
-  has no positive evidence of a current snapshot list) before it's safe to build. Don't wire
-  `trigger_cleanup` into `cache_warmer.rs` without that guard and its own tests.
+  a re-index, never inconsistent state.
+- **Automatic orphan cleanup runs on the 60s cache-warmer tick, but not via a staleness guard on a
+  periodic scan** — that approach was considered and rejected. `AppDb::evict_snapshots` empties a
+  repo's entire `snapshots_cache` and leaves it empty for up to 60s until the warmer repopulates it;
+  a periodic scan asking "does this repo's cache look trustworthy right now?" would misread that
+  window as every snapshot being orphaned, and running such a scan automatically every 60s (instead
+  of only on a rare manual-click timing collision, which is the only way to hit it today) would turn
+  a theoretical race into a systematic one. Instead, orphan **marking** happens inside
+  `AppDb::set_snapshots` itself: before it replaces a repo's snapshot list, it diffs the old ids
+  against the new ones it's about to insert, in the same transaction, and marks whichever dropped
+  out — but only if no *other* repo's `snapshots_cache` still references them either (reusing
+  `mark_orphans`'s exact global check; see `remove_repo_keeps_file_rows_shared_with_another_repo`).
+  This is a direct diff of two lists already in hand, not an inference from a possibly-stale
+  `snapshots_cache` read, so there is no staleness window to guard against — every caller of
+  `set_snapshots` (the cache-warmer tick, `apply_retention`'s success path, the manual
+  `refresh_snapshots` command) gets correct, race-free marking automatically, with no new
+  cross-cutting guard in `cache_warmer.rs`. The tick's `trigger_cleanup_drain`
+  (`cache_warmer.rs`) then only *drains* what's already been marked — `AppDb::mark_orphans`'s full
+  reconciliation also still runs there periodically (`CLEANUP_RECONCILE_EVERY_N_TICKS`, ~30 min) as
+  a backstop for `AppDb::evict_snapshots`, which empties a repo's `snapshots_cache` with no
+  replacement and is called at **several** sites, not only on a re-fetch failure —
+  `delete_snapshot` wipes it unconditionally on every successful deletion, and `copy_snapshot`/
+  `mirror_repo` do the same for their destination repo. Unlike `set_snapshots`'s diff, this
+  backstop genuinely is a "does the cache look trustworthy right now" scan across every repo at
+  once — reintroducing the exact race the diff redesign exists to avoid, unless gated. It is:
+  `AppDb::mark_orphans_if_all_repos_fresh` (`cache.rs`), the only production caller of the
+  backstop, checks — every repo has at least one `snapshots_cache` row — and, if so, performs the
+  reconciliation, both inside **one transaction**; a single repo left empty by `evict_snapshots`
+  (with nothing having refreshed it since — plausible after deleting a snapshot and quitting
+  before the next tick, or a remote repo with `remote_auto_refresh` off, which
+  `refresh_all_snapshots` skips indefinitely) blocks the *entire* backstop that tick, not just
+  that repo, since `indexed_snapshots` carries no `repo_id` to scope the check more finely.
+  Coarse but safe: a blocked backstop just delays cleanup for repos unaffected by the empty one;
+  an unblocked one that runs against stale data would delete live index data outright. The check
+  and the mark are **not** two separate calls (a pre-check, then a conditional call to
+  `mark_orphans`) — `AppDb` shares one connection behind one Rust `Mutex`, released between
+  separate method calls, so a two-call version would leave a real TOCTOU window: a concurrent
+  `evict_snapshots` (from a delete/copy/mirror completing at that exact moment, on a different
+  tokio task) could flip a repo from fresh to empty in the gap between the check passing and the
+  mark actually running. One transaction closes that gap entirely. (The plain `all_repos_have_
+  cached_snapshots` predicate still exists standalone, for its own unit tests and any future
+  caller that just wants the read — not called from production code today.) This gate matters
+  especially at launch — `cache_warmer::spawn` starts from `setup()`, not from unlock, so tick 0
+  (~10s after every launch) would otherwise run the backstop before the password screen is even
+  dismissed, against whatever `snapshots_cache` state persisted from the previous session. The
+  manual "Clean Orphaned Data" button deliberately keeps calling the ungated `mark_orphans`
+  directly — gating it too would mean it could silently do nothing whenever any repo has never
+  been backed up yet, which would look broken against a real, pending backlog elsewhere; the
+  button's pre-existing narrow click-timing risk (documented from when this feature first
+  shipped) is unchanged, not worsened, by any of this. Ships with no settings toggle,
+  matching the cache warmer's own snapshot-refresh tick, which has never had one either. The
+  automatic drain shares `CleanupHandle` (the manual "Clean Orphaned Data" button's busy/cancelled
+  state) rather than using its own reentrancy flag — this is what keeps the frontend's single-slot
+  `ActiveCleanup` state correct (at most one cleanup operation is ever "the" active one on the
+  `task` bus) and means a manual click during an automatic drain fails fast with the same "already
+  running" error the button already returns for a second manual click, rather than racing it. A
+  drain only appears on the `task` bus (`TaskOrigin::Background`) once its total pending rows
+  exceeds `CLEANUP_VISIBILITY_THRESHOLD_ROWS` — the routine, steady-state case (a retention run's
+  worth of orphans, typically a few thousand rows) stays silent rather than flashing a row in the
+  Activity panel every minute forever; only a genuine catch-up drain surfaces. The manual button
+  has no such gate — every click emits, since it's already a user-initiated action. Two more
+  details worth knowing before touching this code:
+  - `set_snapshots`'s diff treats a repo's cached snapshot list dropping from **more than one**
+    entry to **completely empty** in a single refresh as a suspect fetch and skips marking for
+    that call (though the `snapshots_cache` replace itself still happens, unchanged) — an
+    eventually-consistent remote backend can return an incomplete listing while restic still exits
+    0, and marking amplifies that from a cosmetic, self-healing display glitch into destroying an
+    entire repo's browse cache in one shot. Deliberately scoped to `> 1`, not `>= 1`: a
+    single-snapshot repo losing its one snapshot (a fresh repo, `keep-last 1` retention) is
+    completely ordinary and must still mark immediately — only *multiple* snapshots vanishing at
+    once is the suspicious shape. A genuinely, permanently emptied repo isn't lost — `old_ids`
+    reads back empty on every later call once `snapshots_cache` is actually empty, so the guard
+    only fires once per such transition, and the periodic `mark_orphans` backstop catches what it
+    skipped within `CLEANUP_RECONCILE_EVERY_N_TICKS` ticks regardless.
+  - `run_cleanup_drain`'s `CleanupHandle::busy` claim is deferred until *after* confirming there's
+    real pending work (`has_pending_orphans`), not taken up front the way `clean_cache`'s is — on
+    the common tick where nothing is marked, this function must never look like it's "running" to
+    a concurrent manual click. This narrows, but doesn't eliminate, one remaining rough edge: a
+    sub-threshold (invisible) automatic drain still briefly holds `busy` while it drains, and a
+    manual click landing in that exact window fails with "already running" with nothing visible in
+    the Activity panel to explain why (the background run stayed silent by design, since it never
+    crossed the visibility threshold). Accepted as a rare, self-resolving edge case rather than
+    engineered away — batches are fast (milliseconds), so the window is small, and a second click
+    moments later succeeds normally.
+
+  Both the manual and automatic paths share one drain implementation, `run_drain_loop`
+  (`commands/cache.rs`) — not two independent copies. They already diverged once during review (the
+  automatic path grew a `has_pending_orphans` bail-out the manual button never needed), which is
+  exactly the risk a single shared loop exists to prevent; only marking, visibility, and origin
+  differ per caller; the batch-drain mechanism itself is identical code, and neither caller passes a
+  batch cap (see the next entry for why the automatic side briefly did, and why that was a bug).
+- **The automatic drain has no per-tick batch cap — `run_cleanup_drain` calls `run_drain_loop` with
+  `max_batches: None`, running each tick's drain to full completion, exactly like the manual
+  button.** A cap (`CLEANUP_MAX_BATCHES_PER_TICK`, 20 batches ≈ 100K rows) existed briefly and was
+  removed after it produced a confirmed regression: `run_drain_loop` correctly distinguishes
+  `DrainOutcome::Finished` (nothing left) from `DrainOutcome::BatchLimitReached` (hit the cap, more
+  remains), but `run_cleanup_drain`'s original outcome-handling mapped **both** to `ctx.finished()`
+  — so a tick that only got through one cap's worth of a much larger backlog still told the task bus
+  the cleanup was done, and the Activity panel row disappeared accordingly. A user who saw that and
+  then clicked "Clean Orphaned Data" manually (which has no cap) found and removed everything the
+  automatic tick hadn't gotten to yet — over a million rows in the incident that surfaced this. The
+  cap's own justification didn't hold up either: `trigger_cleanup_drain` is fire-and-forget (spawns
+  `run_cleanup_drain` and returns immediately), so the tick loop's next `sleep(60s)` was never
+  blocked by however long a drain ran — capping bought nothing but the false-completion bug. Fixing
+  the *mapping* (representing "still working, paused until next tick" correctly) would need
+  cross-tick operation continuity — the same `operationId` reused across several `run_cleanup_drain`
+  invocations — which doesn't exist today and is a materially bigger change than removing a cap that
+  wasn't earning its cost. `DrainOutcome::BatchLimitReached` is now unreachable from
+  `run_cleanup_drain` specifically (the match arm there is `unreachable!()`, not folded into
+  `Finished`) — deliberately, so reintroducing a cap without also reintroducing a correct way to
+  represent that state panics loudly in testing rather than silently reintroducing this bug.
+  `run_drain_loop`'s `max_batches` parameter and `BatchLimitReached` variant themselves stay in
+  `cache.rs` as general capability for a future caller that actually needs bounded batches — nothing
+  wrong with the primitive, only with how this particular caller used to interpret its result.
+  `clean_cache` (the manual button) got the identical `unreachable!()` treatment on the same match
+  arm during this fix, even though it was never involved in the incident — it already passed
+  `max_batches: None` (it always ran to completion; that was never capped), but its match arms
+  still folded `BatchLimitReached` into success/`finished`, the same latent landmine as
+  `run_cleanup_drain`'s had. Caught during self-review, fixed for the same reason, not because it
+  was live.
 - **`clear_cache` ("Clear All Cache") deliberately does not `VACUUM`** — it used to, and the delete
   itself was never the risk (every `DELETE FROM table;` here has no `WHERE` clause, so SQLite's
   truncate optimization deallocates the whole table in one step regardless of row count — cheap no
