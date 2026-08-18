@@ -1543,6 +1543,24 @@ impl AppDb {
         Ok(())
     }
 
+    /// Removes just this one snapshot's `snapshots_cache` row after a successful `forget` —
+    /// keeps the repo's cached snapshot list accurate immediately, without an unbounded
+    /// `browse_cache_files` delete (`evict`'s job, for the separate "clear index" action) or
+    /// wiping the rest of the repo's cache (the old `evict_snapshots`-on-delete pattern,
+    /// removed — see docs/decisions.md). Deliberately touches nothing else:
+    /// `indexed_snapshots`/`browse_cache_files`/`browse_cache_status` for this snapshot are
+    /// left as-is, discovered and swept by the next "Clean Orphaned Data" click's full-table
+    /// `mark_orphans` scan, same as every other orphan source (retention, repo removal).
+    pub fn remove_snapshot_from_cache(&self, repo_id: &str, snapshot_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM snapshots_cache WHERE repo_id = ?1 AND snapshot_id = ?2",
+            params![repo_id, snapshot_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // ── browse cache status ───────────────────────────────────────────────────
 
     pub fn get_browse_status(
@@ -1839,23 +1857,67 @@ impl AppDb {
         Ok(rows)
     }
 
-    /// Full replace: clears existing snapshot rows for this repo, then inserts all from JSON.
+    /// Full sync of a repo's cached snapshot list against a fresh `restic snapshots --json`
+    /// listing — diff-based, not a blind delete-all-then-insert-all: only ids that actually
+    /// dropped out of the new listing are deleted, and every id in the new listing is
+    /// upserted (never skipped), so this stays exactly as correct as a full replace for
+    /// picking up a tag/metadata change on an id that neither added nor dropped, while
+    /// avoiding rewriting every row in the repo's history whenever only one snapshot
+    /// changed. Deleting only confirmed-dropped ids (never "everything for this repo") is
+    /// also what keeps a caller from ever manufacturing an ambiguous empty cache by feeding
+    /// this an empty/partial list to represent "unknown" — the caller must always pass a
+    /// real, successfully-fetched listing; see docs/decisions.md.
     pub fn set_snapshots(&self, repo_id: &str, json: &str) -> Result<(), String> {
         let rows = parse_snapshot_rows(json)?;
         let now = timestamp();
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute(
-            "DELETE FROM snapshots_cache WHERE repo_id = ?1",
-            params![repo_id],
-        )
-        .map_err(|e| e.to_string())?;
+
+        let old_ids: std::collections::HashSet<String> = {
+            let mut stmt = tx
+                .prepare_cached("SELECT snapshot_id FROM snapshots_cache WHERE repo_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let mapped = stmt
+                .query_map(params![repo_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            mapped
+        };
+        let new_ids: std::collections::HashSet<&str> =
+            rows.iter().map(|s| s.id.as_str()).collect();
+
+        let dropped: Vec<&str> = old_ids
+            .iter()
+            .filter(|id| !new_ids.contains(id.as_str()))
+            .map(|id| id.as_str())
+            .collect();
+        if !dropped.is_empty() {
+            // Purely anonymous `?` placeholders, bound positionally — same convention as
+            // the other dynamic IN-lists in this file (e.g. get_settings above).
+            let placeholders = dropped.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "DELETE FROM snapshots_cache WHERE repo_id = ? AND snapshot_id IN ({placeholders})"
+            );
+            let mut p: Vec<&dyn rusqlite::ToSql> = vec![&repo_id];
+            p.extend(dropped.iter().map(|id| id as &dyn rusqlite::ToSql));
+            tx.execute(&sql, p.as_slice()).map_err(|e| e.to_string())?;
+        }
+
         {
             let mut stmt = tx
                 .prepare_cached(
                     "INSERT INTO snapshots_cache
                      (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT (repo_id, snapshot_id) DO UPDATE SET
+                       short_id = excluded.short_id,
+                       time = excluded.time,
+                       hostname = excluded.hostname,
+                       username = excluded.username,
+                       paths = excluded.paths,
+                       tags = excluded.tags,
+                       cached_at = excluded.cached_at",
                 )
                 .map_err(|e| e.to_string())?;
             for s in &rows {
@@ -1910,16 +1972,6 @@ impl AppDb {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn evict_snapshots(&self, repo_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM snapshots_cache WHERE repo_id = ?1",
-            params![repo_id],
-        )
-        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -2477,12 +2529,21 @@ impl AppDb {
             )
             .map_err(|e| e.to_string())? as u64;
 
-        // Retire marked snapshots that now have zero file rows left.
+        // Retire marked snapshots that now have zero file rows left. A correlated
+        // NOT EXISTS, not `id NOT IN (SELECT DISTINCT snap FROM browse_cache_files)` — the
+        // IN form plans as a full scan of browse_cache_files (via idx_browse_files) on
+        // every call, live rows included; on a large cache drained in 5,000-row batches
+        // that's a full index scan per batch. NOT EXISTS plans as one indexed seek
+        // (snap=?) per marked mapping instead — verified via EXPLAIN QUERY PLAN on the
+        // real schema. Same result set either way: browse_cache_files.snap is
+        // INTEGER NOT NULL, so there's no NULL-handling difference between the two forms.
         removed += tx
             .execute(
                 "DELETE FROM indexed_snapshots
                  WHERE orphaned_at IS NOT NULL
-                   AND id NOT IN (SELECT DISTINCT snap FROM browse_cache_files)",
+                   AND NOT EXISTS (
+                       SELECT 1 FROM browse_cache_files f WHERE f.snap = indexed_snapshots.id
+                   )",
                 [],
             )
             .map_err(|e| e.to_string())? as u64;
@@ -3328,6 +3389,147 @@ mod tests {
             r#"[{{"id":"{snapshot_id}","short_id":"{snapshot_id}","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]}}]"#
         );
         db.set_snapshots(repo_id, &json).unwrap();
+    }
+
+    fn snapshot_json(id: &str, tags: Option<&[&str]>) -> String {
+        let tags_json = match tags {
+            Some(t) => serde_json::to_string(t).unwrap(),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"id":"{id}","short_id":"{id}","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"],"tags":{tags_json}}}"#
+        )
+    }
+
+    #[test]
+    fn remove_snapshot_from_cache_deletes_only_the_targeted_row() {
+        let db = test_db();
+        let repo1 = "repo1";
+        let repo2 = "repo2";
+        seed_repo(&db, repo1);
+        seed_repo(&db, repo2);
+        db.set_snapshots(
+            repo1,
+            &format!("[{},{}]", snapshot_json("aaaa111100000000", None), snapshot_json("bbbb222200000000", None)),
+        )
+        .unwrap();
+        seed_snapshot(&db, repo2, "cccc333300000000");
+
+        db.remove_snapshot_from_cache(repo1, "aaaa111100000000").unwrap();
+
+        let remaining: Vec<String> = db.get_snapshots_vec(repo1).unwrap().into_iter().map(|s| s.id).collect();
+        assert_eq!(remaining, vec!["bbbb222200000000".to_string()]);
+        // Untouched: another repo's row, and this same call must not touch
+        // indexed_snapshots/browse_cache_files/browse_cache_status at all.
+        assert_eq!(db.get_snapshots_vec(repo2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn set_snapshots_diff_deletes_only_dropped_ids() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        db.set_snapshots(
+            "repo1",
+            &format!(
+                "[{},{}]",
+                snapshot_json("aaaa111100000000", None),
+                snapshot_json("bbbb222200000000", None)
+            ),
+        )
+        .unwrap();
+
+        // Second call drops bbbb, keeps aaaa.
+        db.set_snapshots("repo1", &format!("[{}]", snapshot_json("aaaa111100000000", None))).unwrap();
+
+        let remaining: Vec<String> = db.get_snapshots_vec("repo1").unwrap().into_iter().map(|s| s.id).collect();
+        assert_eq!(remaining, vec!["aaaa111100000000".to_string()]);
+    }
+
+    /// The single-drop case above can't catch an off-by-one in the dynamic placeholder
+    /// list (the `repo_id` param bound first, then N dropped-id params) — this drops two
+    /// of three in one call to exercise that binding with more than one item.
+    #[test]
+    fn set_snapshots_diff_deletes_multiple_dropped_ids_in_one_call() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        db.set_snapshots(
+            "repo1",
+            &format!(
+                "[{},{},{}]",
+                snapshot_json("aaaa111100000000", None),
+                snapshot_json("bbbb222200000000", None),
+                snapshot_json("cccc333300000000", None)
+            ),
+        )
+        .unwrap();
+
+        // Drops aaaa and cccc, keeps bbbb.
+        db.set_snapshots("repo1", &format!("[{}]", snapshot_json("bbbb222200000000", None))).unwrap();
+
+        let remaining: Vec<String> = db.get_snapshots_vec("repo1").unwrap().into_iter().map(|s| s.id).collect();
+        assert_eq!(remaining, vec!["bbbb222200000000".to_string()]);
+    }
+
+    #[test]
+    fn set_snapshots_diff_adds_new_ids_without_touching_others() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        db.set_snapshots("repo1", &format!("[{}]", snapshot_json("aaaa111100000000", None))).unwrap();
+
+        db.set_snapshots(
+            "repo1",
+            &format!(
+                "[{},{}]",
+                snapshot_json("aaaa111100000000", None),
+                snapshot_json("bbbb222200000000", None)
+            ),
+        )
+        .unwrap();
+
+        let mut ids: Vec<String> = db.get_snapshots_vec("repo1").unwrap().into_iter().map(|s| s.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["aaaa111100000000".to_string(), "bbbb222200000000".to_string()]);
+    }
+
+    /// Exercises the `ON CONFLICT` upsert path specifically: calling `set_snapshots` again
+    /// with the exact same listing must not error (no duplicate-key failure) and must leave
+    /// exactly the same rows in place.
+    #[test]
+    fn set_snapshots_is_idempotent_on_an_unchanged_listing() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        let json = format!(
+            "[{},{}]",
+            snapshot_json("aaaa111100000000", None),
+            snapshot_json("bbbb222200000000", None)
+        );
+        db.set_snapshots("repo1", &json).unwrap();
+        db.set_snapshots("repo1", &json).unwrap();
+
+        let mut ids: Vec<String> = db.get_snapshots_vec("repo1").unwrap().into_iter().map(|s| s.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["aaaa111100000000".to_string(), "bbbb222200000000".to_string()]);
+    }
+
+    /// Pins the reason every fetched row is always upserted rather than skipped when its id
+    /// already exists: a tag added out-of-band (e.g. `restic tag` run outside the app) on an
+    /// id that neither added nor dropped must still be picked up on the next refresh.
+    #[test]
+    fn set_snapshots_picks_up_a_tag_change_on_an_existing_id() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        db.set_snapshots("repo1", &format!("[{}]", snapshot_json("aaaa111100000000", None))).unwrap();
+        assert_eq!(db.get_snapshots_vec("repo1").unwrap()[0].tags, None);
+
+        db.set_snapshots(
+            "repo1",
+            &format!("[{}]", snapshot_json("aaaa111100000000", Some(&["daily"]))),
+        )
+        .unwrap();
+
+        let snapshots = db.get_snapshots_vec("repo1").unwrap();
+        assert_eq!(snapshots.len(), 1, "must not duplicate the row");
+        assert_eq!(snapshots[0].tags, Some(vec!["daily".to_string()]));
     }
 
     #[test]

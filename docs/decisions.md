@@ -121,14 +121,42 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `browse_cache_files` row is touched, specifically so an interrupted run — Stop, crash, quit — can
   never leave a snapshot claiming to be indexed with its file rows partially deleted; worst case is
   a re-index, never inconsistent state. **An automatic version of this on the 60s cache-warmer tick
-  was deliberately deferred**, not built here: `AppDb::evict_snapshots` empties a repo's entire
-  `snapshots_cache` and leaves it empty for up to 60s until the warmer repopulates it, during which
-  every snapshot in that repo looks orphaned to `mark_orphans`'s query. That race already exists in
-  the manual button today (hitting it needs a click inside a narrow window), so this change neither
-  introduces nor fixes it — but running the same logic automatically every tick would make it
-  routine instead of rare, so automation needs its own guard (skip marking on any tick where a repo
-  has no positive evidence of a current snapshot list) before it's safe to build. Don't wire
-  `trigger_cleanup` into `cache_warmer.rs` without that guard and its own tests.
+  was attempted, then deliberately rolled back** (see git history around the "Automate
+  orphaned-cache cleanup" commit and its revert) — not because batching itself was wrong, but
+  because making cleanup automatic multiplied the blast radius of the wipe race described below to
+  the point where compensating for it (a staleness-flag table, a migration seed, an in-flight-index
+  guard) cost more complexity than the feature was worth. Manual-button-only stays the deliberate
+  choice until there's a real need to revisit it — don't re-add a ticker-driven drain without
+  re-reading that history first.
+- **`AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it) was
+  removed outright, not just left unautomated.** It used to be called by `delete_snapshot`,
+  `copy_snapshot`, `mirror_repo`, and as a re-fetch-failure fallback by `execute_backup`/
+  `apply_retention` — sometimes unconditionally on success (copy/mirror never even attempted a real
+  fetch first), sometimes only when a live re-fetch itself failed. While a repo's cache sat
+  artificially empty, `mark_orphans`'s full-table scan (the manual "Clean Orphaned Data" button)
+  would read "zero live snapshots" for that repo and mark its *entire* indexed browse history
+  orphaned — a real, if narrow-window, data-loss path reachable with nothing more than one click at
+  the wrong moment, independent of any automation. Fixed at the source, not patched around:
+  `delete_snapshot` now deletes just the one row it knows is gone
+  (`AppDb::remove_snapshot_from_cache`); `copy_snapshot`/`mirror_repo` fetch the destination's real
+  listing on success and feed it through `set_snapshots` instead of wiping; every failed-re-fetch
+  fallback now does nothing, leaving the existing cached rows stale-but-present rather than empty.
+  Nothing in production calls `evict_snapshots` any more, so the function itself was deleted rather
+  than left as a dead-code temptation for a future call site to reach for the wipe pattern again.
+  Don't reintroduce a caller that clears `snapshots_cache` with no real listing in hand — if a
+  fetch fails, leave the cache as it was.
+- **`set_snapshots` is diff-based (delete only confirmed-dropped ids, upsert every id in the fresh
+  listing) rather than delete-all-then-insert-all.** This is a genuine perf win (skips rewriting
+  every unrelated row in a repo's history when only one snapshot changed) but its real point is
+  correctness: because it only ever deletes ids a real, successful fetch confirmed are gone, it
+  can never manufacture the ambiguous "empty cache" state the `evict_snapshots` removal above is
+  about — there's no code path left where "I don't have data" gets represented as "the new list is
+  empty." Every fetched id is still unconditionally upserted (never skipped), so a tag or metadata
+  change on an id that neither added nor dropped is still picked up exactly as a full replace would
+  catch it — the "skip rows whose content didn't change" version (a real per-field comparison) was
+  considered and deliberately not built: it would need to get every field comparison right or risk
+  silently leaving stale data forever, for a marginal further perf gain the id-level diff already
+  captures most of. Don't add that content-comparison layer without a specific, measured reason to.
 - **`clear_cache` ("Clear All Cache") deliberately does not `VACUUM`** — it used to, and the delete
   itself was never the risk (every `DELETE FROM table;` here has no `WHERE` clause, so SQLite's
   truncate optimization deallocates the whole table in one step regardless of row count — cheap no

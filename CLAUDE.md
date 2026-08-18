@@ -233,6 +233,20 @@ proposing a change — several are pinned by a named test or reference a confirm
   batching the delete instead of shrinking it. Marking before any file-row delete means an
   interrupted run (Stop, crash, quit) never leaves a snapshot claiming to be indexed with its
   file rows partially gone — see cache.rs's doc comments on both functions.
+- Orphan cleanup is **manual-button-only, deliberately** — `mark_orphans`/`drain_orphans` are
+  called from nowhere except the "Clean Orphaned Data" command. An automatic ticker-driven
+  version was built and then rolled back (see docs/decisions.md) because making cleanup
+  automatic multiplied the blast radius of a wipe-race bug enough that compensating for it cost
+  more complexity than the feature was worth. Don't re-add a ticker-driven drain without reading
+  that history first.
+- `AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it)
+  was removed outright, not just left unused — it's what created the wipe race above. `set_snapshots`
+  is diff-based (deletes only confirmed-dropped ids, upserts every id in the fresh listing) rather
+  than delete-all-then-insert-all, so it can never manufacture an artificially-empty cache; every
+  caller that used to reach for a wipe (`delete_snapshot`, `copy_snapshot`, `mirror_repo`,
+  `execute_backup`/`apply_retention`'s re-fetch-failure fallback) now either fetches real data
+  first or does nothing on failure. Don't reintroduce a caller that clears `snapshots_cache` with
+  no real listing in hand — see docs/decisions.md.
 - `clear_cache` ("Clear All Cache") deliberately does **not** `VACUUM` — its `DELETE FROM table;`
   calls have no `WHERE` clause, so SQLite's truncate optimization already makes them cheap
   regardless of row count; `VACUUM` scales with total DB size instead and would hold the same

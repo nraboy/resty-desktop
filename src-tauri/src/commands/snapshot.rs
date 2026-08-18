@@ -161,8 +161,10 @@ pub async fn delete_snapshot(
         Err(e) => task_ctx.failed(e.clone()),
     }
     result?;
-    let _ = db.evict(&repo_id, &snapshot_id);  // clears browse_cache_files + browse_cache_status
-    let _ = db.evict_snapshots(&repo_id);
+    // Keeps the repo's cached snapshot list accurate immediately, without an unbounded
+    // browse_cache_files delete or wiping the rest of the repo's cache — see
+    // remove_snapshot_from_cache's doc comment (cache.rs) and docs/decisions.md.
+    let _ = db.remove_snapshot_from_cache(&repo_id, &snapshot_id);
     Ok(())
 }
 
@@ -736,10 +738,10 @@ pub async fn execute_backup(
             let bytes_added = summary.as_ref().and_then(|v| v["data_added"].as_u64()).unwrap_or(0);
 
             if let Some(ref id) = snapshot_id {
+                // A failed re-fetch leaves the cache exactly as it was — one tick or one
+                // manual refresh stale, never wiped. See docs/decisions.md.
                 if let Ok(new_json) = run_restic_with_path(&repo, vec!["snapshots", "--json", id], &restic_path) {
                     let _ = db.append_snapshots(repo_id, &new_json);
-                } else {
-                    let _ = db.evict_snapshots(repo_id);
                 }
             }
 
@@ -918,6 +920,10 @@ pub async fn copy_snapshot(
     let src_repo_for_unlock = src_repo.clone();
     let dest_repo_for_unlock = dest_repo.clone();
     let restic_path_for_unlock = restic_path.clone();
+    // Also clone for a post-success re-fetch (below) — dest_repo/restic_path are moved
+    // wholesale into the spawn_blocking closure just below, so these have to be taken first.
+    let dest_repo_for_refresh = dest_repo.clone();
+    let restic_path_for_refresh = restic_path.clone();
 
     // `copy` reads from src and writes new blobs into dest, both under restic's shared
     // lock — register as a reader on both so an exclusive op (forget/prune/tag) on
@@ -996,7 +1002,18 @@ pub async fn copy_snapshot(
     }
 
     if result.is_ok() {
-        let _ = db.evict_snapshots(&dest_repo_id);
+        // Fetch the destination's real snapshot list rather than wiping the cache and
+        // waiting on the next tick — see docs/decisions.md. A failed re-fetch leaves the
+        // cache exactly as it was.
+        if let Ok(json) = super::repo::run_restic_blocking(
+            dest_repo_for_refresh,
+            vec!["snapshots".to_string(), "--json".to_string()],
+            restic_path_for_refresh,
+        )
+        .await
+        {
+            let _ = db.set_snapshots(&dest_repo_id, &json);
+        }
     } else if copy_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
         // The process was killed via SIGKILL and left stale locks on both repos.
         // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
@@ -1225,7 +1242,18 @@ pub async fn mirror_repo(
         }
 
         if result.is_ok() {
-            let _ = app_for_task.state::<AppDb>().evict_snapshots(&dest_repo_id);
+            // Fetch the destination's real snapshot list rather than wiping the cache and
+            // waiting on the next tick — see docs/decisions.md. A failed re-fetch leaves the
+            // cache exactly as it was.
+            if let Ok(json) = super::repo::run_restic_blocking(
+                dest_repo.clone(),
+                vec!["snapshots".to_string(), "--json".to_string()],
+                restic_path.clone(),
+            )
+            .await
+            {
+                let _ = app_for_task.state::<AppDb>().set_snapshots(&dest_repo_id, &json);
+            }
         } else if cancelled {
             // The process was killed via SIGKILL and left stale locks on both repos.
             // spawn_blocking already called wait(), so the PIDs are gone — unlock is safe now.
@@ -1435,12 +1463,11 @@ pub fn apply_retention(
     }
 
     if result.is_ok() {
+        // A failed re-fetch leaves the cache exactly as it was — see docs/decisions.md.
         if let Ok(json) =
             run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
         {
             let _ = db.set_snapshots(repo_id, &json);
-        } else {
-            let _ = db.evict_snapshots(repo_id);
         }
     }
     result

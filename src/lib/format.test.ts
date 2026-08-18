@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList } from "./format";
 import type { ResticStats } from "./types";
 
@@ -114,7 +114,20 @@ describe("formatDuration", () => {
 });
 
 describe("formatRelative", () => {
-  const now = Math.floor(Date.now() / 1000);
+  const now = 1_700_000_000;
+
+  // formatRelative reads Date.now() internally, so without a frozen clock, `now` (captured
+  // above via a separate Date.now() read) can end up a few hundred ms — occasionally a
+  // full second, at a boundary — behind the clock formatRelative itself sees, silently
+  // pulling `now + 60` back under the 60s threshold ("in 1 min" -> "in under a minute").
+  // Freezing time makes both reads see the same instant, closing that race.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now * 1000);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("formats near-future timestamps as 'in under a minute'", () => {
     expect(formatRelative(now + 30)).toBe("in under a minute");
