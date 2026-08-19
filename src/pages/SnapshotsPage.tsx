@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
 import { capList, formatBytes, formatDate } from "../lib/format";
@@ -1258,19 +1259,29 @@ export default function SnapshotsPage() {
                   onClick: async () => {
                     const snap = contextMenu.snap;
                     setContextMenu(null);
-                    let started = false;
-                    try { started = await indexSnapshot(repoId!, snap.id); }
-                    catch { started = false; }
-                    if (!started) {
-                      // Already complete or in progress (e.g. warmer mid-flight):
-                      // reconcile the row's true state instead of opening a modal.
-                      getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
-                      return;
+                    let outcome: IndexStartOutcome | null = null;
+                    try { outcome = await indexSnapshot(repoId!, snap.id); }
+                    catch { setError("Failed to start indexing."); return; }
+                    switch (outcome) {
+                      case "started":
+                        setIndexingTarget(snap);
+                        setIndexingDone(false);
+                        setIndexingSuccess(true);
+                        setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
+                        break;
+                      case "already_indexed":
+                      case "already_running":
+                        // e.g. the warmer got there first: reconcile the row's true
+                        // state instead of opening a modal.
+                        getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
+                        break;
+                      case "not_listed":
+                        // Forgotten by an external restic, or dropped by a cache
+                        // refresh, between rendering this row and the click.
+                        setError(`Snapshot ${snap.short_id} is no longer in this repository. Refresh the snapshot list.`);
+                        getSnapshotIndexStatus(repoId!).then(setIndexStatus).catch(() => {});
+                        break;
                     }
-                    setIndexingTarget(snap);
-                    setIndexingDone(false);
-                    setIndexingSuccess(true);
-                    setIndexStatus((prev) => ({ ...prev, [snap.id]: "in_progress" }));
                   },
                 }]),
             {

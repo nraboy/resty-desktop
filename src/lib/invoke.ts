@@ -271,7 +271,12 @@ export const forgetByPlan = (
 export const listFiles = (repoId: string, snapshotId: string, path?: string): Promise<FileEntry[]> =>
   invoke("list_files", { repoId, snapshotId, path });
 
-export const indexSnapshot = (repoId: string, snapshotId: string): Promise<boolean> =>
+// Mirrors src-tauri/src/commands/browse.rs's IndexStartOutcome. "started"/"already_running"
+// both mean a terminal `task` bus event is still coming; "already_indexed"/"not_listed" mean
+// none is, and the caller must resolve UI state itself.
+export type IndexStartOutcome = "started" | "already_indexed" | "already_running" | "not_listed";
+
+export const indexSnapshot = (repoId: string, snapshotId: string): Promise<IndexStartOutcome> =>
   invoke("index_snapshot", { repoId, snapshotId });
 
 export const indexSnapshotsBatch = (repoId: string, snapshotIds: string[]): Promise<void> =>

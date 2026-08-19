@@ -482,8 +482,97 @@ pub(crate) fn run_full_index(
         .skip(1) // first line is the snapshot summary object
         .filter_map(|line| serde_json::from_str::<FileEntry>(line).ok())
         .collect();
-    db.insert_browse_files(snapshot_id, &entries)?;
-    db.set_browse_status(repo_id, snapshot_id, "complete")
+    let snap = db.insert_browse_files(snapshot_id, &entries)?;
+    // Gated on both the status row still existing *and* `indexed_snapshots` still mapping
+    // snapshot_id to the exact `snap` id this run just wrote every chunk against — see
+    // `set_browse_status_complete_if_live`'s doc comment. Either half failing means this
+    // run's own writes are no longer the live rows for this snapshot: same-repo Clear
+    // Index/mark_orphans/clear_cache (status row gone), or — since evict has no per-snapshot
+    // lock — a *different* repo's Clear Index landing after this run's last chunk, or during
+    // a zero-entry run that writes no chunks at all (mapping gone or recycled to a different
+    // run's id). Covers the same window `set_browse_status_if_present` used to leave open.
+    if db.set_browse_status_complete_if_live(repo_id, snapshot_id, snap)? == 0 {
+        // This run's rows are no longer live: undo this run's own writes via evict (which
+        // re-checks cross-repo sharing — another repo's 'complete' index of the same
+        // snapshot id keeps its rows) so the clear stands, and report failure. The Err
+        // rather than Ok is the point: without it the warmer's re-pick of this now-NULL-
+        // status snapshot would silently rewrite everything and mark it 'complete' again —
+        // the clear undone by the very sweep that ran after it (and one wasted `restic
+        // ls`). evict's own failure is deliberately swallowed: the abort message is the
+        // diagnosis that matters, and any rows it leaves behind are inert for cleanup (no
+        // status row points at them, so no sweep disagrees about them) and the snapshot is
+        // re-pickable, so the next run rewrites them.
+        let _ = db.evict(repo_id, snapshot_id);
+        return Err(format!(
+            "index aborted: snapshot {snapshot_id}'s cached index was cleared while being indexed"
+        ));
+    }
+    Ok(())
+}
+
+/// The shared tail of the three index-run entry points — `index_snapshot`,
+/// `index_snapshots_batch`'s per-snapshot loop, and the cache warmer's auto-index
+/// sweep: take `IndexHandle::gate` (so a manual run and an auto-indexed one can
+/// never overlap), run `run_full_index` on a blocking thread, emit the terminal
+/// task phase with the run's real error string, and write the gated failure-path
+/// 'pending'. One implementation so the three sites cannot drift — this sequence
+/// previously existed as three hand-maintained copies that had already diverged
+/// (the warmer wrote its 'pending' inside the blocking closure, the manual sites
+/// after it). Returns the run's `Result` so the warmer can map it to
+/// `SweepResult::Indexed`/`NothingLeft`; manual sites discard it.
+pub(crate) async fn run_index_and_report(
+    app: tauri::AppHandle,
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    task_ctx: OperationCtx<tauri::AppHandle>,
+    repo: super::cache::FullRepository,
+    repo_id: String,
+    snapshot_id: String,
+    restic_path: String,
+) -> Result<(), String> {
+    // Move the whole repo (not path/password/read_only field-by-field) into the blocking
+    // closure so backend credentials ride along — see repo::unlock_quietly's doc comment.
+    // `repo` is unused after this point, so no clone is needed (callers that index a batch
+    // already clone per snapshot before calling in).
+    let tmp_repo = repo;
+    let app2 = app.clone();
+    let repo_id2 = repo_id.clone();
+    let snap_id = snapshot_id.clone();
+
+    let _permit = gate.lock().await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let db_inner = app2.state::<AppDb>();
+        let repo_locks_inner = app2.state::<RepoLocks>();
+        run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &restic_path)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+
+    // The failure-'pending' write happens while the gate is still held (dropped only
+    // after this match): a second run for the same snapshot may already be queued on
+    // the gate behind us with its 'in_progress' entry written — writing 'pending' after
+    // the drop could race that run's start and mislabel it mid-flight.
+    match &result {
+        Ok(()) => task_ctx.finished(),
+        Err(e) => {
+            // The real error — restic's output, a DB failure, the chunk guard's
+            // "index aborted: snapshot … was removed while being indexed", or the
+            // terminal gate's "… was cleared while being indexed" — rides the bus in
+            // `error`. No frontend consumer renders index error text today (only
+            // backups/mirrors show theirs); it's carried for diagnosis and future
+            // surfacing — see docs/decisions.md.
+            task_ctx.failed(e.clone());
+            // Gated: never resurrect a status row evict/mark_orphans deleted mid-run —
+            // a plain write here would re-arm the auto-indexer against the user's
+            // Clear Index, or (post-drain) flip has_cleanup_work true solely to delete
+            // the row this code just wrote.
+            let _ = app
+                .state::<AppDb>()
+                .set_browse_status_if_present(&repo_id, &snapshot_id, "pending");
+        }
+    }
+    drop(_permit);
+
+    result
 }
 
 /// Marks `manual_active` for the lifetime of a manual indexing run (single,
@@ -546,6 +635,33 @@ fn repo_has_active_batch(
     }
 }
 
+/// Outcome of a manual `index_snapshot` request — replaces a plain `bool` (which conflated
+/// "already complete", "already running", and "no longer listed" into a single `false`, so a
+/// caller couldn't tell a dead click from a transient race without a follow-up status fetch,
+/// and that follow-up fetch can itself land on neither "complete" nor "in_progress" — e.g.
+/// 'pending' after a just-failed run, or no row at all after an unrelated Clear — which a
+/// caller keying off "not in_progress" alone misreads as "no longer listed"). `Started` and
+/// `AlreadyRunning` are both cases where a terminal `task` bus event is still coming (from
+/// this call's own spawn, or from whatever's already running); `AlreadyIndexed` and
+/// `NotListed` are both cases where none is — the caller must resolve UI state itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexStartOutcome {
+    /// A new run was spawned; a `task` bus event (and status transition to 'complete' or
+    /// 'pending') will follow.
+    Started,
+    /// The snapshot's `browse_cache_status` was already 'complete' — nothing to do.
+    AlreadyIndexed,
+    /// The snapshot's `browse_cache_status` was already 'in_progress' (e.g. the cache
+    /// warmer got there first) — no new run was spawned, but the in-flight one will still
+    /// emit a terminal `task` event.
+    AlreadyRunning,
+    /// This repo no longer lists the snapshot in `snapshots_cache` (forgotten by an
+    /// external restic, or dropped by a cache refresh, between the click and this call) —
+    /// nothing to index, and no status row was written, so no `task` event is coming.
+    NotListed,
+}
+
 /// Manually trigger full indexing for a snapshot. Fire-and-forget: returns
 /// immediately and runs the index in the background. Safe to call on remote
 /// repos since the user explicitly requested it. Pauses the auto-indexer
@@ -560,15 +676,14 @@ pub async fn index_snapshot(
     index_handle: State<'_, super::cache::IndexHandle>,
     repo_id: String,
     snapshot_id: String,
-) -> Result<bool, String> {
+) -> Result<IndexStartOutcome, String> {
     validate_snapshot_id(&snapshot_id)?;
 
     let status_map = db.get_browse_status(&repo_id)?;
-    if matches!(
-        status_map.get(&snapshot_id).map(|s| s.as_str()),
-        Some("complete") | Some("in_progress")
-    ) {
-        return Ok(false);
+    match status_map.get(&snapshot_id).map(|s| s.as_str()) {
+        Some("complete") => return Ok(IndexStartOutcome::AlreadyIndexed),
+        Some("in_progress") => return Ok(IndexStartOutcome::AlreadyRunning),
+        _ => {}
     }
 
     // Resolve everything fallible *before* flipping the status to "in_progress" — an early
@@ -582,7 +697,13 @@ pub async fn index_snapshot(
     let manual_active = std::sync::Arc::clone(&index_handle.manual_active);
     let gate = std::sync::Arc::clone(&index_handle.gate);
 
-    db.set_browse_status(&repo_id, &snapshot_id, "in_progress")?;
+    // Listed-gated entry write: 0 rows = this repo no longer lists the snapshot (an
+    // external restic forgot it between the click and here, or a cache refresh dropped
+    // it) — nothing to index, and writing anyway would strand a status row for an
+    // unlisted snapshot until the next orphan mark.
+    if db.set_browse_status_if_listed(&repo_id, &snapshot_id, "in_progress")? == 0 {
+        return Ok(IndexStartOutcome::NotListed);
+    }
 
     tauri::async_runtime::spawn(async move {
         let _guard = ManualIndexGuard::new(manual_active);
@@ -596,38 +717,19 @@ pub async fn index_snapshot(
             None,
         );
 
-        // Clone the whole repo (not path/password/read_only field-by-field) so
-        // backend credentials ride along — see repo::unlock_quietly's doc comment.
-        let tmp_repo = repo.clone();
-        let snap_id = snapshot_id.clone();
-        let repo_id2 = repo_id.clone();
-        let rp = restic_path.clone();
-        let app2 = app.clone();
-
-        let _permit = gate.lock().await;
-        let ok = tauri::async_runtime::spawn_blocking(move || {
-            let db_inner = app.state::<AppDb>();
-            let repo_locks_inner = app.state::<RepoLocks>();
-            run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
-        })
-        .await
-        .unwrap_or(false);
-        drop(_permit);
-
-        if ok {
-            task_ctx.finished();
-        } else {
-            task_ctx.failed("Indexing failed");
-        }
-
-        if !ok {
-            let _ = app2
-                .state::<AppDb>()
-                .set_browse_status(&repo_id, &snapshot_id, "pending");
-        }
+        let _ = run_index_and_report(
+            app,
+            gate,
+            task_ctx,
+            repo,
+            repo_id,
+            snapshot_id,
+            restic_path,
+        )
+        .await;
     });
 
-    Ok(true)
+    Ok(IndexStartOutcome::Started)
 }
 
 /// Sequentially index a batch of snapshots in a single repo ("Index All").
@@ -813,11 +915,12 @@ pub async fn index_snapshots_batch(
                 ) {
                     break 'work;
                 }
-                if db_outer
-                    .set_browse_status(&repo_id, &snapshot_id, "in_progress")
-                    .is_err()
-                {
-                    break 'work;
+                match db_outer.set_browse_status_if_listed(&repo_id, &snapshot_id, "in_progress") {
+                    // 0 rows = the snapshot left this repo's listing (external forget) while
+                    // the batch was queued or running — skip it like an already-complete
+                    // one; a plain write would strand a status row for an unlisted snapshot.
+                    Ok(0) | Err(_) => break 'work,
+                    Ok(_) => {}
                 }
 
                 // Slot is None here — the batch op above owns current_task, so a cancel
@@ -832,37 +935,21 @@ pub async fn index_snapshots_batch(
                     None,
                 );
 
-                // Clone the whole repo (not path/password/read_only field-by-field, and
-                // not moved out of the outer `repo` since this loop runs it once per
-                // snapshot) so backend credentials ride along — see
-                // repo::unlock_quietly's doc comment.
-                let tmp_repo = repo.clone();
-                let snap_id = snapshot_id.clone();
-                let repo_id2 = repo_id.clone();
-                let rp = restic_path.clone();
-                let app2 = app.clone();
-
-                let _permit = gate.lock().await;
-                let ok = tauri::async_runtime::spawn_blocking(move || {
-                    let db_inner = app2.state::<AppDb>();
-                    let repo_locks_inner = app2.state::<RepoLocks>();
-                    run_full_index(&db_inner, &repo_locks_inner, &repo_id2, &tmp_repo, &snap_id, &rp).is_ok()
-                })
-                .await
-                .unwrap_or(false);
-                drop(_permit);
-
-                if ok {
-                    task_ctx.finished();
-                } else {
-                    task_ctx.failed("Indexing failed");
-                }
-
-                if !ok {
-                    let _ = app
-                        .state::<AppDb>()
-                        .set_browse_status(&repo_id, &snapshot_id, "pending");
-                }
+                let _ = run_index_and_report(
+                    app.clone(),
+                    // Arc bump per iteration — the loop needs `gate` for the next one.
+                    gate.clone(),
+                    task_ctx,
+                    // Clone the whole repo (not path/password/read_only field-by-field,
+                    // and not moved out of the outer `repo` since this loop runs it once
+                    // per snapshot) so backend credentials ride along — see
+                    // repo::unlock_quietly's doc comment.
+                    repo.clone(),
+                    repo_id.clone(),
+                    snapshot_id.clone(),
+                    restic_path.clone(),
+                )
+                .await;
             }
 
             batch_progress.emit(TaskProgress {

@@ -8,7 +8,7 @@ use std::sync::{
 
 use tauri::{Emitter, Manager};
 
-use crate::commands::browse::run_full_index;
+use crate::commands::browse::run_index_and_report;
 use crate::commands::cache::{run_cleanup, AppDb, CleanupHandle, IndexHandle, MasterKey};
 use crate::commands::repo::run_restic_with_path;
 use crate::commands::repo_locks::RepoLocks;
@@ -242,17 +242,25 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
         _ => return SweepResult::NothingLeft,
     };
 
-    if db
-        .set_browse_status(&repo_id, &snapshot_id, "in_progress")
-        .is_err()
-    {
-        return SweepResult::NothingLeft;
+    // Listed-gated entry write. 0 rows can practically never fire here — the snapshot
+    // was just picked out of `snapshots_cache` — but a refresh landing between the pick
+    // and this write could drop it, and a plain write would strand a status row for an
+    // unlisted snapshot. On that rare 0, report Indexed anyway (not NothingLeft): the
+    // sweep loop must keep moving to the next unindexed snapshot, not defer every
+    // remaining one by a full 60s tick. A DB error stays NothingLeft — that's systemic,
+    // stop.
+    match db.set_browse_status_if_listed(&repo_id, &snapshot_id, "in_progress") {
+        Ok(0) => return SweepResult::Indexed,
+        Err(_) => return SweepResult::NothingLeft,
+        Ok(_) => {}
     }
 
     let key = match master_key.get() {
         Ok(k) => k,
         Err(_) => {
-            let _ = db.set_browse_status(&repo_id, &snapshot_id, "pending");
+            // Gated: if evict ran between the 'in_progress' write above and here, don't
+            // resurrect the row the user's Clear Index just deleted.
+            let _ = db.set_browse_status_if_present(&repo_id, &snapshot_id, "pending");
             return SweepResult::Locked;
         }
     };
@@ -260,13 +268,12 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
     let repo = match db.get_full_repo(&repo_id, &key) {
         Ok(r) => r,
         Err(_) => {
-            let _ = db.set_browse_status(&repo_id, &snapshot_id, "pending");
+            let _ = db.set_browse_status_if_present(&repo_id, &snapshot_id, "pending");
             return SweepResult::NothingLeft;
         }
     };
 
     let restic_path = crate::commands::get_restic_path(&db);
-    let app2 = app.clone();
 
     let task_ctx = OperationCtx::new(
         app.clone(),
@@ -278,29 +285,22 @@ async fn index_next(app: &tauri::AppHandle) -> SweepResult {
         None,
     );
 
-    // Held across the spawn_blocking call so this can never overlap with a
-    // manual index — see IndexHandle::gate.
-    let _permit = index_handle.gate.lock().await;
-    let ok = tauri::async_runtime::spawn_blocking(move || {
-        let db_inner = app2.state::<AppDb>();
-        let repo_locks_inner = app2.state::<RepoLocks>();
-        let result = run_full_index(&db_inner, &repo_locks_inner, &repo_id, &repo, &snapshot_id, &restic_path);
-        if result.is_err() {
-            let _ = db_inner.set_browse_status(&repo_id, &snapshot_id, "pending");
-        }
-        result.is_ok()
-    })
-    .await
-    .unwrap_or(false);
-    drop(_permit);
+    let result = run_index_and_report(
+        app.clone(),
+        std::sync::Arc::clone(&index_handle.gate),
+        task_ctx,
+        repo,
+        repo_id,
+        snapshot_id,
+        restic_path,
+    )
+    .await;
 
-    if ok {
-        task_ctx.finished();
-    } else {
-        task_ctx.failed("Indexing failed");
-    }
-
-    if ok { SweepResult::Indexed } else { SweepResult::NothingLeft }
+    // Err (not Ok) on an evicted-mid-run snapshot is what keeps the user's Clear Index
+    // standing: this snapshot's now-NULL status makes it re-pickable, and an Ok here
+    // would count as Indexed so the loop would immediately re-pick it, re-run the full
+    // `restic ls`, and rewrite + re-complete everything the user just cleared.
+    if result.is_ok() { SweepResult::Indexed } else { SweepResult::NothingLeft }
 }
 
 #[cfg(test)]

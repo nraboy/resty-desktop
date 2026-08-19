@@ -119,13 +119,25 @@ export default function SearchPage() {
     setIndexError("");
     setIndexState("indexing");
     try {
-      const started = await indexSnapshot(repoId, snapshotId);
-      if (!started) {
-        // Warmer completed between mount and click — re-check rather than wait
-        // for a terminal task event that will never arrive.
-        const statusMap = await getSnapshotIndexStatus(repoId);
-        if (statusMap[snapshotId] === "complete") setIndexState("ready");
-        // If in_progress, the task listener above will transition us.
+      const outcome = await indexSnapshot(repoId, snapshotId);
+      switch (outcome) {
+        case "started":
+        case "already_running":
+          // A run (ours, or one already in flight — e.g. the warmer got there
+          // first) is active; the task listener above will transition us on
+          // its terminal event.
+          break;
+        case "already_indexed":
+          // Warmer completed between mount and click.
+          setIndexState("ready");
+          break;
+        case "not_listed":
+          // The snapshot left snapshots_cache (forgotten elsewhere) and
+          // index_snapshot declined to start a run — no terminal task event
+          // is coming, so exit the "indexing" spinner ourselves.
+          setIndexError("Snapshot is no longer available. Refresh the page.");
+          setIndexState("not_indexed");
+          break;
       }
     } catch {
       setIndexError("Failed to start indexing.");

@@ -97,7 +97,7 @@ src-tauri/
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
       webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
-  cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing — see docs/concurrency.md
+  cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing + the ~5-minute orphan-cleanup tick — see docs/concurrency.md
   scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
 ```
 
@@ -257,6 +257,23 @@ proposing a change — several are pinned by a named test or reference a confirm
   file rows are written — without this, indexing would write into a row a concurrent drain is
   still deleting from, leaving it `browse_cache_status = complete` with rows silently missing and
   nothing left to retry it. Don't revert that upsert back to `INSERT OR IGNORE` — see docs/decisions.md.
+  The wider index-run × cleanup interleaving family is closed the same preventive way: chunk
+  writes verify their mapping on `(id, snapshot_id)` (SQLite recycles freed rowids — `id` alone
+  could match a different snapshot's recycled mapping), `evict` keeps rows still shared with
+  another repo **that has indexed the snapshot** (the guard keys on `browse_cache_status` rows —
+  the consumers — not `snapshots_cache` listings; a repo that forgot its copy keeps its
+  'complete' status, a repo that only lists the snapshot keeps nothing) and is one transaction,
+  an index run's terminal status writes are gated two ways: the success-path 'complete' write
+  goes through `set_browse_status_complete_if_live` (row present **and** `indexed_snapshots`
+  still maps to the exact `snap` id this run wrote against — needed because a *different* repo's
+  Clear Index can drop the shared mapping without touching this repo's own status row), the
+  failure-path 'pending' write through `set_browse_status_if_present` (row present is enough — a
+  plain UPDATE, never resurrects); either 0 rows affected means evicted mid-run, which aborts the
+  run, evicts its own re-written rows, and returns an Err so the warmer's sweep doesn't
+  immediately re-pick and re-complete the snapshot the user just cleared. Its 'in_progress' entry
+  write goes through `set_browse_status_if_listed` (never creates a status row for an unlisted
+  snapshot), and all three runner sites share one `run_index_and_report` — see
+  docs/decisions.md.
 - `AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it)
   was removed outright, not just left unused — it's what created the wipe race above. `set_snapshots`
   is diff-based (deletes only confirmed-dropped ids, upserts every id in the fresh listing) rather

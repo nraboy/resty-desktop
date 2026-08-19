@@ -175,6 +175,166 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   between indexing and cleanup — deliberately not the in-flight-index-vs-drain guard shape the
   first, rolled-back automation attempt used; that guard was compensating for the `evict_snapshots`
   wipe bug across the board, where this is a one-line fix for one specific interleaving.
+- **The index-run × cleanup interleaving family — a sibling of the race above that the
+  `intern_snapshot` upsert alone doesn't cover — is closed preventively at six points, not with
+  a sweep.** `run_full_index` interns once up front and then writes 500-row chunks against that
+  resolved id; if the snapshot leaves `snapshots_cache` mid-run (external `restic forget` + the
+  60s refresh's diff-delete — `RepoLocks` doesn't cover external processes — or `remove_repo`,
+  which takes no guard) and a drain retires the mapping between two chunks, every later chunk
+  would write `browse_cache_files` rows pointing at an `indexed_snapshots.id` that no longer
+  exists — rows invisible to every query *and* every sweep (both join through
+  `indexed_snapshots`), outliving everything but Clear All Cache. The six closers:
+  - The chunk guard keys on **`(id, snapshot_id)`**, not `id` alone. `id` is `INTEGER PRIMARY
+    KEY` without AUTOINCREMENT, so SQLite recycles a freed max rowid — `id` alone could validate
+    a *different* snapshot's freshly-interned mapping handed the recycled id (reachable mid-run
+    via the ungated `db.set` browse path; bulk index runs can't, `IndexHandle::gate` serializes
+    them app-wide), silently writing one snapshot's files under another's index. The check
+    shares the chunk's own transaction, and the single `AppDb` connection serializes
+    transactions, so either the drain ran first (mapping gone → the index aborts — and since
+    retire only fires at zero file rows, everything this run already wrote was already deleted)
+    or it runs after and sees the chunk's fresh rows. The abort can't fire spuriously: mappings
+    are only deleted by drain's retire, an explicit user clear, or a full-cache wipe. The abort
+    error surfaces verbatim on the task bus ("index aborted: snapshot … was removed while being
+    indexed") but stays phase `failed` — a `cancelled` classification would be a task-bus
+    contract change not worth one rare expected condition.
+  - **Terminal status writes are gated, but not both the same way.** The failure-path 'pending'
+    write goes through `set_browse_status_if_present` (a plain `UPDATE`, so it can never insert):
+    it may modify an existing status row but never *resurrect* one `evict`/`mark_orphans` deleted
+    mid-run — resurrecting 'pending' re-arms the auto-indexer against the user's explicit Clear
+    Index, or — post-drain — flips `has_cleanup_work` true solely to delete the row the index
+    code just wrote. 'pending' claims no data, so "this repo's status row still exists" is gate
+    enough.
+    The success-path 'complete' write needs a strictly stronger gate,
+    `set_browse_status_complete_if_live`: row-present **and** `indexed_snapshots` still maps
+    `snapshot_id` to the exact `snap` id this run's chunks were written against (keyed on
+    `(id, snapshot_id)` together, for the same recycled-rowid reason the chunk guard is). Row-
+    present alone is not enough for 'complete', because it only catches a **same-repo** Clear/
+    mark_orphans/clear_cache (which deletes *this* repo's status row) — not a **different**
+    repo's Clear Index, which deletes the shared `browse_cache_files` rows and the
+    `indexed_snapshots` mapping while leaving this repo's own 'in_progress' status row
+    untouched (`evict`'s cross-repo sharing guard keys on *other* repos' 'complete' rows, so it
+    doesn't see a same-snapshot run that's merely 'in_progress' in a third repo). Without the
+    live-mapping half, that in-flight run's terminal write would find its own status row present,
+    write 'complete', and return success — over zero file rows and a dead mapping, a permanently
+    empty browse/search tree nothing retries or sweeps. Both gates also cover the zero-chunk
+    path: an empty `restic ls` output runs no chunk liveness checks at all, so the chunk guard
+    alone can't protect either terminal write. And both writes report rows affected: **0 means
+    this run's writes are no longer live** (status row gone, or — for 'complete' only — mapping
+    gone/recycled), in which case `run_full_index` calls `evict` to undo its own re-written rows
+    (re-checking cross-repo sharing; evict's own failure is swallowed — any rows it leaves are
+    inert, no status row points at them) and returns an error. That Err — not Ok — is what keeps
+    the clear standing: a cleared snapshot's NULL status makes it immediately re-pickable, and an
+    Ok would count as `SweepResult::Indexed`, so the warmer's `while let SweepResult::Indexed`
+    loop would re-pick it, re-run the full `restic ls`, and rewrite + re-complete everything just
+    cleared (the counterfactual *terminates* after that one extra run — the re-pick's entry write
+    recreates the status row — so the harm is the silently-undone clear plus one wasted
+    `restic ls`, not a loop; the loop-contract point is only that Err must map to NothingLeft,
+    which it does). Together these close the whole evict-during-run window, not just the
+    between-chunks slice the chunk guard sees: evict before the run's intern (queued on the gate,
+    or during `restic ls`), in the zero-chunk case, after the last chunk but before the terminal
+    write, or — for 'complete' — a *different* repo's evict landing anywhere in that span — all
+    surface at the terminal gate as an honest failure.
+  - **Entry status writes are gated the other way** (`set_browse_status_if_listed`, an upsert
+    gated on this repo's `snapshots_cache` row): the 'in_progress' claim an index run writes
+    when it starts may only land while the repo still lists the snapshot. A plain write there —
+    for a snapshot forgotten by an external restic (or via `remove_snapshot_from_cache`) while
+    a batch sat queued — would create a status row for an unlisted snapshot, flipping
+    `has_cleanup_work` true solely so the next mark run could delete the row the run just
+    wrote. 0 rows affected means "no longer listed": the single-snapshot command returns
+    `IndexStartOutcome::NotListed` without starting anything, the batch skips that snapshot like
+    an already-complete one, and the warmer reports `SweepResult::Indexed` (not `NothingLeft`) so
+    its `while let SweepResult::Indexed` sweep loop keeps moving to the next unindexed snapshot
+    instead of deferring every remaining one a full 60s tick over what is, in practice, a single
+    dropped listing — see `cache_warmer.rs`'s `Ok(0) => return SweepResult::Indexed` and its
+    inline comment. Only a DB *error* from this write maps to `NothingLeft`, since that's
+    systemic rather than a one-off race.
+  - **`evict` respects cross-repo sharing, keyed on the *other* repos' 'complete' status rows —
+    the consumers of the shared rows — not on `snapshots_cache` listings, and not on
+    in-progress/pending rows either**: after copy/mirror the same snapshot id can live in two
+    repos, and `browse_cache_files`/`indexed_snapshots` have no repo_id column. Clear Index in
+    one repo deletes only that repo's status row unless some *other* repo has a readable index
+    of that snapshot. The keying choices each close a concrete failure:
+    - *Status rows, not listings* — a listings key was wrong in both directions at once: a
+      repo that forgot its copy (`remove_snapshot_from_cache` deletes only the listing) keeps
+      its 'complete' status, so a listings-keyed clear in the other repo would delete the
+      shared rows out from under that surviving index — a permanently empty browse tree, never
+      retried, never swept — while a repo that merely *lists* the snapshot without ever
+      indexing it would hold the shared rows alive forever for no reader.
+    - *'complete' rows only* — a repo whose run is 'in_progress' or left 'pending' has no
+      readable index, and deleting under it is safe by construction: an in-flight run's terminal
+      write is gated on a *live* mapping (`set_browse_status_complete_if_live`, not just the
+      chunk guard, which only covers between-chunks — see "Terminal status writes are gated,
+      but not both the same way" above), so a Clear landing anywhere during that run — including
+      after its last chunk, or during a zero-entry run that writes no chunks at all — makes the
+      terminal write fail closed instead of resurrecting 'complete' over zero rows; the run then
+      evicts its own writes and stays retryable ('pending' stays pickable). A 'pending' row pins
+      nothing but its own retry. Counting them would recreate the listings-keying under-clear
+      (rows pinned by a repo that never reads them — e.g. a remote repo with a failed 'pending'
+      index that auto-indexing never retries into).
+    Sequential clears in each repo fully reclaim. It is safe to key on status because
+    `mark_orphans`' status delete is global by snapshot_id — by the time a drain deletes rows,
+    every status row for that snapshot is already gone in the same marking transaction, so a
+    surviving status row always implies the snapshot is still listed and the rows are live
+    cache. (`mark_orphans` itself still keys on listings, correctly: liveness is its question.
+    Pinned by `evict_keys_the_sharing_guard_on_status_rows_not_listings`.)
+  - **Browse serves any cached rows for the snapshot; search and the index badge reflect
+    this repo's own index state — a deliberate asymmetry.** `AppDb::get`'s partial-cache
+    branch (`!entries.is_empty()`) serves cached rows even when this repo has *no*
+    `browse_cache_status` row for the snapshot. That is load-bearing twice over: it is the
+    interactive-browse cache (`list_files` → `set` writes directory rows with no status row —
+    requiring one would turn every revisit of a never-indexed snapshot into a fresh `restic
+    ls`), and it means that after a Clear Index in repo A of a snapshot whose shared rows
+    evict kept for repo B, A's BrowsePage still serves the (correct — indexed from that very
+    snapshot id) tree from cache while A's search and index badge say "not indexed". Gating
+    the branch on a status row cannot fix that without breaking the cache: "cleared shared
+    index" and "browsed but never indexed" are indistinguishable in the DB (rows, no status
+    row). The surfaces disagreeing about *A's index state* is the accepted cost; the data
+    itself never disagrees.
+  - **`evict`'s deletes run in one transaction** — not because a chunk could interleave between
+    them (it couldn't: the old code already held the single connection's mutex across all three
+    statements; that mutex, not the transaction, is what serializes in-process interleavings),
+    but for crash/error atomicity: a failure after the file-rows delete would otherwise leave
+    'complete' + zero rows + a live mapping — that same stuck empty-tree state, reachable by a
+    crash rather than a race.
+  - **The three index-run entry points share one runner** (`run_index_and_report` in
+    browse.rs): `index_snapshot`, `index_snapshots_batch`'s per-snapshot loop, and the cache
+    warmer's auto-index sweep all take `IndexHandle::gate`, run `run_full_index` on a blocking
+    thread, emit the terminal task phase with the run's real error string, and write the gated
+    failure 'pending' through a single implementation. These were three hand-maintained copies
+    that had already drifted (the warmer wrote its 'pending' inside the blocking closure, the
+    manual sites after it); one copy cannot. The 'pending' write happens while the gate is
+    still held, so a failing run can never flip a same-snapshot run queued behind it on the
+    gate (whose 'in_progress' entry is already written) to 'pending' mid-flight. Convention
+    for future status writes, enforced so far by docs + tests rather than types (a
+    phase-oriented begin/finish API would make the wrong gate unrepresentable — worth it if a
+    third kind of status write ever appears): **entry writes go through
+    `set_browse_status_if_listed`, terminal/failure writes through
+    `set_browse_status_if_present`** — routing a terminal write through the listing gate
+    resurrects a Clear-deleted row; routing an entry write through the status gate means
+    first-time indexing never starts.
+
+  Known residuals, deliberately not fixed here: a `restic ls` hiccup that yields zero parseable
+  lines still marks the snapshot 'complete' with zero rows — the `filter_map(…ok())`
+  parse-swallow predates this work and changing parse-failure semantics is its own change; and
+  external restic processes racing this app remain out of scope by `RepoLocks`' documented
+  design. Two more known behaviors, named so they stop looking like bugs: **index-run error
+  strings ride the `task` bus in `error` but no frontend consumer renders them** — the
+  Activity panel's index rows are signal-based (started/finished/failed, no error text; only
+  backups and mirrors surface `error`), so the propagation is for diagnosis and future
+  surfacing, not current UI; and **Clear Index on a still-listed snapshot does not stick while
+  auto-indexing is on** — evict deletes the status row, a NULL status is exactly what
+  `get_next_unindexed_snapshot` picks, so the next sweep legitimately re-indexes it. That is
+  the pre-existing semantics of "clear" (reset-to-unindexed, not "exclude"), not a regression;
+  making it stick would need a 'cleared' tombstone status excluded from picking — a product
+  change, not a fix. Deliberately **not** built: a dangling-row sweep (`browse_cache_files`
+  rows whose
+  `snap` has no mapping). Its probe has no cheap form — an anti-join over the biggest table in
+  the DB — so it would cost a full `browse_cache_files` scan per manual cleanup, per
+  work-bearing tick, and per 5-minute no-op tick if wired into `has_cleanup_work`, the exact
+  unbounded-mutex-hold class the batching work eliminated; and there is no legacy population to
+  clean, because the only dangler (the retire step) shipped after v0.5.0 and was never released.
+  With prevention in place the leak can't form; if a future bug ever dangles rows anyway,
+  revisit the sweep then, starting from this cost analysis.
 - **`AppDb::evict_snapshots` (wipe a repo's entire `snapshots_cache` with nothing to replace it) was
   removed outright, not just left unautomated.** It used to be called by `delete_snapshot`,
   `copy_snapshot`, `mirror_repo`, and as a re-fetch-failure fallback by `execute_backup`/

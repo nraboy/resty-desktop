@@ -940,9 +940,10 @@ impl AppDb {
     /// indexing history that delete can be enormous and slow — this used to run
     /// inline here, making "remove repository" hang for minutes. Deleting
     /// `snapshots_cache` above is what turns those rows into orphans (no remaining
-    /// `snapshots_cache` entry references their `snapshot_id`), which "Clean Orphaned
-    /// Data" (`clean_cache`) already exists to sweep up on the user's own schedule —
-    /// see its doc comment for the matching orphan definition.
+    /// `snapshots_cache` entry references their `snapshot_id`), which orphan cleanup
+    /// already exists to sweep up — both the automatic ~5-minute tick in `cache_warmer.rs`
+    /// and the "Clean Orphaned Data" button (`clean_cache`) — see `mark_orphans`'s doc
+    /// comment for the matching orphan definition.
     pub fn remove_repo(&self, repo_id: &str) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -1420,11 +1421,11 @@ impl AppDb {
     /// ever been indexed. Used by readers/deleters — `None` means the
     /// snapshot has no rows in `browse_cache_files`.
     fn snap_id_of(conn: &Connection, snapshot_id: &str) -> Result<Option<i64>, String> {
-        match conn.query_row(
-            "SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1",
-            params![snapshot_id],
-            |row| row.get(0),
-        ) {
+        match conn
+            .prepare_cached("SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1")
+            .map_err(|e| e.to_string())?
+            .query_row(params![snapshot_id], |row| row.get(0))
+        {
             Ok(id) => Ok(Some(id)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
@@ -1484,7 +1485,12 @@ impl AppDb {
             // Fully indexed: always return Some (empty vec = empty directory, not a cache miss)
             Ok(Some(entries))
         } else if !entries.is_empty() {
-            // Partially indexed: return whatever was cached for this directory
+            // Partially indexed: return whatever was cached for this directory. This
+            // also serves the interactive-browse cache (rows written by `set` with no
+            // status row at all) and, after a Clear Index of a snapshot whose shared
+            // rows evict kept for another repo, that other repo's rows — deliberate:
+            // see docs/decisions.md ("browse serves any cached rows for the snapshot;
+            // search and the index badge reflect this repo's own index state").
             Ok(Some(entries))
         } else {
             Ok(None)
@@ -1531,24 +1537,82 @@ impl AppDb {
         Ok(())
     }
 
+    /// Clears one snapshot's index for the separate "clear index" action: always this repo's
+    /// `browse_cache_status` row, plus the shared `browse_cache_files` rows and
+    /// `indexed_snapshots` mapping **only when no other repo has a readable index of that
+    /// snapshot** — i.e. no other repo's 'complete' status row. The guard deliberately keys
+    /// on *complete* status rows, not `snapshots_cache` listings, and each difference is the
+    /// point:
+    /// - Status rows, not listings: status rows are the *consumers* of the shared rows (a
+    ///   repo whose index is 'complete' browses and searches them directly), while a repo
+    ///   that merely lists the snapshot does not. Keying on listings stranded and over-kept
+    ///   at once: after B forgets its copy (`remove_snapshot_from_cache` deletes only the
+    ///   listing — B's 'complete' status survives), a Clear in A would delete the shared
+    ///   rows under B's surviving status — B then browses a permanently empty tree nothing
+    ///   retries ('complete' is excluded from `get_next_unindexed_snapshot`) and no sweep
+    ///   removes (the snapshot is still live in A); conversely a B that only *lists* the
+    ///   snapshot (never indexed it) would keep the rows alive forever for no reader.
+    /// - 'complete' rows only: a repo whose run is merely 'in_progress' or left 'pending'
+    ///   has no readable index, and deleting under it is safe by construction — an
+    ///   in-flight run's terminal write is gated on a *live* mapping
+    ///   (`set_browse_status_complete_if_live`), so a Clear that lands anywhere during that
+    ///   run — including after its last chunk, or during a zero-entry run that writes no
+    ///   chunks at all — makes the terminal write fail closed instead of resurrecting
+    ///   'complete' over zero rows; the run then evicts its own writes and retries
+    ///   ('pending' stays pickable). A 'pending' row pins nothing but its own retry.
+    ///   Counting those statuses would recreate the listings-keying under-clear: shared
+    ///   rows kept alive forever by a repo that will never read them. Sequential clears
+    ///   in each repo fully reclaim. This is safe because `mark_orphans`' status delete
+    ///   is global by snapshot_id — by the time drain deletes rows, every status row for
+    ///   that snapshot is already gone in the same marking transaction, so a surviving
+    ///   status row always implies the snapshot is still listed and the rows are live
+    ///   cache. (`mark_orphans` itself still keys on listings, correctly: liveness is
+    ///   its question.)
+    ///
+    /// See `evict_keys_the_sharing_guard_on_status_rows_not_listings`.
+    ///
+    /// The sharing probe runs once in Rust and gates both deletes (equivalent to a NOT EXISTS
+    /// per statement, without evaluating it — with an unsargable `repo_id <> ?` — twice).
+    /// File rows delete before the mapping, per `drain_orphans`' ordering rule. All deletes
+    /// in **one transaction** — not for in-process interleaving (the single connection's
+    /// mutex already made the old three-statement sequence non-interleavable), but for
+    /// crash/error atomicity: a failure after the file-rows delete would otherwise leave
+    /// 'complete' + zero rows + a live mapping — the stuck empty-tree state, reachable by a
+    /// crash rather than a race.
     pub fn evict(&self, repo_id: &str, snapshot_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM browse_cache_files WHERE snap =
-             (SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1)",
-            params![snapshot_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM indexed_snapshots WHERE snapshot_id = ?1",
-            params![snapshot_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "DELETE FROM browse_cache_status WHERE repo_id = ?1 AND snapshot_id = ?2",
             params![repo_id, snapshot_id],
         )
         .map_err(|e| e.to_string())?;
+        let shared: bool = tx
+            .prepare_cached(
+                "SELECT EXISTS(
+                     SELECT 1 FROM browse_cache_status
+                     WHERE snapshot_id = ?2 AND repo_id <> ?1 AND status = 'complete'
+                 )",
+            )
+            .map_err(|e| e.to_string())?
+            .query_row(params![repo_id, snapshot_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if !shared {
+            // Neither DELETE references repo_id — `browse_cache_files`/
+            // `indexed_snapshots` have no repo column — so both bind snapshot_id alone.
+            tx.execute(
+                "DELETE FROM browse_cache_files
+                 WHERE snap = (SELECT id FROM indexed_snapshots WHERE snapshot_id = ?1)",
+                params![snapshot_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM indexed_snapshots WHERE snapshot_id = ?1",
+                params![snapshot_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1558,8 +1622,9 @@ impl AppDb {
     /// wiping the rest of the repo's cache (the old `evict_snapshots`-on-delete pattern,
     /// removed — see docs/decisions.md). Deliberately touches nothing else:
     /// `indexed_snapshots`/`browse_cache_files`/`browse_cache_status` for this snapshot are
-    /// left as-is, discovered and swept by the next "Clean Orphaned Data" click's full-table
-    /// `mark_orphans` scan, same as every other orphan source (retention, repo removal).
+    /// left as-is, discovered and swept by the next orphan-cleanup run — the automatic
+    /// ~5-minute tick in `cache_warmer.rs` or the "Clean Orphaned Data" button — same as
+    /// every other orphan source (retention, repo removal).
     pub fn remove_snapshot_from_cache(&self, repo_id: &str, snapshot_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -1592,6 +1657,11 @@ impl AppDb {
         Ok(map)
     }
 
+    /// Plain upsert of a status row. Every production write now goes through a gated
+    /// variant — `set_browse_status_if_listed` for an index run's 'in_progress' entry
+    /// write, `set_browse_status_if_present` for its terminal/failure writes — so this
+    /// survives as the test fixture's seeding helper.
+    #[cfg(test)]
     pub fn set_browse_status(
         &self,
         repo_id: &str,
@@ -1606,6 +1676,102 @@ impl AppDb {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// `set_browse_status`, but a strict no-op when the (repo_id, snapshot_id) status row does
+    /// not exist. The terminal writes of an index run — the trailing 'complete', and the
+    /// failure-path 'pending' — may modify an existing row but must never *resurrect* one that
+    /// `evict` ("Clear Index") or `mark_orphans` deleted mid-run: resurrecting 'complete'
+    /// strands an empty-tree snapshot nothing retries (`get_next_unindexed_snapshot` picks only
+    /// NULL/'pending', and `mark_orphans` only sweeps statuses for snapshots absent from
+    /// `snapshots_cache`), and resurrecting 'pending' re-arms the auto-indexer against the
+    /// user's explicit Clear — or, post-drain, flips `has_cleanup_work` true solely to delete
+    /// the row this code just wrote. In every normal flow the row exists ('in_progress' was
+    /// written before the run), so the gate passes and this behaves exactly like
+    /// `set_browse_status`. Implemented as a plain `UPDATE` — it can never insert — and returns
+    /// the rows affected: **0 means the status row vanished mid-run** (`evict`/"Clear Index",
+    /// `mark_orphans`, `clear_cache`), which `run_full_index` treats as an abort (see its
+    /// doc comment). Single autocommit statement — atomic, no window.
+    pub fn set_browse_status_if_present(
+        &self,
+        repo_id: &str,
+        snapshot_id: &str,
+        status: &str,
+    ) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE browse_cache_status SET status = ?3, cached_at = ?4
+             WHERE repo_id = ?1 AND snapshot_id = ?2",
+            params![repo_id, snapshot_id, status, timestamp()],
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// `set_browse_status_if_present`, but for the success-path 'complete' write specifically —
+    /// gated on a *live mapping*, not just a present status row. `set_browse_status_if_present`
+    /// alone isn't enough here: this repo's own status row can still be present while the shared
+    /// rows this run just wrote are gone, if a **different** repo's Clear Index (`evict`) ran
+    /// between this run's last `insert_browse_files` chunk and this call. `evict` has no
+    /// per-snapshot lock to exclude that window (`clear_snapshot_index` is sync, takes no
+    /// `IndexHandle::gate`), and the zero-entry case runs no chunk liveness check at all — so
+    /// without this, the run's own status row would flip to 'complete' with zero
+    /// `browse_cache_files` rows and no `indexed_snapshots` mapping, a state nothing retries
+    /// (`get_next_unindexed_snapshot` excludes 'complete') and nothing sweeps (the snapshot is
+    /// still listed, so `mark_orphans` leaves it alone) — a permanently empty browse/search tree.
+    /// `snap` is the id `insert_browse_files` interned and wrote every chunk's rows against;
+    /// requiring `indexed_snapshots` to still map `snapshot_id` to that same `snap` (not just to
+    /// *a* row) matters because id is INTEGER PRIMARY KEY without AUTOINCREMENT — SQLite recycles
+    /// a freed rowid, so a bare "does a mapping exist" check could pass against a completely
+    /// different, freshly re-interned run. 0 rows affected means either this repo's status row
+    /// vanished (same-repo Clear, `mark_orphans`, `clear_cache`) or the mapping this run wrote
+    /// against is dead (another repo's Clear, or a `drain_orphans` retire) — `run_full_index`
+    /// treats both the same way: evict this run's own writes and report failure. Single
+    /// autocommit statement — atomic, no window.
+    pub fn set_browse_status_complete_if_live(
+        &self,
+        repo_id: &str,
+        snapshot_id: &str,
+        snap: i64,
+    ) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE browse_cache_status SET status = 'complete', cached_at = ?4
+             WHERE repo_id = ?1 AND snapshot_id = ?2
+               AND EXISTS(
+                   SELECT 1 FROM indexed_snapshots WHERE id = ?3 AND snapshot_id = ?2
+               )",
+            params![repo_id, snapshot_id, snap, timestamp()],
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// `set_browse_status`, but a no-op when this repo no longer lists the snapshot: an
+    /// upsert gated on a `snapshots_cache` row for (repo_id, snapshot_id). The 'in_progress'
+    /// *entry* writes of an index run go through here so a run can never (re)create a status
+    /// row for a snapshot that was forgotten — by an external restic, or via
+    /// `remove_snapshot_from_cache` — between the run being queued and starting: a plain
+    /// `set_browse_status` there would leave a status row for an unlisted snapshot, flipping
+    /// `has_cleanup_work` true until the next mark run deleted the row the run just wrote.
+    /// Returns the rows affected: **0 means the snapshot is no longer listed — skip the run
+    /// entirely** (there is nothing to index against and no status row to report through).
+    /// First-time indexing is unaffected: a listed snapshot with no status row gets one
+    /// (this is an upsert, unlike `set_browse_status_if_present`'s UPDATE).
+    pub fn set_browse_status_if_listed(
+        &self,
+        repo_id: &str,
+        snapshot_id: &str,
+        status: &str,
+    ) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO browse_cache_status (repo_id, snapshot_id, status, cached_at)
+             SELECT ?1, ?2, ?3, ?4
+             WHERE EXISTS(
+                 SELECT 1 FROM snapshots_cache WHERE repo_id = ?1 AND snapshot_id = ?2
+             )",
+            params![repo_id, snapshot_id, status, timestamp()],
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Full-text substring search across all indexed files in a snapshot.
@@ -1702,12 +1868,15 @@ impl AppDb {
     }
 
     /// Bulk-insert file entries for a snapshot (used by the cache warmer and manual indexing).
-    /// Inserts in chunks of 500 to avoid holding the mutex for excessive time.
+    /// Inserts in chunks of 500 to avoid holding the mutex for excessive time. Returns the
+    /// interned `snap` id every chunk was written against, so the caller's terminal write can
+    /// gate on that exact mapping still being live — see
+    /// `set_browse_status_complete_if_live`'s doc comment.
     pub fn insert_browse_files(
         &self,
         snapshot_id: &str,
         entries: &[FileEntry],
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         // Resolve the interned snapshot id once up front — snap is constant across
         // every chunk, so re-interning inside the loop (as before) was a redundant
         // INSERT OR IGNORE + SELECT per chunk on the bulk-index hot path.
@@ -1719,32 +1888,68 @@ impl AppDb {
             snap
         };
         for chunk in entries.chunks(500) {
-            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            {
-                let mut stmt = tx
-                    .prepare_cached(
-                        "INSERT OR REPLACE INTO browse_cache_files
-                         (snap, path, parent_path, entry_type, size, mtime, mode)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    )
-                    .map_err(|e| e.to_string())?;
-                for entry in chunk {
-                    let parent = parent_path_of(&entry.path);
-                    stmt.execute(params![
-                        snap,
-                        entry.path,
-                        parent,
-                        entry.entry_type,
-                        entry.size,
-                        entry.mtime,
-                        entry.mode,
-                    ])
-                    .map_err(|e| e.to_string())?;
-                }
-            }
-            tx.commit().map_err(|e| e.to_string())?;
+            self.insert_browse_files_chunk(snap, snapshot_id, chunk)?;
         }
+        Ok(snap)
+    }
+
+    /// Writes one chunk of file rows against an already-interned `snap` id. Split out of
+    /// `insert_browse_files` so the mapping-retired-mid-run case below is unit-testable
+    /// without real concurrency.
+    fn insert_browse_files_chunk(
+        &self,
+        snap: i64,
+        snapshot_id: &str,
+        chunk: &[FileEntry],
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // The interned mapping this chunk writes against must still exist. A concurrent
+        // drain_orphans can retire it mid-run — retire fires only at zero file rows, i.e.
+        // after deleting every row this run already wrote — or evict can remove it while the
+        // snapshot is still live. Writing against a dead id would strand rows invisible to
+        // every query *and* every sweep, since all reads join through indexed_snapshots.
+        // Keyed on (id, snapshot_id), not id alone: id is INTEGER PRIMARY KEY without
+        // AUTOINCREMENT, so SQLite recycles a freed max rowid — id alone could validate a
+        // *different* snapshot's freshly-interned mapping handed the recycled id (reachable
+        // mid-run via the ungated `set` browse path; bulk index runs can't, IndexHandle::gate
+        // serializes them app-wide).
+        //
+        // The check shares this chunk's transaction, and the single AppDb connection
+        // serializes transactions, so it is atomic against both: either they ran first
+        // (mapping gone → abort now, with this run's earlier rows already deleted) or they
+        // run after and see this chunk's rows. One PK lookup per 500-row chunk — strictly
+        // cheaper than the per-chunk INSERT OR IGNORE + SELECT intern this loop once
+        // carried before that was optimized away. See docs/decisions.md.
+        if Self::snap_id_of(&tx, snapshot_id)? != Some(snap) {
+            return Err(format!(
+                "index aborted: snapshot {snapshot_id} was removed while being indexed \
+                 (its cached index rows were cleaned up)"
+            ));
+        }
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO browse_cache_files
+                     (snap, path, parent_path, entry_type, size, mtime, mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|e| e.to_string())?;
+            for entry in chunk {
+                let parent = parent_path_of(&entry.path);
+                stmt.execute(params![
+                    snap,
+                    entry.path,
+                    parent,
+                    entry.entry_type,
+                    entry.size,
+                    entry.mtime,
+                    entry.mode,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -4417,6 +4622,396 @@ mod tests {
             .unwrap();
         assert_eq!(id_before, id_after);
         assert!(orphaned_at_of(&db, "aaaa111100000000").is_none());
+    }
+
+    /// Pins the retire-mid-run guard in `insert_browse_files_chunk` — including its
+    /// (id, snapshot_id) keying: once a drain has retired the mapping an in-flight index run
+    /// resolved `snap` to, a later chunk from that same run must abort rather than write rows
+    /// no query and no sweep can ever see again, **even when a different snapshot has since
+    /// been interned onto the recycled rowid**. Reachable only at chunk granularity — a fresh
+    /// `insert_browse_files` call would re-intern (the upsert above) and legitimately succeed —
+    /// which is why the test drives the chunk helper directly instead.
+    #[test]
+    fn insert_browse_files_chunk_aborts_when_the_mapping_was_retired_mid_run() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+        let snap = {
+            let conn = db.conn.lock().unwrap();
+            AppDb::snap_id_of(&conn, "aaaa111100000000")
+                .unwrap()
+                .expect("mapping interned above")
+        };
+
+        // Orphan the snapshot, then sweep to completion — the drain retires the mapping,
+        // exactly as it would mid-run if the snapshot left snapshots_cache while this index
+        // was still in flight (external forget + refresh, or repo removal).
+        db.remove_repo("repo1").unwrap();
+        db.clean_cache().unwrap();
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+
+        // Intern a different snapshot afterwards. The retired mapping held rowid 1 on this
+        // fresh test DB, the table is now empty, and INTEGER PRIMARY KEY without
+        // AUTOINCREMENT recycles the freed max rowid — so "bbbb…" lands on the *same* id the
+        // still-"in-flight" run cached. A guard keyed on id alone would pass here.
+        db.insert_browse_files("bbbb222200000000", &file_entries(1)).unwrap();
+        let recycled = {
+            let conn = db.conn.lock().unwrap();
+            AppDb::snap_id_of(&conn, "bbbb222200000000").unwrap()
+        };
+        assert_eq!(
+            recycled,
+            Some(snap),
+            "the fresh mapping should recycle the retired rowid"
+        );
+        assert_eq!(count_rows(&db, "browse_cache_files"), 1);
+
+        // A late chunk from the still-"in-flight" run: must error, must write nothing —
+        // in particular nothing under the recycled id's new owner.
+        let err = db
+            .insert_browse_files_chunk(snap, "aaaa111100000000", &file_entries(2))
+            .unwrap_err();
+        assert!(err.contains("index aborted"), "unexpected error: {err}");
+        assert_eq!(
+            count_rows(&db, "browse_cache_files"),
+            1,
+            "no rows may land against another snapshot's recycled mapping id"
+        );
+    }
+
+    /// Pins the single-repo shape: one evict call leaves none of the three row kinds behind,
+    /// crash-atomically (one transaction — see evict's doc for why the transaction is about
+    /// crash/error atomicity, not interleaving). The cross-repo sharing branch is pinned by
+    /// `evict_keeps_shared_rows_while_another_repo_still_references_the_snapshot` below.
+    #[test]
+    fn evict_removes_files_mapping_and_status_in_one_call() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 1);
+
+        db.evict("repo1", "aaaa111100000000").unwrap();
+
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+        // And nothing dangles for a later sweep to disagree about.
+        assert!(!db.has_cleanup_work().unwrap());
+    }
+
+    /// Pins evict's cross-repo sharing guard: after restic copy/mirror the same snapshot id
+    /// can live in two repos, and `browse_cache_files`/`indexed_snapshots` are shared (no
+    /// repo_id column). The guard keys on the *other repo's status rows* — the consumers of
+    /// the shared rows — so repo2's 'complete' index keeps them alive; repo1's clear removes
+    /// only its own status. Once repo2 clears too (no status rows remain), the shared rows
+    /// are reclaimed. See `evict_keys_the_sharing_guard_on_status_rows_not_listings` for why
+    /// the key is status rows and not `snapshots_cache` listings.
+    #[test]
+    fn evict_keeps_shared_rows_while_another_repo_still_references_the_snapshot() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        seed_snapshot(&db, "repo2", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.set_browse_status("repo2", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(3)).unwrap();
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+
+        // Clear repo1's index: only repo1's status row may go; repo2 is untouched.
+        db.evict("repo1", "aaaa111100000000").unwrap();
+        assert!(!db
+            .get_browse_status("repo1")
+            .unwrap()
+            .contains_key("aaaa111100000000"));
+        assert_eq!(
+            db.get_browse_status("repo2").unwrap().get("aaaa111100000000"),
+            Some(&"complete".to_string())
+        );
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+        assert!(!db.has_cleanup_work().unwrap());
+
+        // repo2's clear is the last reference: everything goes, listing or not.
+        db.evict("repo2", "aaaa111100000000").unwrap();
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+        assert!(!db.has_cleanup_work().unwrap());
+    }
+
+    /// Pins *which* rows evict's sharing guard keys on — the two cases a listings-keyed
+    /// guard got exactly backwards, plus the non-complete statuses that must not count:
+    /// - A repo whose 'complete' status survives its own snapshot forget
+    ///   (`remove_snapshot_from_cache` deletes only the listing) still depends on the
+    ///   shared rows — a clear in the other repo must keep them, or the forget-repo
+    ///   browses a permanently empty tree nothing retries or sweeps.
+    /// - A repo that merely *lists* the snapshot (never indexed it) depends on nothing —
+    ///   its listing must not keep the rows alive forever for no reader.
+    #[test]
+    fn evict_keys_the_sharing_guard_on_status_rows_not_listings() {
+        // Status without a listing: repo2 forgot its copy, but its 'complete' index remains.
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        seed_snapshot(&db, "repo2", "aaaa111100000000");
+        db.remove_snapshot_from_cache("repo2", "aaaa111100000000")
+            .unwrap();
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.set_browse_status("repo2", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(2)).unwrap();
+
+        db.evict("repo1", "aaaa111100000000").unwrap();
+
+        assert_eq!(
+            db.get_browse_status("repo2").unwrap().get("aaaa111100000000"),
+            Some(&"complete".to_string()),
+            "repo2's surviving index must keep the shared rows it reads"
+        );
+        assert_eq!(count_rows(&db, "browse_cache_files"), 2);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 1);
+
+        // Listing without a status: repo2 lists the snapshot but never indexed it —
+        // repo1's clear reclaims the rows outright.
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        seed_snapshot(&db, "repo2", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(2)).unwrap();
+
+        db.evict("repo1", "aaaa111100000000").unwrap();
+
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+        assert!(!db.has_cleanup_work().unwrap());
+
+        // A non-complete status in the other repo pins nothing: 'pending' has no
+        // readable index (its run failed or never ran), so the shared rows are
+        // reclaimed rather than pinned forever — repo2's retryable status survives,
+        // and its next run simply re-indexes from scratch.
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_repo(&db, "repo2");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        seed_snapshot(&db, "repo2", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.set_browse_status("repo2", "aaaa111100000000", "pending").unwrap();
+        db.insert_browse_files("aaaa111100000000", &file_entries(2)).unwrap();
+
+        db.evict("repo1", "aaaa111100000000").unwrap();
+
+        assert_eq!(
+            count_rows(&db, "browse_cache_files"),
+            0,
+            "a 'pending' other repo is not a reader"
+        );
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+        assert_eq!(
+            db.get_browse_status("repo2").unwrap().get("aaaa111100000000"),
+            Some(&"pending".to_string())
+        );
+    }
+
+    /// Pins `set_browse_status_if_present`'s gate: an index run's failure-path 'pending' write
+    /// may modify an existing status row but must never resurrect one that evict ("Clear
+    /// Index") or mark_orphans deleted mid-run — and the 0-rows-affected return is what tells
+    /// `run_full_index` the status vanished mid-run (its cue to evict its own writes and
+    /// fail the run). See `set_browse_status_complete_if_live_requires_the_original_mapping`
+    /// for the stronger gate the success-path 'complete' write needs instead.
+    #[test]
+    fn set_browse_status_if_present_never_resurrects_a_deleted_row() {
+        let db = test_db();
+
+        // No row → strict no-op, even for the success-path 'complete', and reports 0.
+        assert_eq!(
+            db.set_browse_status_if_present("repo1", "aaaa111100000000", "complete")
+                .unwrap(),
+            0
+        );
+        assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+
+        // Row exists → updated in place, same as set_browse_status, and reports 1.
+        db.set_browse_status("repo1", "aaaa111100000000", "in_progress")
+            .unwrap();
+        assert_eq!(
+            db.set_browse_status_if_present("repo1", "aaaa111100000000", "complete")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.get_browse_status("repo1").unwrap().get("aaaa111100000000"),
+            Some(&"complete".to_string())
+        );
+    }
+
+    /// Pins `set_browse_status_complete_if_live`'s two-part gate: row-present alone (what
+    /// `set_browse_status_if_present` checks) is not enough for the success-path 'complete'
+    /// write — it must also confirm `indexed_snapshots` still maps snapshot_id to the *exact*
+    /// `snap` id this run's chunks were written against, keyed on `(id, snapshot_id)` together
+    /// (not `id` alone) for the same recycled-rowid reason the chunk guard uses.
+    #[test]
+    fn set_browse_status_complete_if_live_requires_the_original_mapping() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "in_progress")
+            .unwrap();
+        let snap = db
+            .insert_browse_files("aaaa111100000000", &[sample_file_entry()])
+            .unwrap();
+
+        // Live mapping, matching id, status row present → succeeds.
+        assert_eq!(
+            db.set_browse_status_complete_if_live("repo1", "aaaa111100000000", snap)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.get_browse_status("repo1").unwrap().get("aaaa111100000000"),
+            Some(&"complete".to_string())
+        );
+
+        // Reset to 'in_progress' and index a second, distinct snapshot to get a
+        // guaranteed-different interned id, then pass *that* id for the first
+        // snapshot: the mapping exists, but not under this id → gate fails closed.
+        db.set_browse_status("repo1", "aaaa111100000000", "in_progress")
+            .unwrap();
+        seed_snapshot(&db, "repo1", "bbbb222200000000");
+        let other_snap = db
+            .insert_browse_files("bbbb222200000000", &[sample_file_entry()])
+            .unwrap();
+        assert_ne!(snap, other_snap);
+        assert_eq!(
+            db.set_browse_status_complete_if_live("repo1", "aaaa111100000000", other_snap)
+                .unwrap(),
+            0,
+            "a mismatched snap id must not be accepted as live"
+        );
+        assert_eq!(
+            db.get_browse_status("repo1").unwrap().get("aaaa111100000000"),
+            Some(&"in_progress".to_string()),
+            "a failed gate must not have modified the status row"
+        );
+
+        // The status row itself is gone (e.g. evicted mid-run) → gate fails closed too,
+        // even with the correct, still-live snap id.
+        db.evict("repo1", "aaaa111100000000").unwrap();
+        assert_eq!(
+            db.set_browse_status_complete_if_live("repo1", "aaaa111100000000", snap)
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Pins the finding this gate exists for: a *different* repo's Clear Index can delete the
+    /// shared `browse_cache_files`/`indexed_snapshots` rows while leaving an in-flight run's
+    /// own `browse_cache_status` row (still 'in_progress') completely untouched — so a
+    /// row-present-only gate (`set_browse_status_if_present`) would wrongly report success.
+    /// Repo A already has a 'complete' index of snapshot S; repo B is mid-indexing the same S
+    /// (both share the one underlying `browse_cache_files`/`indexed_snapshots` mapping, since
+    /// neither table has a repo_id column). The user clears A's index — evict's cross-repo
+    /// sharing guard only counts *other* repos' 'complete' status rows, and B's is
+    /// 'in_progress', so the shared rows are deleted out from under B's still-running index.
+    /// Without `set_browse_status_complete_if_live`, B's terminal write would find its own
+    /// status row present, write 'complete', and return success over zero file rows and a
+    /// dead mapping — a permanently empty browse/search tree nothing retries or sweeps.
+    #[test]
+    fn evict_in_another_repo_aborts_an_in_flight_runs_terminal_write() {
+        let db = test_db();
+        seed_repo(&db, "repo_a");
+        seed_repo(&db, "repo_b");
+        seed_snapshot(&db, "repo_a", "aaaa111100000000");
+        seed_snapshot(&db, "repo_b", "aaaa111100000000");
+        db.set_browse_status("repo_a", "aaaa111100000000", "complete")
+            .unwrap();
+        db.set_browse_status("repo_b", "aaaa111100000000", "in_progress")
+            .unwrap();
+        // Represents both repos' index runs writing the one shared mapping — repo B's
+        // in-flight run captures `snap` here, exactly as `run_full_index` does.
+        let snap = db
+            .insert_browse_files("aaaa111100000000", &file_entries(3))
+            .unwrap();
+        assert_eq!(count_rows(&db, "browse_cache_files"), 3);
+
+        // The user clears repo A's index while repo B is still mid-run.
+        db.evict("repo_a", "aaaa111100000000").unwrap();
+
+        // Confirms the premise: B's own status row survived untouched (so a row-present-only
+        // gate would have let this through), but the shared rows did not.
+        assert_eq!(
+            db.get_browse_status("repo_b").unwrap().get("aaaa111100000000"),
+            Some(&"in_progress".to_string()),
+            "evict in another repo must not touch this repo's own status row"
+        );
+        assert_eq!(count_rows(&db, "browse_cache_files"), 0);
+        assert_eq!(count_rows(&db, "indexed_snapshots"), 0);
+
+        // Repo B's terminal write must fail closed rather than resurrect 'complete' over
+        // zero rows and a dead mapping.
+        assert_eq!(
+            db.set_browse_status_complete_if_live("repo_b", "aaaa111100000000", snap)
+                .unwrap(),
+            0,
+            "repo B's terminal write must not succeed once its rows were evicted elsewhere"
+        );
+    }
+
+    /// Pins `set_browse_status_if_listed`: the 'in_progress' entry write of an index run
+    /// upserts only while this repo still lists the snapshot, and never creates a status
+    /// row for an unlisted one.
+    #[test]
+    fn set_browse_status_if_listed_gates_on_the_listing_and_upserts() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+
+        // Listed → upsert creates the row (this is an upsert, not an UPDATE).
+        assert_eq!(
+            db.set_browse_status_if_listed("repo1", "aaaa111100000000", "in_progress")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.get_browse_status("repo1").unwrap().get("aaaa111100000000"),
+            Some(&"in_progress".to_string())
+        );
+
+        // Unlisted repo (never listed, or forgotten between queue and start) → no-op, 0.
+        assert_eq!(
+            db.set_browse_status_if_listed("repo1", "bbbb222200000000", "in_progress")
+                .unwrap(),
+            0
+        );
+        assert!(!db
+            .get_browse_status("repo1")
+            .unwrap()
+            .contains_key("bbbb222200000000"));
+
+        // Listing gone after the row existed (forget racing a queued run) → no-op, 0 —
+        // a plain set_browse_status here would have flipped has_cleanup_work true solely
+        // to later delete the row it just wrote.
+        db.remove_snapshot_from_cache("repo1", "aaaa111100000000")
+            .unwrap();
+        assert_eq!(
+            db.set_browse_status_if_listed("repo1", "aaaa111100000000", "pending")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.get_browse_status("repo1").unwrap().get("aaaa111100000000"),
+            Some(&"in_progress".to_string()),
+            "must neither update nor resurrect once the listing is gone"
+        );
     }
 
     // ── has_cleanup_work ─────────────────────────────────────────────────────
