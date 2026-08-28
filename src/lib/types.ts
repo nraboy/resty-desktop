@@ -44,6 +44,10 @@ export interface Snapshot {
   username?: string;
   paths: string[];
   tags?: string[];
+  /** Logical size in bytes, from the backup summary restic ≥0.17 embeds in
+   *  `snapshots --json`. `null`/`undefined` for a snapshot recorded without a summary
+   *  (older restic, or some `copy` operations) — rendered as an em dash. */
+  size?: number | null;
 }
 
 export interface FileEntry {

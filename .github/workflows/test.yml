@@ -27,12 +27,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Linux dependencies
         run: |
-          sudo apt update
-          sudo apt install -y libwebkit2gtk-4.1-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+          success=false
+          for i in 1 2; do
+            sudo dpkg --configure -a || true
+            if timeout 240 bash -c "sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev libssl-dev \
+              libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils"; then
+              success=true
+              break
+            fi
+            echo "apt attempt $i failed or timed out, retrying..."
+            sleep 10
+          done
+          if [ "$success" != true ]; then
+            echo "apt install failed after all attempts" >&2
+            exit 1
+          fi
 
       - name: Install frontend dependencies
         run: npm ci

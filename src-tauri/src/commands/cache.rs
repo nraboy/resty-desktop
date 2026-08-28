@@ -782,6 +782,14 @@ impl AppDb {
         let _ = conn.execute_batch(
             "ALTER TABLE repo_stats_cache ADD COLUMN raw_size INTEGER;",
         );
+        // Additive, nullable — the snapshot's logical size in bytes, taken from the
+        // `summary.total_bytes_processed` field restic >=0.17 embeds in `snapshots --json`
+        // output. NULL for a snapshot restic recorded without a summary (created by an older
+        // restic, or by some `copy` operations); the frontend renders that as an em dash.
+        // Snapshots are immutable, so this value never needs invalidation. See docs/restic.md.
+        let _ = conn.execute_batch(
+            "ALTER TABLE snapshots_cache ADD COLUMN size INTEGER;",
+        );
         // Additive, nullable — unix-seconds timestamp set once a snapshot's browse-cache rows
         // are known to be orphaned (its id no longer appears in any repo's snapshots_cache).
         // NULL means "not orphaned". Used by mark_orphans/drain_orphans to delete
@@ -2046,7 +2054,7 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare_cached(
-                "SELECT snapshot_id, short_id, time, hostname, username, paths, tags
+                "SELECT snapshot_id, short_id, time, hostname, username, paths, tags, size
                  FROM snapshots_cache WHERE repo_id = ?1
                  ORDER BY time ASC",
             )
@@ -2063,6 +2071,7 @@ impl AppDb {
                     username: row.get(4)?,
                     paths: serde_json::from_str(&paths).unwrap_or_default(),
                     tags: tags.and_then(|t| serde_json::from_str(&t).ok()),
+                    size: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2122,8 +2131,8 @@ impl AppDb {
             let mut stmt = tx
                 .prepare_cached(
                     "INSERT INTO snapshots_cache
-                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, size, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT (repo_id, snapshot_id) DO UPDATE SET
                        short_id = excluded.short_id,
                        time = excluded.time,
@@ -2131,6 +2140,7 @@ impl AppDb {
                        username = excluded.username,
                        paths = excluded.paths,
                        tags = excluded.tags,
+                       size = excluded.size,
                        cached_at = excluded.cached_at",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2144,6 +2154,7 @@ impl AppDb {
                     s.username,
                     s.paths,
                     s.tags,
+                    s.size,
                     now
                 ])
                 .map_err(|e| e.to_string())?;
@@ -2166,8 +2177,8 @@ impl AppDb {
             let mut stmt = tx
                 .prepare_cached(
                     "INSERT OR REPLACE INTO snapshots_cache
-                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, cached_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     (repo_id, snapshot_id, short_id, time, hostname, username, paths, tags, size, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )
                 .map_err(|e| e.to_string())?;
             for s in &rows {
@@ -2180,6 +2191,7 @@ impl AppDb {
                     s.username,
                     s.paths,
                     s.tags,
+                    s.size,
                     now
                 ])
                 .map_err(|e| e.to_string())?;
@@ -3008,9 +3020,17 @@ struct SnapshotRow {
     username: Option<String>,
     paths: String,
     tags: Option<String>,
+    /// Logical size in bytes from restic's embedded backup summary
+    /// (`summary.total_bytes_processed`); `None` when the snapshot carries no summary.
+    size: Option<i64>,
 }
 
 fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
+    #[derive(Deserialize)]
+    struct RawSummary {
+        #[serde(default)]
+        total_bytes_processed: Option<u64>,
+    }
     #[derive(Deserialize)]
     struct Raw {
         id: String,
@@ -3020,6 +3040,8 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
         username: Option<String>,
         paths: Vec<String>,
         tags: Option<Vec<String>>,
+        #[serde(default)]
+        summary: Option<RawSummary>,
     }
     let raws: Vec<Raw> = serde_json::from_str(json).map_err(|e| e.to_string())?;
     raws.into_iter()
@@ -3036,6 +3058,10 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
                     .map(|t| serde_json::to_string(&t))
                     .transpose()
                     .map_err(|e: serde_json::Error| e.to_string())?,
+                size: r
+                    .summary
+                    .and_then(|s| s.total_bytes_processed)
+                    .map(|v| v as i64),
             })
         })
         .collect()
@@ -3788,6 +3814,33 @@ mod tests {
         let snapshots = db.get_snapshots_vec("repo1").unwrap();
         assert_eq!(snapshots.len(), 1, "must not duplicate the row");
         assert_eq!(snapshots[0].tags, Some(vec!["daily".to_string()]));
+    }
+
+    /// `Snapshot.size` is read from restic's nested `summary.total_bytes_processed`, is
+    /// `None` when the snapshot carries no summary, and survives the diff-based upsert path
+    /// (a later refresh that adds a summary must fill it in).
+    #[test]
+    fn set_snapshots_stores_summary_size_and_leaves_it_none_when_absent() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        let with_summary = r#"{"id":"aaaa111100000000","short_id":"aaaa1111","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"],"tags":null,"summary":{"total_bytes_processed":4096}}"#;
+        let without_summary = snapshot_json("bbbb222200000000", None);
+        db.set_snapshots("repo1", &format!("[{with_summary},{without_summary}]")).unwrap();
+
+        let by_id = |id: &str| {
+            db.get_snapshots_vec("repo1")
+                .unwrap()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
+        assert_eq!(by_id("aaaa111100000000").size, Some(4096));
+        assert_eq!(by_id("bbbb222200000000").size, None);
+
+        // A later listing that gains a summary for bbbb backfills the size via the upsert.
+        let bbbb_with_summary = r#"{"id":"bbbb222200000000","short_id":"bbbb2222","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"],"tags":null,"summary":{"total_bytes_processed":8192}}"#;
+        db.set_snapshots("repo1", &format!("[{with_summary},{bbbb_with_summary}]")).unwrap();
+        assert_eq!(by_id("bbbb222200000000").size, Some(8192));
     }
 
     #[test]

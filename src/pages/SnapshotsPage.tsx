@@ -6,7 +6,7 @@ import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot,
 import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
-import { capList, formatBytes, formatDate } from "../lib/format";
+import { capList, formatBytes, formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
@@ -592,6 +592,7 @@ export default function SnapshotsPage() {
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">ID</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Host</th>
+                  <th className="hidden wide:table-cell px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider text-right">Size</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
                   {!selectMode && (
@@ -640,6 +641,12 @@ export default function SnapshotsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
                     <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
+                    <td
+                      className="hidden wide:table-cell px-4 py-3 text-gray-400 whitespace-nowrap text-right tabular-nums"
+                      title="Bytes restic processed when this snapshot was created. Snapshot Stats reports restore size, which can differ."
+                    >
+                      {formatSize(snap.size ?? undefined)}
+                    </td>
                     <td className="px-4 py-3 text-gray-400 max-w-xs">
                       <Tooltip
                         title="Backup Paths"

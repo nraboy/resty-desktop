@@ -66,7 +66,7 @@ src/
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx  # Add/open/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
-    SnapshotsPage.tsx     # Snapshot table; stale-while-revalidate cache; restore, copy, tag, delete, per-snapshot index — see docs/frontend.md
+    SnapshotsPage.tsx     # Snapshot table; stale-while-revalidate cache; restore, copy, tag, delete, per-snapshot index; wide-only Size column (cached summary size) — see docs/frontend.md
     BrowsePage.tsx        # File tree inside a snapshot; restore, tag management, search entry point — see docs/frontend.md
     SearchPage.tsx        # Full-text file search within one snapshot; index state machine — see docs/frontend.md
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md

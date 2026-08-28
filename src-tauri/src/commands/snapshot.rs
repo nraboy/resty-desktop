@@ -68,6 +68,13 @@ pub struct Snapshot {
     pub username: Option<String>,
     pub paths: Vec<String>,
     pub tags: Option<Vec<String>>,
+    /// Logical size in bytes, from the backup summary restic >=0.17 embeds in
+    /// `snapshots --json` (`summary.total_bytes_processed`). `None` for a snapshot
+    /// recorded without a summary (older restic, or some `copy` operations). Only ever
+    /// populated from the cache (`get_snapshots_vec`), never parsed from raw restic
+    /// output into this struct directly — see `refresh_snapshots`.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[tauri::command]
@@ -90,9 +97,17 @@ pub async fn refresh_snapshots(
     let restic_path = super::get_restic_path(&db);
     let _rg = repo_locks.read(&repo.path);
     let stdout = run_restic_blocking(repo, vec!["snapshots".into(), "--json".into()], restic_path).await?;
-    let _ = db.set_snapshots(&repo_id, &stdout);
-    let snapshots: Vec<Snapshot> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
-    Ok(snapshots)
+    // Propagated (not `let _ =`) now that the return value is read back from the cache: a
+    // write or parse failure must still surface as a failed refresh rather than silently
+    // returning the previous, stale cached rows. `set_snapshots` and a direct
+    // `Vec<Snapshot>` deserialize fail under the same conditions (same required fields), so
+    // this keeps the pre-change error surface.
+    db.set_snapshots(&repo_id, &stdout)?;
+    // Return the freshly-cached rows rather than re-parsing `stdout` — `Snapshot.size` is
+    // derived from restic's nested `summary` object during caching (`parse_snapshot_rows`)
+    // and isn't a top-level field a direct deserialize would pick up, so reading it back
+    // keeps the returned list identical to what a reload via `list_snapshots` shows.
+    db.get_snapshots_vec(&repo_id)
 }
 
 /// Runs `run_restic_blocking`, retrying up to twice (2s apart) if the failure is restic's own
