@@ -1575,7 +1575,7 @@ export default function RepositoriesPage() {
               },
             },
             {
-              label: "Duplicate…",
+              label: "Duplicate Configuration…",
               onClick: () => openDuplicateModal(contextMenu.repo),
             },
             {
@@ -1627,7 +1627,7 @@ export default function RepositoriesPage() {
       )}
 
       <Modal
-        title={duplicateSource ? "Duplicate Repository" : modalMode === "init" ? "Create New Repository" : "Open Existing Repository"}
+        title={duplicateSource ? "Duplicate Repository Configuration" : modalMode === "init" ? "Create New Repository" : "Open Existing Repository"}
         open={modalMode !== null}
         onClose={() => { setModalMode(null); resetAddForm(); }}
       >
@@ -1637,6 +1637,7 @@ export default function RepositoriesPage() {
             placeholder="e.g. Home Backup"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
+            onClear={() => setForm({ ...form, name: "" })}
           />
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
