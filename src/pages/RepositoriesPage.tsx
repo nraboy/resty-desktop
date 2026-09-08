@@ -90,6 +90,15 @@ export default function RepositoriesPage() {
   // validate_credentials (backends.rs) is the authority on required/allowed keys
   // per detected kind; this form does no client-side validation of its own.
   const [credentialRows, setCredentialRows] = useState<[string, string][]>([]);
+  // Non-null only while the add modal is open in "duplicate" flavor — drives the modal
+  // title, the submit label, and the secrets-load guard below. modalMode stays "add" so
+  // every mode-gated control (Test Connection, Read-only, No Password) comes along
+  // unchanged.
+  const [duplicateSource, setDuplicateSource] = useState<Repository | null>(null);
+  // Same both-or-neither guard as the edit modal's editSecretsLoading/editSecretsError
+  // (see openDuplicateModal for why a partial load is unsafe here too).
+  const [duplicateSecretsLoading, setDuplicateSecretsLoading] = useState(false);
+  const [duplicateSecretsError, setDuplicateSecretsError] = useState(false);
   const [editTarget, setEditTarget] = useState<Repository | null>(null);
   const [editName, setEditName] = useState("");
   const [editPath, setEditPath] = useState("");
@@ -498,10 +507,14 @@ export default function RepositoriesPage() {
     setPathMode("local");
     setCredentialRows([]);
     setTestResult(null);
+    setDuplicateSource(null);
+    setDuplicateSecretsLoading(false);
+    setDuplicateSecretsError(false);
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (duplicateSecretsLoading || duplicateSecretsError) return;
     if (!form.name || !form.path || (!noPassword && !form.password)) {
       setError("All fields are required.");
       return;
@@ -668,6 +681,55 @@ export default function RepositoriesPage() {
         });
       })
       .finally(() => setEditSecretsLoading(false));
+  };
+
+  /** A name not already used by an existing repo, appending " (copy)" then numbered
+   *  variants. Repo names are not DB-unique — this is a usability nicety so a run of
+   *  duplicates isn't 50 rows with identical names, not a constraint. */
+  const uniqueCopyName = (base: string, existing: Repository[]): string => {
+    const used = new Set(existing.map((r) => r.name));
+    let candidate = `${base} (copy)`;
+    let n = 2;
+    while (used.has(candidate)) candidate = `${base} (copy ${n++})`;
+    return candidate;
+  };
+
+  // Opens the add modal prefilled from `repo`. Loads password + credentials together,
+  // not as two independent promises, for the same reason openEditModal does: a partial
+  // load is never safe to submit from. The failure mode differs from the edit modal's
+  // (which could overwrite stored secrets) but is just as silent — credentialRows sitting
+  // at its initial [] would create a repo in ambient mode instead of with the source's
+  // credentials, and restic would fail later with an opaque auth error.
+  const openDuplicateModal = (repo: Repository) => {
+    resetAddForm(); // must run FIRST — it clears duplicate state
+    setError("");
+    const remote = isRemoteRepo(repo.path);
+    setDuplicateSource(repo);
+    setForm({ name: uniqueCopyName(repo.name, repos), path: repo.path, password: "" });
+    setPathMode(remote ? "remote" : "local");
+    setReadOnly(repo.readOnly);
+    setModalMode("add");
+    setDuplicateSecretsError(false);
+    setDuplicateSecretsLoading(true);
+    Promise.all([getRepoPassword(repo.id), getRepoCredentials(repo.id)])
+      .then(([pw, creds]) => {
+        setForm((f) => ({ ...f, password: pw }));
+        setNoPassword(pw === "");
+        // Only prefill credentials for a remote path. The credential row list renders
+        // exclusively in remote mode, so prefilling a local repo's stored credentials
+        // would submit rows the user can't see or edit.
+        if (remote) setCredentialRows(creds.map(([k, v]): [string, string] => [k, v]));
+      })
+      .catch(() => {
+        setDuplicateSecretsError(true);
+        setTestResult({
+          ok: false,
+          message:
+            "Couldn't load the source repository's saved password and credentials. " +
+            "Close and reopen this dialog before duplicating.",
+        });
+      })
+      .finally(() => setDuplicateSecretsLoading(false));
   };
 
   const handleTest = async () => {
@@ -1513,6 +1575,10 @@ export default function RepositoriesPage() {
               },
             },
             {
+              label: "Duplicate…",
+              onClick: () => openDuplicateModal(contextMenu.repo),
+            },
+            {
               label: "Mirror…",
               // A read-only repo may still be a mirror *source* — but only if some other,
               // writable repo exists to be the destination.
@@ -1561,9 +1627,9 @@ export default function RepositoriesPage() {
       )}
 
       <Modal
-        title={modalMode === "init" ? "Create New Repository" : "Open Existing Repository"}
+        title={duplicateSource ? "Duplicate Repository" : modalMode === "init" ? "Create New Repository" : "Open Existing Repository"}
         open={modalMode !== null}
-        onClose={() => setModalMode(null)}
+        onClose={() => { setModalMode(null); resetAddForm(); }}
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
@@ -1579,14 +1645,14 @@ export default function RepositoriesPage() {
             <div className="flex rounded-lg overflow-hidden border border-gray-700 mb-3">
               <button
                 type="button"
-                onClick={() => { setPathMode("local"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); }}
+                onClick={() => { if (pathMode !== "local") { setPathMode("local"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); } }}
                 className={`flex-1 py-1.5 text-sm font-medium transition-colors ${pathMode === "local" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
               >
                 Local Path
               </button>
               <button
                 type="button"
-                onClick={() => { setPathMode("remote"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); }}
+                onClick={() => { if (pathMode !== "remote") { setPathMode("remote"); setForm((f) => ({ ...f, path: "" })); setCredentialRows([]); setTestResult(null); } }}
                 className={`flex-1 py-1.5 text-sm font-medium transition-colors ${pathMode === "remote" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
               >
                 Remote URL
@@ -1722,11 +1788,11 @@ export default function RepositoriesPage() {
               </Button>
             )}
             <div className="flex gap-2 ml-auto">
-              <Button variant="secondary" type="button" onClick={() => setModalMode(null)}>
+              <Button variant="secondary" type="button" onClick={() => { setModalMode(null); resetAddForm(); }}>
                 Cancel
               </Button>
-              <Button type="submit" loading={loading}>
-                {modalMode === "init" ? "Create" : "Open"}
+              <Button type="submit" loading={loading} disabled={duplicateSecretsLoading || duplicateSecretsError}>
+                {duplicateSource ? "Duplicate" : modalMode === "init" ? "Create" : "Open"}
               </Button>
             </div>
           </div>

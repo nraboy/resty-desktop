@@ -65,7 +65,7 @@ src/
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
-    RepositoriesPage.tsx  # Add/open/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
+    RepositoriesPage.tsx  # Add/open/duplicate/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
     SnapshotsPage.tsx     # Snapshot table; stale-while-revalidate cache; restore, copy, tag, delete, per-snapshot index; wide-only Size column (cached summary size) — see docs/frontend.md
     BrowsePage.tsx        # File tree inside a snapshot; restore, tag management, search entry point — see docs/frontend.md
     SearchPage.tsx        # Full-text file search within one snapshot; index state machine — see docs/frontend.md
@@ -297,6 +297,11 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
 - `gpu_compat::apply()`'s NVIDIA+Wayland workaround is gated, not applied unconditionally
 - Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature, not the default `gtk3` one — `rfd` silently reverts to GTK if `gtk3` is enabled anywhere in the dependency graph, so don't add it back
+- `bundle.targets` in `tauri.conf.json` is an explicit list (`deb`/`rpm`/`dmg`/`nsis`/`msi`) with
+  **no `"appimage"`** — deliberate, due to an open upstream Tauri AppImage bundler bug
+  (tauri#15665) that black-windows on Mesa 25+ hosts; `.deb`/`.rpm` link the host WebKitGTK and
+  are unaffected. `"deb"` must stay listed (the AppImage bundler, if ever re-added, builds from
+  the deb output tree). Don't re-propose `"appimage"` without reading docs/decisions.md
 - Windows and Linux install no native menu bar — the menu is built and `MenuState` managed on
   every platform, but `setup()` drops it on Windows/Linux; only macOS installs it (replaces the
   old Windows-only "fold the app submenu into File" workaround, whose cfg machinery was deleted).
@@ -306,6 +311,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   macOS's system menu bar — see docs/decisions.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
+- Auto-unlock is macOS + Windows only; `keychain.rs`'s Linux build is a deliberate no-op stub, not
+  an unfinished TODO — no Linux credential store (Secret Service or keyutils) can guarantee one
+  that survives a reboot and is unlocked at login, which is the whole point. Not a `keyring`-crate
+  limitation. Don't fill in the stub or add a Linux store crate — see docs/decisions.md
 - `.app_name("resty-desktop")` on the autostart builder must not be dropped
 - A login launch shows a hidden window only when tray + auto-unlock + launch-at-login are all on
   (`--from-autostart` arg, gated via the standalone `should_start_hidden`); any other state,

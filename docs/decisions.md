@@ -468,6 +468,43 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   inherits that — so toggling the tray would reach two levels down and delete the user's keychain
   entry as a side effect of an unrelated setting. Leaving auto-unlock ungated means nothing to
   inherit, and `handleTrayToggle` needed no changes to support this feature.
+- **Auto-unlock is macOS + Windows only, and the Linux build of `keychain.rs` is a deliberate
+  total no-op stub — not an unfinished TODO.** `keyring` is a target-scoped dependency
+  (`src-tauri/Cargo.toml` — `apple-native` / `windows-native` only), the non-macOS/Windows
+  `mod platform` in `commands/keychain.rs` returns `is_supported() → false` / `load_key() →
+  Missing` with zero secret-service contact on any path, and `SettingsPage.tsx` hides the toggle
+  entirely unless `getAutoUnlockSupported()` is true. This is because auto-unlock only works if
+  the OS guarantees a credential store that is *present*, *survives a reboot*, and is *unlocked by
+  the time the app launches* — the whole point is unlocking on a login launch. Linux has no such
+  guarantee. The two options `keyring` exposes there both fail it: the D-Bus **Secret Service**
+  has no single implementation — the backing daemon is whatever the user happens to run
+  (gnome-keyring, KWallet, KeePassXC, or nothing), it has "known issues ... in headless
+  environments" per upstream, and there is no `default` collection under WSL; the kernel's
+  **keyutils** store is documented as "completely in-memory and will not persist across reboots"
+  ("a reboot clears all keyrings"), and even its "persistent" keyring expires on a timer
+  (`/proc/sys/kernel/keys/persistent_keyring_expiry`, defaulting to a few days) — its own docs
+  tell callers to "prepare for `Entry::get_password` to fail and have a fallback." A store that
+  may be absent, still locked at startup, or empty after a reboot delivers the feature only
+  *sometimes*, which is worse than not offering it: you'd have to know which category your machine
+  falls in before you could trust it. The generic `db-keystore` backend is not a substitute — it
+  would put the derived master key in an app-controlled file next to `app_data.db` with no
+  OS-level protection, defeating the point. **This is not a crate limitation** — `keyring` v4
+  moves store selection to a runtime `set_default_store` call, so a graceful-degradation design is
+  structurally easy; the blocker is the Linux desktop credential ecosystem, not the library, so
+  don't reopen this on the grounds that "the crate got better." On the security side,
+  `docs/data.md`'s Auto-unlock note already flags Windows Credential Manager as the weaker of the
+  two supported stores (user-account scoped vs. macOS's per-app ACL); Secret Service is also
+  session-scoped with no per-app ACL, landing on the same weaker side. **Not permanently closed:**
+  a Linux implementation would need to be designed from the start as best-effort, degrading
+  cleanly back to the password prompt whenever no provider answers or the collection is locked —
+  a meaningfully different feature from the guaranteed one on macOS/Windows, plus a revisit of the
+  `should_start_hidden` bullet below, which currently relies on `auto_unlock` never being `true`
+  on Linux. Don't fill in the stub or add a Linux store crate without treating it as that design
+  change. Separately and unrelatedly: the pin is `keyring` 3.6.3 while upstream has moved to
+  `keyring-core`; migrating is a real breaking change (explicit store allocation +
+  `set_default_store`/`unset_default_store` at app startup/shutdown, touching `lib.rs`'s `setup()`
+  as well as `keychain.rs`) and is independent of the Linux question — noted here so the two don't
+  get conflated, not as a TODO.
 - **`.app_name("resty-desktop")` on the `tauri_plugin_autostart::Builder` must not be dropped.**
   It defaults to `package_info().name`, which for this app is `"Resty Desktop"` — with a space —
   and the pinned `auto-launch 0.5.0` writes both the Linux `Exec=` line and the Windows Run
@@ -691,8 +728,6 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 
 ## Linux GPU Compatibility
 
-## Linux GPU Compatibility
-
 `src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.
 
 The fix is **gated, not unconditional**: it only fires when both `/sys/module/nvidia` exists (the NVIDIA kernel module — proprietary or open, deliberately *not* matching `nouveau`, since this is an NVIDIA-driver bug and firing on nouveau would slow down machines that don't have it) and a Wayland session is detected (`WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland`). Tauri's docs explicitly warn that an unconditional override "disables a faster path for everyone, including users on working setups" — the gate is what keeps every other combination (X11, Intel/AMD, macOS, Windows) bit-for-bit unaffected. `apply()` is a no-op on every non-Linux target.
@@ -700,4 +735,77 @@ The fix is **gated, not unconditional**: it only fires when both `/sys/module/nv
 Two vars are applied, cheapest first: `__NV_DISABLE_EXPLICIT_SYNC=1` (often fixes Error 71 with no performance cost) then `WEBKIT_DISABLE_DMABUF_RENDERER=1` (the stronger, user-verified fix — costs the faster DMA-BUF rendering path). `WEBKIT_DISABLE_COMPOSITING_MODE=1` — Tauri's third, most expensive option, for silent crash-on-resize — is deliberately **not** set; nothing in the reported symptom points to that failure mode. A variable already set by the user is never overwritten. `RESTY_DISABLE_GPU_WORKAROUND` (any non-empty value other than `0`) skips detection entirely, so an affected user can test whether a driver update has fixed things upstream, or rule the workaround out as the cause of an unrelated rendering complaint, without a rebuild. One `eprintln!` line names which variables were applied when the workaround fires, so it's visible in a bug report rather than invisible magic.
 
 The core decision logic (`should_apply`, `is_opted_out`, `is_wayland`) is a pure, `cfg`-free function unit-tested on every platform (including macOS, where this was developed) — only the real environment-reading wrapper (`apply()`'s Linux body) is `#[cfg(target_os = "linux")]`. Because the pure items have no non-test caller off Linux, they each carry `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]` with a comment — omitting it passes `npm run test:rust` but fails `npm run lint:rust` (`cargo clippy --all-targets -D warnings` builds the lib target too, where they're genuinely unreferenced off Linux). Don't "simplify" this by gating the whole module behind `#[cfg(target_os = "linux")]` — that would make the unit tests only run in CI, never on a non-Linux dev machine, which defeats the reason the pure/wrapper split exists.
+
+## Linux Bundle Targets — why there is no AppImage
+
+`src-tauri/tauri.conf.json`'s `bundle.targets` is `["deb", "rpm", "dmg", "nsis", "msi"]` — an
+explicit list with **no `"appimage"`**. This is deliberate. Commit `bb3ad59` (2026-06-21) changed
+`"targets"` from `"all"` to this list precisely to stop producing AppImage artifacts, citing
+"WebKitGTK DMA-BUF rendering issues on modern Linux distros (Fedora, etc.) causing black windows."
+Because the change reads as "someone typed out a list" rather than "someone removed a feature", the
+omission looks accidental and keeps getting re-proposed from issue tickets. It is not accidental.
+
+**The root cause is an open upstream bug in Tauri's AppImage bundler, not anything in this codebase**
+— [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665), still open, affecting
+tauri / tauri-cli 2.11.2–2.11.5. This repo pins exactly 2.11.2 in both `src-tauri/Cargo.lock` and
+`package-lock.json`. Three distinct defects, all AppImage-only:
+
+- The AppImage bundles its own `libwebkit2gtk` / `WebKitWebProcess`, and — via linuxdeploy's `ldd`
+  sweep — its own `libwayland-client.so.0`. On a host running **Mesa 25 or newer**, `eglGetDisplay`
+  fails with `EGL_BAD_PARAMETER`, `WebKitWebProcess` aborts, and the window never paints; the app
+  keeps running, headless. Fedora reached Mesa 25 well before Ubuntu, which is why Fedora was the
+  reported distro.
+- AppRun unconditionally exports `GST_PLUGIN_SYSTEM_PATH_1_0=$APPDIR/usr/lib/gstreamer-1.0`, a
+  directory that does not exist under the default `bundleMediaFramework: false`. That variable
+  *replaces* rather than extends GStreamer's system plugin path, so WebKit's media backend finds zero
+  plugins.
+- The bundled `linuxdeploy-plugin-gtk` hook hardcodes `GDK_BACKEND=x11` and sets no `WEBKIT_*`
+  variables ([tauri#15781](https://github.com/tauri-apps/tauri/issues/15781)).
+
+**Why the `.deb` and `.rpm` builds are unaffected:** they link the *host's* WebKitGTK instead of
+bundling one, so the entire version-skew class simply does not arise. This is the fact that makes "it
+works for me on Ubuntu" and "it's a black window on Fedora" consistent reports of the same underlying
+problem.
+
+**What re-enabling AppImage would take** (recorded so a future attempt starts from the finished
+analysis rather than redoing it):
+
+- An AppImage gate in `gpu_compat.rs`: detect `APPIMAGE` / `APPDIR` and set
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` unconditionally within an AppImage, independent of the existing
+  NVIDIA + Wayland gate. `gpu_compat::apply()` already runs as the first statement of `run()`
+  (`lib.rs`), before any GTK/WebKit initialization, so it is the correct hook. `APPDIR` must count on
+  its own — `APPIMAGE` is unset under `--appimage-extract-and-run` and under AppImageLauncher's
+  extraction path.
+- Unsetting the dangling `GST_PLUGIN_SYSTEM_PATH_1_0` from inside that same gate, rather than paying
+  the 15–35 MB of `bundleMediaFramework: true` just to make the directory it points at exist.
+- A portal probe plus a warning banner. **An AppImage has no `depends` mechanism**, so the
+  `xdg-desktop-portal` guarantee that `bundle.linux.deb.depends` / `rpm.depends` provides is
+  unavailable — and per the "Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature"
+  entry above, a missing portal makes every Browse button in the app go silently inert with no error.
+  That entry's accepted residual exposure ("tarball/self-built installs") would widen considerably.
+- A launch-at-login caveat that **cannot be fixed from app code**: `auto-launch` 0.5.0's `linux.rs`
+  writes the autostart `Exec={app_path} {args}` line unquoted, and `tauri-bundler` names the artifact
+  `"{product_name}_{version}_{arch}.AppImage"` with no sanitization — i.e.
+  `Resty Desktop_0.5.2_amd64.AppImage`, containing a space. The XDG desktop entry is therefore broken
+  by construction, not merely on unusual paths, and the only mitigation is telling the user to rename
+  the file. (`tauri-plugin-autostart` 2.5.1 *does* already prefer `app.env().appimage` over
+  `current_exe()`, so the ephemeral-mount-path problem is **not** among the issues — stated here so
+  nobody re-checks it.)
+
+**Why it was deferred rather than built:** these workarounds target a bug that is still open
+upstream, so they would need re-verification on every bundler bump; AppImage is not the primary Linux
+distribution mechanism and `.deb` / `.rpm` already cover the large majority of users; and shipping an
+AppImage that black-screens for some people is a worse outcome than shipping none. Demand at the time
+of this decision (2026-09-01) was a single inconvenience report.
+
+**What would change the decision:** tauri#15665 closing, or sustained demand. Either way, **re-test
+on a Mesa 25+ host before shipping** — Ubuntu 26.04 ships Mesa 26 and a Wayland-only GNOME 50 session,
+so it reproduces the trigger condition, but a VM's virtual GPU may or may not, so an *unfixed* control
+build must first be confirmed to fail before any fix is believed to work.
+
+**One implementation trap to preserve if AppImage is ever re-added:** `"deb"` must stay in
+`bundle.targets`. Tauri's AppImage bundler builds its AppDir from the deb output tree
+(`bundle/appimage_deb/`), so dropping `"deb"` breaks the AppImage build.
+
+Don't re-propose adding `"appimage"` to `bundle.targets` without reading this entry first.
 
