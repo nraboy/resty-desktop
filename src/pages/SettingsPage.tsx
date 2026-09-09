@@ -547,7 +547,8 @@ export default function SettingsPage() {
                 Your master key is stored in your system's credential manager so Resty can unlock
                 itself at startup — including scheduled backups after a login launch. Anyone who
                 can log into this computer will be able to use your repositories without the
-                master password.
+                master password. If your credential manager is locked or unavailable when Resty
+                starts, it falls back to asking for your master password.
               </p>
               <label className="flex items-center gap-3 cursor-pointer select-none">
                 <button

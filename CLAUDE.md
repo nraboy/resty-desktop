@@ -24,7 +24,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/failure, each gated by a global setting (`commands/notify.rs`) |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
-| Auto-unlock | `keyring` 3 (macOS/Windows only), opt-in, stores the *derived* master key; see docs/data.md |
+| Auto-unlock | `keyring` 4 (`v1` feature), opt-in, stores the *derived* master key; macOS/Windows guaranteed, Linux (Secret Service) best-effort; see docs/data.md |
 | ID generation | `crypto.randomUUID()` (native browser API) |
 | Tooltip positioning | `@floating-ui/react` — `Tooltip.tsx`, content hovers only (icon-button labels stay on native `title`); see docs/decisions.md for why this one component gets a dependency `ContextMenu.tsx` doesn't need |
 | Restic integration | `std::process::Command` with `--json`; see docs/restic.md |
@@ -183,8 +183,9 @@ Full detail (rotation transaction, auto-unlock keychain design and trade-offs): 
 Retain always: master password → Argon2id → 32-byte key; AES-GCM encrypts a verification
 plaintext; **the password itself is never stored**. `MasterKey` is `Mutex<Option<[u8; 32]>>` —
 `None` when locked, every restic command fails with "App is locked". Repo passwords and backend
-credentials are AES-GCM-encrypted under the master key. Auto-unlock (opt-in, default off,
-macOS/Windows only) stores the *derived* key, never the password, in the OS credential manager.
+credentials are AES-GCM-encrypted under the master key. Auto-unlock (opt-in, default off) stores
+the *derived* key, never the password, in the OS credential manager — guaranteed on macOS/Windows,
+best-effort on Linux via the D-Bus Secret Service (see docs/decisions.md).
 
 ## Persistence & Caching
 
@@ -311,10 +312,11 @@ proposing a change — several are pinned by a named test or reference a confirm
   macOS's system menu bar — see docs/decisions.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
-- Auto-unlock is macOS + Windows only; `keychain.rs`'s Linux build is a deliberate no-op stub, not
-  an unfinished TODO — no Linux credential store (Secret Service or keyutils) can guarantee one
-  that survives a reboot and is unlocked at login, which is the whole point. Not a `keyring`-crate
-  limitation. Don't fill in the stub or add a Linux store crate — see docs/decisions.md
+- Auto-unlock is offered on Linux too (D-Bus Secret Service), but explicitly best-effort — it
+  degrades to the password prompt whenever the store is absent or locked, never a silent failure.
+  Don't reintroduce the kernel keyutils store (genuinely non-persistent, unlike Secret Service)
+  and don't turn `keychain::is_supported()`'s Linux probe into a real D-Bus round trip — see
+  docs/decisions.md
 - `.app_name("resty-desktop")` on the autostart builder must not be dropped
 - A login launch shows a hidden window only when tray + auto-unlock + launch-at-login are all on
   (`--from-autostart` arg, gated via the standalone `should_start_hidden`); any other state,

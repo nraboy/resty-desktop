@@ -468,43 +468,72 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   inherits that — so toggling the tray would reach two levels down and delete the user's keychain
   entry as a side effect of an unrelated setting. Leaving auto-unlock ungated means nothing to
   inherit, and `handleTrayToggle` needed no changes to support this feature.
-- **Auto-unlock is macOS + Windows only, and the Linux build of `keychain.rs` is a deliberate
-  total no-op stub — not an unfinished TODO.** `keyring` is a target-scoped dependency
-  (`src-tauri/Cargo.toml` — `apple-native` / `windows-native` only), the non-macOS/Windows
-  `mod platform` in `commands/keychain.rs` returns `is_supported() → false` / `load_key() →
-  Missing` with zero secret-service contact on any path, and `SettingsPage.tsx` hides the toggle
-  entirely unless `getAutoUnlockSupported()` is true. This is because auto-unlock only works if
-  the OS guarantees a credential store that is *present*, *survives a reboot*, and is *unlocked by
-  the time the app launches* — the whole point is unlocking on a login launch. Linux has no such
-  guarantee. The two options `keyring` exposes there both fail it: the D-Bus **Secret Service**
-  has no single implementation — the backing daemon is whatever the user happens to run
-  (gnome-keyring, KWallet, KeePassXC, or nothing), it has "known issues ... in headless
-  environments" per upstream, and there is no `default` collection under WSL; the kernel's
-  **keyutils** store is documented as "completely in-memory and will not persist across reboots"
-  ("a reboot clears all keyrings"), and even its "persistent" keyring expires on a timer
-  (`/proc/sys/kernel/keys/persistent_keyring_expiry`, defaulting to a few days) — its own docs
-  tell callers to "prepare for `Entry::get_password` to fail and have a fallback." A store that
-  may be absent, still locked at startup, or empty after a reboot delivers the feature only
-  *sometimes*, which is worse than not offering it: you'd have to know which category your machine
-  falls in before you could trust it. The generic `db-keystore` backend is not a substitute — it
-  would put the derived master key in an app-controlled file next to `app_data.db` with no
-  OS-level protection, defeating the point. **This is not a crate limitation** — `keyring` v4
-  moves store selection to a runtime `set_default_store` call, so a graceful-degradation design is
-  structurally easy; the blocker is the Linux desktop credential ecosystem, not the library, so
-  don't reopen this on the grounds that "the crate got better." On the security side,
-  `docs/data.md`'s Auto-unlock note already flags Windows Credential Manager as the weaker of the
-  two supported stores (user-account scoped vs. macOS's per-app ACL); Secret Service is also
-  session-scoped with no per-app ACL, landing on the same weaker side. **Not permanently closed:**
-  a Linux implementation would need to be designed from the start as best-effort, degrading
-  cleanly back to the password prompt whenever no provider answers or the collection is locked —
-  a meaningfully different feature from the guaranteed one on macOS/Windows, plus a revisit of the
-  `should_start_hidden` bullet below, which currently relies on `auto_unlock` never being `true`
-  on Linux. Don't fill in the stub or add a Linux store crate without treating it as that design
-  change. Separately and unrelatedly: the pin is `keyring` 3.6.3 while upstream has moved to
-  `keyring-core`; migrating is a real breaking change (explicit store allocation +
-  `set_default_store`/`unset_default_store` at app startup/shutdown, touching `lib.rs`'s `setup()`
-  as well as `keychain.rs`) and is independent of the Linux question — noted here so the two don't
-  get conflated, not as a TODO.
+- **Auto-unlock is offered on Linux too, via the D-Bus Secret Service, but explicitly as a
+  best-effort feature — degrading cleanly to the password prompt, never treated as an
+  unfinished TODO.** An earlier version of this entry said Linux couldn't offer auto-unlock at
+  all, and was wrong: it applied the kernel **keyutils** store's documented non-persistence ("a
+  reboot clears all keyrings") to the **Secret Service** store, which is a different backend. The
+  keyutils claim is true and is exactly why keyutils is not used here; it does not apply to
+  Secret Service, which is file-backed (typically `~/.local/share/keyrings`) and does survive a
+  reboot — on GNOME (both Ubuntu Desktop's and Fedora Workstation's default), the `login` keyring
+  is unlocked automatically at login by GDM's PAM configuration, the same way it already is for
+  every other GNOME/GTK app that stores a secret. `keyring` needed no Linux-specific *code* to
+  reach this store — only a Cargo feature; see the crate-version paragraph below.
+  - **Where this can still fail, and what happens:** every one of these lands in the existing
+    `LoadOutcome::Unreadable` branch, which by construction never deletes the stored entry or
+    clears the `auto_unlock` row — the user always falls through to the password screen rather
+    than losing the setting.
+    | Situation | Outcome |
+    |---|---|
+    | GNOME + password login (the default on both platforms this app ships for) | login keyring is PAM-unlocked; auto-unlock works |
+    | Fingerprint / smartcard login, or GDM auto-login | the keyring stays locked; the read fails → `Unreadable` → password screen |
+    | KDE, KF ≥ 5.97 (`ksecretd`) | works when `org.freedesktop.secrets` is D-Bus-activatable; otherwise the same `Unreadable` fallback |
+    | No D-Bus session bus at all (headless, a bare window manager) | the toggle is never shown at all — see `is_supported()` below |
+    | A session bus exists but nothing answers on it | the toggle *is* shown (the probe is a cheap heuristic, not a guarantee); enabling it fails at the store step in `set_auto_unlock`, which leaves the toggle off and surfaces the error rather than a silent half-enable |
+  - **`keychain::is_supported()` on Linux is a session-bus presence probe, not a store probe.**
+    It checks `DBUS_SESSION_BUS_ADDRESS`/`$XDG_RUNTIME_DIR/bus` — environment/filesystem only,
+    never a D-Bus round trip — because `SettingsPage.tsx` calls `getAutoUnlockSupported()` on
+    every mount, and that must stay as silent and cheap as it already is on macOS/Windows. Do not
+    turn this into an actual Secret Service ping; the real verification is, and must remain,
+    `set_auto_unlock`'s store-before-write.
+  - **The generic `db-keystore` backend is still not a substitute** — it would put the derived
+    master key in an app-controlled file next to `app_data.db` with no OS-level protection,
+    defeating the point, on any platform.
+  - **Don't reintroduce keyutils**, and don't widen `keychain.rs`'s `LoadOutcome` mapping so any
+    new error variant besides `NoEntry` counts as "safe to delete" — see the crypto-version
+    paragraph below for exactly which variants exist now.
+  - On the security side, `docs/data.md`'s Auto-unlock note already flags Windows Credential
+    Manager as the weaker of the two originally-supported stores (user-account scoped, not
+    per-app, vs. macOS's per-app ACL); Secret Service is also session-scoped with no per-app ACL,
+    landing on the same weaker side as Windows.
+  - **Windows credential-format carryover across the crate bump below is an accepted, untested
+    risk.** Upstream documents the macOS Keychain store as compatible with data written by
+    keyring v2/v3; it says nothing equivalent for the Windows store. If an existing user's stored
+    key doesn't decode after upgrading, the read returns `NoEntry` → `LoadOutcome::Missing`,
+    which is `try_auto_unlock`'s ordinary "nothing to auto-unlock with" path — it clears the
+    `auto_unlock` row and the user re-enables the toggle once. Not a data-loss or security issue,
+    just a one-time inconvenience; called out here so a report of "Windows auto-unlock turned
+    itself off after updating" is immediately explicable rather than looking like a new bug.
+- **The `keyring` crate is on 4.x (`v1` compatibility feature), not 3.x — this was a smaller
+  migration than it first looked, and specifically not the blocker for Linux support that an
+  earlier version of this entry treated it as.** `keyring` 4.0.0 did remove the v3 API in favor
+  of linking `keyring-core` and a store crate directly (`set_default_store`/`unset_default_store`
+  at app startup/shutdown, which would have meant touching `lib.rs`'s `setup()`), but **4.1.0
+  added back a `v1` feature — the default one — that restores the v3 `Entry`/`Error` API with
+  zero required initialization**: `keyring::v1` lazily calls `keyring_core::set_default_store()`
+  on the first `Entry::new()` via a `LazyLock`. `lib.rs` is untouched by this crate; `keychain.rs`
+  needed no import changes either, since the `v1` feature re-exports `Entry`/`Error` at the crate
+  root (`keyring::Entry`, `keyring::Error`) exactly as v3 did. The practical reason to bump: `v1`'s
+  Linux store is `zbus-secret-service-keyring-store`, which is **pure-Rust zbus with no libdbus
+  C dependency** — no `libdbus-1-dev` needed in CI, unlike the v3 `sync-secret-service` route.
+  `cargo tree -p keyring --target x86_64-unknown-linux-gnu` shows the Linux dependency graph
+  pulling in both `async-io`- and `tokio`-flavored machinery under zbus's own default features;
+  since every `keychain::*` call already runs under `spawn_blocking` (see `auth.rs`), neither
+  choice of runtime matters to this app. `keyring-core`'s `Error` enum still distinguishes
+  `NoEntry` (genuinely absent — the only variant `LoadOutcome` maps to `Missing`) from
+  `NoStorageAccess` (locked/unavailable store) and other failure variants — all of the latter
+  fall into `LoadOutcome::Unreadable`, preserving the exact three-way contract this file has
+  always had.
 - **`.app_name("resty-desktop")` on the `tauri_plugin_autostart::Builder` must not be dropped.**
   It defaults to `package_info().name`, which for this app is `"Resty Desktop"` — with a space —
   and the pinned `auto-launch 0.5.0` writes both the Linux `Exec=` line and the Windows Run
@@ -537,8 +566,11 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   20s watchdog (`MasterKey::is_locked()`, a boolean-only probe that never copies the key out of its
   zeroize-on-drop storage) that force-shows the window if a hidden start is still locked by then —
   covering the case where the frontend itself never loads far enough to call back into Rust.
-  **On Linux this path can never trigger**: `keychain.rs`'s Linux build is a total no-op stub, so
-  `auto_unlock` can never be `true` there — Linux keeps exactly the old always-visible behavior.
+  **This path is now reachable on Linux too**, since `auto_unlock` can be `true` there (Secret
+  Service auto-unlock, see the Auto-unlock entries above) — `should_start_hidden` and both safety
+  nets (the watchdog and `App.tsx`'s fallback) are platform-independent, so a Linux user with
+  tray + launch-at-login + auto-unlock all on gets the same hidden-start behavior as macOS/Windows,
+  and the same self-heal if the Secret Service auto-unlock fails at that particular launch.
   Existing users' autostart entries predate `--from-autostart`; `setup()` re-registers the entry
   once (`app.autolaunch().enable()`, guarded on `is_enabled()` so it never creates an entry nor
   fights a Windows Task-Manager-disabled `Run` value) and records `autostart_args_migrated` in

@@ -39,12 +39,11 @@ uuid = { version = "1", features = ["v4"] }
 # Blocking HTTP client for webhook delivery, run under spawn_blocking (the app's
 # existing pattern for blocking I/O). `tls` is rustls-based — no native-tls/OpenSSL.
 ureq = { version = "2", default-features = false, features = ["tls"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", default-features = false, features = ["apple-native"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", default-features = false, features = ["windows-native"] }
+# Auto-unlock's OS credential-manager access — see commands/keychain.rs. The default `v1`
+# feature selects a platform store itself: macOS Keychain, Windows Credential Manager, and
+# (pure-Rust zbus, no libdbus) Secret Service on Linux. No longer target-scoped — see
+# docs/decisions.md for why the crate needed no Linux-specific code, only this dependency.
+keyring = "4"
 
 [profile.release]
 strip = true
