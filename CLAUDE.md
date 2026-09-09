@@ -294,6 +294,9 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `cached_at` columns are written but not read yet — kept for a future TTL feature
 - `panic = "abort"` is deliberately not set in the release profile
 - Known, deferred frontend duplication (search/index pattern, FileIcon, index-batch UI, etc.)
+- Known, unreproduced-by-users issue: on Linux, title-bar buttons can freeze after the window is
+  shown again from hidden (tray restore / single-instance refocus) — likely an upstream `tao`/GTK
+  quirk, not this codebase; see docs/decisions.md
 - Backup progress bars are non-monotonic by design (restic's own `percent_done` behavior)
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
 - `gpu_compat::apply()`'s NVIDIA+Wayland workaround is gated, not applied unconditionally

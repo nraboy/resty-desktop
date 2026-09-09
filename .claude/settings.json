@@ -5,5 +5,7 @@
         "commit": "",
         "pr": ""
     },
-    "plansDirectory": "./.claude/plans"
+    "plansDirectory": "./.claude/plans",
+    "sessionUrl": false,
+    "includeGitInstructions": false
 }
