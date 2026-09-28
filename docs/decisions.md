@@ -779,6 +779,23 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   "finish the job" by converting every remaining `title=` in the app; audit each one against
   that rule first. See `Tooltip.tsx`'s entry in docs/frontend.md for the converted-site list.
 
+- **`--exclude-cloud-files` and `--use-fs-snapshot` are gated to Windows, even though newer
+  restic accepts `--exclude-cloud-files` on macOS.** Restic 0.19.1 on macOS lists
+  `--exclude-cloud-files` ("OneDrive, iCloud drive, …") and runs a backup with it fine, while
+  `--use-fs-snapshot` there fails outright (`unknown flag: --use-fs-snapshot`, exit 1) — both
+  verified by hand. The gate stays Windows-only for both anyway, because the app supports restic
+  back to **0.17** (`MIN_RESTIC_MINOR`) and distro packages lag well behind the newest release
+  (Ubuntu's stable repos ship 0.18.x, not 0.19), so what a user's restic supports is decided by
+  0.17-era behavior, not by whatever the developer's Homebrew has. We have **not** verified
+  whether 0.17 (or 0.18) accepts `--exclude-cloud-files` on macOS/Linux, and an unknown flag
+  fails the whole backup — so the safe choice is to never emit it off Windows. Cost: macOS users
+  don't get iCloud placeholder skipping. The gate is `cfg!(target_os = "windows")` in
+  `build_backup_args` (`snapshot.rs`); the UI hides both checkboxes off Windows (`isWindows()`),
+  but a plan's stored values are preserved and exported unchanged so they round-trip. Don't widen
+  the gate to macOS without (a) confirming the flag's behavior on the oldest supported restic and
+  (b) a restic-version check, since a wrong guess turns every backup of the plan into a failure.
+  Same principle applies to any future backup flag: gate on what 0.17 supports.
+
 
 ## Linux GPU Compatibility
 

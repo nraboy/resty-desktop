@@ -294,6 +294,12 @@ export interface BackupPlan {
   limitUpload?: number;
   limitDownload?: number;
   webhooks?: PlanWebhook[];
+  /** `restic backup --pack-size` in MiB (4–128); unset = restic's default (16). */
+  packSize?: number | null;
+  /** Windows-only (`--exclude-cloud-files`); stored on every OS, only passed to restic on Windows. */
+  excludeCloudFiles: boolean;
+  /** Windows-only (`--use-fs-snapshot`, VSS); stored on every OS, only passed to restic on Windows. */
+  useFsSnapshot: boolean;
 }
 
 export interface Schedule {

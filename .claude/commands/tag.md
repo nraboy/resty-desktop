@@ -16,6 +16,8 @@ Treat every commit in this window as one span of work, not a sequence of indepen
 
 Categorize the resulting net-effect entries using your best judgement into relevant sections (e.g. New Features, Improvements, Bug Fixes, etc.) — only include sections that have at least one entry.
 
+While reading the full commit messages, watch for GitHub issue references (e.g. `#123`, `GH-123`, `fixes #123`, `closes #123`, or a full `github.com/.../issues/123` URL). If a commit that contributes to a net-effect entry references one or more issue numbers, append them to that entry in parenthesised `(#123)` form (comma-separated if several), e.g. `- Bug fix with short description (#123, #145)`. Only include issue numbers whose commits survive the net-effect collapse above — if the work was reverted within the window, drop its issue references too.
+
 Write the categorized list as the message of a new annotated tag on the current commit:
 
 ```

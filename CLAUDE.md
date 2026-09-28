@@ -72,7 +72,7 @@ src/
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; backup modal with progress; auto-applies retention — see docs/frontend.md
-    BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits, webhooks — see docs/frontend.md
+    BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete/run; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
@@ -313,6 +313,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   (`Sidebar`'s `onLock`,
   shared `handleLock` in `App.tsx`); don't reintroduce a Windows menu bar, the File-fold, or hide
   macOS's system menu bar — see docs/decisions.md
+- `--exclude-cloud-files`/`--use-fs-snapshot` are emitted only on Windows (`build_backup_args`), even
+  though restic 0.19 accepts the former on macOS — gated on what the 0.17 minimum supports, since
+  distro restic lags (Ubuntu ships 0.18.x) and an unknown flag fails the whole backup; see
+  docs/decisions.md before widening it
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - Auto-unlock is offered on Linux too (D-Bus Secret Service), but explicitly best-effort — it

@@ -5,7 +5,7 @@ import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listR
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
 import { formatDuration } from "../lib/format";
-import { needsFullDiskAccess } from "../lib/utils";
+import { isWindows, needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
@@ -254,7 +254,7 @@ export default function BackupPlansPage() {
     unlistenRef.current = unlisten;
 
     try {
-      await runBackup(backupPlan.repoId, backupPlan.paths, backupPlan.tags, backupPlan.excludes, backupPlan.excludeIfPresent, backupPlan.excludeCaches, backupPlan.id, backupPlan.limitUpload, backupPlan.limitDownload);
+      await runBackup(backupPlan);
       if (backupPlan.retention) {
         setApplyingRetention(true);
         try {
@@ -662,6 +662,24 @@ export default function BackupPlansPage() {
                   <span className="text-gray-200">
                     {backupPlan.excludeIfPresent.filter(e => e.trim() && !e.trim().startsWith('#')).length + (backupPlan.excludeCaches ? 1 : 0)}
                   </span>
+                </div>
+              )}
+              {backupPlan.packSize != null && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Pack size</span>
+                  <span className="text-gray-200">{backupPlan.packSize} MiB</span>
+                </div>
+              )}
+              {isWindows() && backupPlan.excludeCloudFiles && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Cloud-only files</span>
+                  <span className="text-gray-200">Skipped</span>
+                </div>
+              )}
+              {isWindows() && backupPlan.useFsSnapshot && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">VSS snapshot</span>
+                  <span className="text-gray-200">On</span>
                 </div>
               )}
               {backupPlan.retention && (

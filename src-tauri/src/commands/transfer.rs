@@ -100,6 +100,15 @@ struct ExportPlan {
     /// one carrying passwords. `#[serde(default)]` = older bundles import with none.
     #[serde(default)]
     webhooks: Vec<PlanWebhook>,
+    /// `restic backup --pack-size` (MiB). `#[serde(default)]` = older bundles import unset.
+    #[serde(default)]
+    pack_size: Option<u32>,
+    /// Windows-only flags — exported verbatim from any OS so a plan round-trips through a
+    /// Mac/Linux install unchanged; only *passed to restic* on Windows.
+    #[serde(default)]
+    exclude_cloud_files: bool,
+    #[serde(default)]
+    use_fs_snapshot: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,6 +262,9 @@ pub fn export_data(
             limit_upload: p.limit_upload,
             limit_download: p.limit_download,
             webhooks: p.webhooks.clone(),
+            pack_size: p.pack_size,
+            exclude_cloud_files: p.exclude_cloud_files,
+            use_fs_snapshot: p.use_fs_snapshot,
         })
         .collect();
 
@@ -431,20 +443,12 @@ pub fn import_data(
         let repo_id = repo_id_map.get(&p.repo_id).cloned().unwrap_or_default();
         let new_id = uuid::Uuid::new_v4().to_string();
         plan_id_map.insert(p.id.clone(), new_id.clone());
-        plans.push(BackupPlan {
-            id: new_id,
-            name: uniquify(&p.name, &mut plan_names),
+        plans.push(backup_plan_from_export(
+            p,
+            new_id,
+            uniquify(&p.name, &mut plan_names),
             repo_id,
-            paths: p.paths.clone(),
-            tags: p.tags.clone(),
-            excludes: p.excludes.clone(),
-            exclude_if_present: p.exclude_if_present.clone(),
-            exclude_caches: p.exclude_caches,
-            retention: p.retention.clone(),
-            limit_upload: p.limit_upload,
-            limit_download: p.limit_download,
-            webhooks: p.webhooks.clone(),
-        });
+        ));
     }
 
     // Schedules: remap planIds → new plan ids; recompute timing for this host.
@@ -694,7 +698,8 @@ pub fn import_backrest_config(
     }
 
     // Plans: remap repo ref, fold case-insensitive excludes into excludes,
-    // map retention. Tags and bandwidth limits have no Backrest source.
+    // map retention. Tags, bandwidth limits, pack size and the Windows-only flags have no
+    // Backrest source (its raw `flags` are dropped, not parsed).
     let mut plans: Vec<BackupPlan> = Vec::with_capacity(cfg.plans.len());
     let mut plan_id_map: HashMap<String, String> = HashMap::new();
     for p in &cfg.plans {
@@ -717,6 +722,9 @@ pub fn import_backrest_config(
             limit_upload: None,
             limit_download: None,
             webhooks: Vec::new(),
+            pack_size: None,
+            exclude_cloud_files: false,
+            use_fs_snapshot: false,
         });
     }
 
@@ -755,6 +763,30 @@ pub fn import_backrest_config(
     })
 }
 
+/// Builds the fresh-copy `BackupPlan` for one bundle plan (new id/name/repo already
+/// resolved by the caller). An out-of-range `packSize` from a hand-edited bundle is
+/// dropped to "restic default" rather than failing the whole import — same tolerance the
+/// importer shows for dangling repo references.
+fn backup_plan_from_export(p: &ExportPlan, id: String, name: String, repo_id: String) -> BackupPlan {
+    BackupPlan {
+        id,
+        name,
+        repo_id,
+        paths: p.paths.clone(),
+        tags: p.tags.clone(),
+        excludes: p.excludes.clone(),
+        exclude_if_present: p.exclude_if_present.clone(),
+        exclude_caches: p.exclude_caches,
+        retention: p.retention.clone(),
+        limit_upload: p.limit_upload,
+        limit_download: p.limit_download,
+        webhooks: p.webhooks.clone(),
+        pack_size: super::snapshot::normalize_pack_size(p.pack_size).unwrap_or(None),
+        exclude_cloud_files: p.exclude_cloud_files,
+        use_fs_snapshot: p.use_fs_snapshot,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,11 +808,43 @@ mod tests {
             limit_upload: None,
             limit_download: None,
             webhooks: vec![],
+            pack_size: Some(64),
+            exclude_cloud_files: true,
+            use_fs_snapshot: true,
         };
         let json = serde_json::to_string(&plan).unwrap();
+        // The on-disk keys are part of the hand-editable bundle format.
+        assert!(json.contains("\"packSize\":64"));
+        assert!(json.contains("\"excludeCloudFiles\":true"));
+        assert!(json.contains("\"useFsSnapshot\":true"));
         let back: ExportPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exclude_if_present, vec![".nobackup".to_string()]);
         assert!(back.exclude_caches);
+        assert_eq!(back.pack_size, Some(64));
+        assert!(back.exclude_cloud_files);
+        assert!(back.use_fs_snapshot);
+
+        // …and the import mapping carries all three onto the fresh-copy plan.
+        let imported =
+            backup_plan_from_export(&back, "new".to_string(), "Daily".to_string(), "r2".to_string());
+        assert_eq!(imported.pack_size, Some(64));
+        assert!(imported.exclude_cloud_files);
+        assert!(imported.use_fs_snapshot);
+    }
+
+    #[test]
+    fn import_drops_out_of_range_pack_size_but_keeps_the_plan() {
+        let json = r#"{
+            "id": "p1", "name": "Daily", "repoId": "r1", "paths": ["/home"],
+            "tags": [], "excludes": [], "retention": null,
+            "limitUpload": null, "limitDownload": null, "packSize": 500,
+            "useFsSnapshot": true
+        }"#;
+        let p: ExportPlan = serde_json::from_str(json).unwrap();
+        let imported = backup_plan_from_export(&p, "n".into(), "Daily".into(), "r".into());
+        assert_eq!(imported.pack_size, None);
+        assert_eq!(imported.paths, vec!["/home".to_string()]);
+        assert!(imported.use_fs_snapshot);
     }
 
     #[test]
@@ -801,6 +865,9 @@ mod tests {
         let plan: ExportPlan = serde_json::from_str(json).unwrap();
         assert!(plan.exclude_if_present.is_empty());
         assert!(!plan.exclude_caches);
+        assert_eq!(plan.pack_size, None);
+        assert!(!plan.exclude_cloud_files);
+        assert!(!plan.use_fs_snapshot);
     }
 
     // ── ExportRepo additive credentials field ───────────────────────────────

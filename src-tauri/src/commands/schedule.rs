@@ -5,7 +5,7 @@ use tauri::{Emitter, State};
 
 use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
 use super::repo_locks::RepoLocks;
-use super::snapshot::{apply_retention, execute_backup, log_retention_failure};
+use super::snapshot::{apply_retention, execute_backup, log_retention_failure, BackupOptions};
 use crate::tasks::TaskOrigin;
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
@@ -147,9 +147,7 @@ pub async fn run_schedule_now(
         let backup_ok = execute_backup(
             &app, &db, &master_key, &backup_handle, &repo_locks,
             &plan.repo_id, Some(plan.id.as_str()),
-            plan.paths.clone(), plan.tags.clone(), plan.excludes,
-            plan.exclude_if_present, plan.exclude_caches,
-            plan.limit_upload, plan.limit_download,
+            plan.paths.clone(), plan.tags.clone(), BackupOptions::from(&plan),
             // "Run Now" is user-initiated, same distinction the scheduler:* events
             // already draw (see scheduler.rs) — not a background scheduler tick.
             TaskOrigin::Manual,

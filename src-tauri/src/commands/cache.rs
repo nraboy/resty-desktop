@@ -159,6 +159,138 @@ pub struct BackupPlan {
     pub limit_download: Option<u32>,
     #[serde(default)]
     pub webhooks: Vec<PlanWebhook>,
+    /// `restic backup --pack-size`, in MiB. `None` = restic's default (16). Validated to
+    /// 4..=128 by `snapshot::normalize_pack_size` on save/import.
+    #[serde(default)]
+    pub pack_size: Option<u32>,
+    /// `--exclude-cloud-files`. Windows-only: stored on every OS (so a bundle round-trips
+    /// through a Mac/Linux install unchanged) but only passed to restic on Windows.
+    #[serde(default)]
+    pub exclude_cloud_files: bool,
+    /// `--use-fs-snapshot` (VSS). Windows-only, same storage/emission split as above.
+    #[serde(default)]
+    pub use_fs_snapshot: bool,
+}
+
+/// Single source of truth for the `backup_plans` column order — every plan SELECT uses
+/// this and `read_backup_plan_row` reads by these indices, so a new column is added in
+/// exactly three places (here, the row mapper, `insert_backup_plan`).
+const BACKUP_PLAN_COLUMNS: &str = "id, name, repo_id, paths_json, tags_json, excludes_json, \
+     exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, \
+     webhooks_json, pack_size, exclude_cloud_files, use_fs_snapshot";
+
+/// Raw column values for one `backup_plans` row, before JSON decoding.
+struct BackupPlanRow {
+    id: String,
+    name: String,
+    repo_id: String,
+    paths_json: String,
+    tags_json: String,
+    excludes_json: String,
+    exclude_if_present_json: Option<String>,
+    exclude_caches: bool,
+    retention_json: Option<String>,
+    limit_upload: Option<u32>,
+    limit_download: Option<u32>,
+    webhooks_json: Option<String>,
+    pack_size: Option<u32>,
+    exclude_cloud_files: bool,
+    use_fs_snapshot: bool,
+}
+
+fn read_backup_plan_row(row: &rusqlite::Row) -> rusqlite::Result<BackupPlanRow> {
+    Ok(BackupPlanRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        repo_id: row.get(2)?,
+        paths_json: row.get(3)?,
+        tags_json: row.get(4)?,
+        excludes_json: row.get(5)?,
+        exclude_if_present_json: row.get(6)?,
+        exclude_caches: row.get(7)?,
+        retention_json: row.get(8)?,
+        limit_upload: row.get(9)?,
+        limit_download: row.get(10)?,
+        webhooks_json: row.get(11)?,
+        pack_size: row.get(12)?,
+        exclude_cloud_files: row.get(13)?,
+        use_fs_snapshot: row.get(14)?,
+    })
+}
+
+impl BackupPlanRow {
+    fn into_plan(self) -> Result<BackupPlan, String> {
+        fn opt_json<T: serde::de::DeserializeOwned>(s: Option<&str>) -> Result<Option<T>, String> {
+            s.map(serde_json::from_str)
+                .transpose()
+                .map_err(|e: serde_json::Error| e.to_string())
+        }
+        Ok(BackupPlan {
+            id: self.id,
+            name: self.name,
+            repo_id: self.repo_id,
+            paths: serde_json::from_str(&self.paths_json).map_err(|e| e.to_string())?,
+            tags: serde_json::from_str(&self.tags_json).map_err(|e| e.to_string())?,
+            excludes: serde_json::from_str(&self.excludes_json).map_err(|e| e.to_string())?,
+            exclude_if_present: opt_json(self.exclude_if_present_json.as_deref())?
+                .unwrap_or_default(),
+            exclude_caches: self.exclude_caches,
+            retention: opt_json(self.retention_json.as_deref())?,
+            limit_upload: self.limit_upload,
+            limit_download: self.limit_download,
+            webhooks: opt_json(self.webhooks_json.as_deref())?.unwrap_or_default(),
+            pack_size: self.pack_size,
+            exclude_cloud_files: self.exclude_cloud_files,
+            use_fs_snapshot: self.use_fs_snapshot,
+        })
+    }
+}
+
+/// Writes one plan. `replace` = `INSERT OR REPLACE` (the editor's save); otherwise a plain
+/// `INSERT` (bundle import, where a duplicate id must fail the whole transaction).
+fn insert_backup_plan(
+    conn: &rusqlite::Connection,
+    plan: &BackupPlan,
+    replace: bool,
+) -> Result<(), String> {
+    let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
+    let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
+    let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
+    let exclude_if_present_json =
+        serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
+    let webhooks_json = serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
+    let retention_json = plan
+        .retention
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e: serde_json::Error| e.to_string())?;
+    let verb = if replace { "INSERT OR REPLACE" } else { "INSERT" };
+    conn.execute(
+        &format!(
+            "{verb} INTO backup_plans ({BACKUP_PLAN_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        ),
+        params![
+            plan.id,
+            plan.name,
+            plan.repo_id,
+            paths_json,
+            tags_json,
+            excludes_json,
+            exclude_if_present_json,
+            plan.exclude_caches,
+            retention_json,
+            plan.limit_upload,
+            plan.limit_download,
+            webhooks_json,
+            plan.pack_size,
+            plan.exclude_cloud_files,
+            plan.use_fs_snapshot,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -673,7 +805,10 @@ impl AppDb {
                 retention_json  TEXT,
                 limit_upload    INTEGER,
                 limit_download  INTEGER,
-                webhooks_json   TEXT
+                webhooks_json   TEXT,
+                pack_size       INTEGER,
+                exclude_cloud_files INTEGER NOT NULL DEFAULT 0,
+                use_fs_snapshot INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
@@ -762,6 +897,15 @@ impl AppDb {
         // stored plaintext — see docs/data.md.
         let _ = conn.execute_batch(
             "ALTER TABLE backup_plans ADD COLUMN webhooks_json TEXT;",
+        );
+        // Additive — `restic backup` pack size (nullable = restic default) and the two
+        // Windows-only flags. Pre-existing rows read back as None/false/false.
+        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN pack_size INTEGER;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE backup_plans ADD COLUMN exclude_cloud_files INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE backup_plans ADD COLUMN use_fs_snapshot INTEGER NOT NULL DEFAULT 0;",
         );
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
@@ -1192,102 +1336,21 @@ impl AppDb {
 
     pub fn list_backup_plans(&self) -> Result<Vec<BackupPlan>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json FROM backup_plans ORDER BY name COLLATE NOCASE")
-            .map_err(|e| e.to_string())?;
-        let plans = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, bool>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<u32>>(9)?,
-                    row.get::<_, Option<u32>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                ))
-            })
+        let sql = format!(
+            "SELECT {BACKUP_PLAN_COLUMNS} FROM backup_plans ORDER BY name COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], read_backup_plan_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-
-        plans
-            .into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)| {
-                Ok(BackupPlan {
-                    id,
-                    name,
-                    repo_id,
-                    paths: serde_json::from_str(&paths_json).map_err(|e| e.to_string())?,
-                    tags: serde_json::from_str(&tags_json).map_err(|e| e.to_string())?,
-                    excludes: serde_json::from_str(&excludes_json).map_err(|e| e.to_string())?,
-                    exclude_if_present: exclude_if_present_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?
-                        .unwrap_or_default(),
-                    exclude_caches,
-                    retention: retention_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?,
-                    limit_upload,
-                    limit_download,
-                    webhooks: webhooks_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?
-                        .unwrap_or_default(),
-                })
-            })
-            .collect()
+        rows.into_iter().map(BackupPlanRow::into_plan).collect()
     }
 
     pub fn save_backup_plan(&self, plan: &BackupPlan) -> Result<(), String> {
-        let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
-        let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
-        let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
-        let exclude_if_present_json =
-            serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
-        let webhooks_json =
-            serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
-        let retention_json = plan
-            .retention
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e: serde_json::Error| e.to_string())?;
-
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO backup_plans
-             (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                plan.id,
-                plan.name,
-                plan.repo_id,
-                paths_json,
-                tags_json,
-                excludes_json,
-                exclude_if_present_json,
-                plan.exclude_caches,
-                retention_json,
-                plan.limit_upload,
-                plan.limit_download,
-                webhooks_json,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        insert_backup_plan(&conn, plan, true)
     }
 
     pub fn remove_backup_plan(&self, plan_id: &str) -> Result<(), String> {
@@ -2513,65 +2576,16 @@ impl AppDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json
-             FROM backup_plans WHERE id IN ({})",
-            placeholders
+            "SELECT {BACKUP_PLAN_COLUMNS} FROM backup_plans WHERE id IN ({placeholders})"
         );
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, bool>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<u32>>(9)?,
-                    row.get::<_, Option<u32>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                ))
-            })
+            .query_map(rusqlite::params_from_iter(ids.iter()), read_backup_plan_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-
-        rows.into_iter()
-            .map(|(id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)| {
-                Ok(BackupPlan {
-                    id,
-                    name,
-                    repo_id,
-                    paths: serde_json::from_str(&paths_json).map_err(|e: serde_json::Error| e.to_string())?,
-                    tags: serde_json::from_str(&tags_json).map_err(|e: serde_json::Error| e.to_string())?,
-                    excludes: serde_json::from_str(&excludes_json).map_err(|e: serde_json::Error| e.to_string())?,
-                    exclude_if_present: exclude_if_present_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?
-                        .unwrap_or_default(),
-                    exclude_caches,
-                    retention: retention_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?,
-                    limit_upload,
-                    limit_download,
-                    webhooks: webhooks_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e: serde_json::Error| e.to_string())?
-                        .unwrap_or_default(),
-                })
-            })
-            .collect()
+        rows.into_iter().map(BackupPlanRow::into_plan).collect()
     }
 
     // ── size helper ──────────────────────────────────────────────────────────
@@ -2926,30 +2940,7 @@ impl AppDb {
         }
 
         for plan in plans {
-            let paths_json = serde_json::to_string(&plan.paths).map_err(|e| e.to_string())?;
-            let tags_json = serde_json::to_string(&plan.tags).map_err(|e| e.to_string())?;
-            let excludes_json = serde_json::to_string(&plan.excludes).map_err(|e| e.to_string())?;
-            let exclude_if_present_json =
-                serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
-            let webhooks_json =
-                serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
-            let retention_json = plan
-                .retention
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|e: serde_json::Error| e.to_string())?;
-            tx.execute(
-                "INSERT INTO backup_plans
-                 (id, name, repo_id, paths_json, tags_json, excludes_json, exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, webhooks_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    plan.id, plan.name, plan.repo_id, paths_json, tags_json, excludes_json,
-                    exclude_if_present_json, plan.exclude_caches,
-                    retention_json, plan.limit_upload, plan.limit_download, webhooks_json,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+            insert_backup_plan(&tx, plan, false)?;
         }
 
         for s in schedules {
@@ -3270,6 +3261,9 @@ mod tests {
             limit_upload: None,
             limit_download: None,
             webhooks: vec![],
+            pack_size: Some(64),
+            exclude_cloud_files: true,
+            use_fs_snapshot: true,
         };
         db.save_backup_plan(&plan).unwrap();
 
@@ -3280,12 +3274,32 @@ mod tests {
             vec![".nobackup".to_string(), "CACHEDIR.TAG".to_string()]
         );
         assert!(plans[0].exclude_caches);
+        assert_eq!(plans[0].pack_size, Some(64));
+        assert!(plans[0].exclude_cloud_files);
+        assert!(plans[0].use_fs_snapshot);
 
-        // get_plans_for_ids shares the same read path — confirm it agrees.
+        // get_plans_for_ids shares the same read path — confirm it agrees. This is the
+        // scheduler's / Run Now's read path, so it must carry the new fields too.
         let by_id = db.get_plans_for_ids(&["plan1".to_string()]).unwrap();
         assert_eq!(by_id.len(), 1);
         assert_eq!(by_id[0].exclude_if_present, plans[0].exclude_if_present);
         assert!(by_id[0].exclude_caches);
+        assert_eq!(by_id[0].pack_size, Some(64));
+        assert!(by_id[0].exclude_cloud_files);
+        assert!(by_id[0].use_fs_snapshot);
+
+        // Re-saving with the options cleared must overwrite them (INSERT OR REPLACE).
+        let cleared = BackupPlan {
+            pack_size: None,
+            exclude_cloud_files: false,
+            use_fs_snapshot: false,
+            ..plan
+        };
+        db.save_backup_plan(&cleared).unwrap();
+        let after = db.list_backup_plans().unwrap();
+        assert_eq!(after[0].pack_size, None);
+        assert!(!after[0].exclude_cloud_files);
+        assert!(!after[0].use_fs_snapshot);
     }
 
     #[test]
@@ -3303,6 +3317,9 @@ mod tests {
             retention: None,
             limit_upload: None,
             limit_download: None,
+            pack_size: None,
+            exclude_cloud_files: false,
+            use_fs_snapshot: false,
             webhooks: vec![
                 PlanWebhook {
                     id: "w1".to_string(),
@@ -3386,11 +3403,14 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert!(plans[0].exclude_if_present.is_empty());
         assert!(!plans[0].exclude_caches);
+        assert_eq!(plans[0].pack_size, None);
+        assert!(!plans[0].exclude_cloud_files);
+        assert!(!plans[0].use_fs_snapshot);
     }
 
     #[test]
     fn import_bundle_writes_exclude_if_present_and_exclude_caches() {
-        // Exercises the actual INSERT statement import_bundle runs (VALUES ?1..?11) —
+        // Exercises the actual INSERT statement import_bundle runs (VALUES ?1..?15) —
         // a placeholder/column mismatch here would only ever surface on a real import.
         let db = test_db();
         let repo = ImportRepo {
@@ -3416,6 +3436,9 @@ mod tests {
             limit_upload: None,
             limit_download: None,
             webhooks: vec![],
+            pack_size: Some(32),
+            exclude_cloud_files: true,
+            use_fs_snapshot: true,
         };
         db.import_bundle(&[repo], &[plan], &[]).unwrap();
 
@@ -3423,6 +3446,10 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].exclude_if_present, vec![".nobackup".to_string()]);
         assert!(plans[0].exclude_caches);
+        // The transactional import INSERT is a separate call site from save_backup_plan.
+        assert_eq!(plans[0].pack_size, Some(32));
+        assert!(plans[0].exclude_cloud_files);
+        assert!(plans[0].use_fs_snapshot);
     }
 
     #[test]
@@ -5459,6 +5486,10 @@ mod tests {
         assert_eq!(plans[0].name, "Daily");
         assert!(plans[0].exclude_if_present.is_empty());
         assert!(!plans[0].exclude_caches);
+        // The pack-size / Windows-flag columns were also added by ALTER TABLE here.
+        assert_eq!(plans[0].pack_size, None);
+        assert!(!plans[0].exclude_cloud_files);
+        assert!(!plans[0].use_fs_snapshot);
     }
 
     /// Covers the Quick-wins browse-cache rewrite: insert two snapshots that

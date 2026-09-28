@@ -214,18 +214,23 @@ export const tagSnapshot = (
 ): Promise<void> =>
   invoke("tag_snapshot", { repoId, snapshotId, addTags, removeTags });
 
-export const runBackup = (
-  repoId: string,
-  paths: string[],
-  tags: string[],
-  excludes: string[],
-  excludeIfPresent: string[],
-  excludeCaches: boolean,
-  planId?: string,
-  limitUpload?: number,
-  limitDownload?: number,
-): Promise<string> =>
-  invoke("run_backup", { repoId, paths, tags, excludes, excludeIfPresent, excludeCaches, planId: planId ?? null, limitUpload: limitUpload ?? null, limitDownload: limitDownload ?? null });
+export const runBackup = (plan: BackupPlan): Promise<string> =>
+  invoke("run_backup", {
+    repoId: plan.repoId,
+    planId: plan.id,
+    paths: plan.paths,
+    tags: plan.tags,
+    options: {
+      excludes: plan.excludes,
+      excludeIfPresent: plan.excludeIfPresent,
+      excludeCaches: plan.excludeCaches,
+      limitUpload: plan.limitUpload ?? null,
+      limitDownload: plan.limitDownload ?? null,
+      packSize: plan.packSize ?? null,
+      excludeCloudFiles: plan.excludeCloudFiles,
+      useFsSnapshot: plan.useFsSnapshot,
+    },
+  });
 
 export const unlockRepo = (repoId: string): Promise<void> =>
   invoke("unlock_repo", { repoId });

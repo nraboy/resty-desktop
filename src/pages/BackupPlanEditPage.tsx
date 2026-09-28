@@ -13,7 +13,8 @@ import {
 } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import type { BackupPlan, PlanWebhook, Repository, WebhookPreview, WebhookProvider } from "../lib/types";
-import { needsFullDiskAccess } from "../lib/utils";
+import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "../lib/config";
+import { isWindows, needsFullDiskAccess, parsePackSize } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -135,6 +136,13 @@ export default function BackupPlanEditPage() {
   const [keepYearly, setKeepYearly] = useState("");
   const [limitUpload, setLimitUpload] = useState("");
   const [limitDownload, setLimitDownload] = useState("");
+  const [packSize, setPackSize] = useState("");
+  // Windows-only options. Always loaded and saved — even where their checkboxes are hidden
+  // (macOS/Linux) — so editing a plan imported from a Windows export never silently clears
+  // them; they're only *applied* by the backend on Windows.
+  const [excludeCloudFiles, setExcludeCloudFiles] = useState(false);
+  const [useFsSnapshot, setUseFsSnapshot] = useState(false);
+  const onWindows = isWindows();
   const [webhooks, setWebhooks] = useState<PlanWebhook[]>([]);
   // Add/Edit Webhook modal — all webhook configuration happens there; the card
   // itself is a read-only list (URL, provider, trigger summary, edit/delete).
@@ -188,6 +196,9 @@ export default function BackupPlanEditPage() {
             setKeepYearly(plan.retention?.keepYearly?.toString() ?? "");
             setLimitUpload(plan.limitUpload?.toString() ?? "");
             setLimitDownload(plan.limitDownload?.toString() ?? "");
+            setPackSize(plan.packSize?.toString() ?? "");
+            setExcludeCloudFiles(plan.excludeCloudFiles ?? false);
+            setUseFsSnapshot(plan.useFsSnapshot ?? false);
             setWebhooks(plan.webhooks ?? []);
           } else {
             setError("Backup plan not found.");
@@ -426,6 +437,9 @@ export default function BackupPlanEditPage() {
       return;
     }
 
+    const parsedPackSize = parsePackSize(packSize);
+    if ("error" in parsedPackSize) { setError(parsedPackSize.error); return; }
+
     setSaving(true);
     setError("");
     try {
@@ -464,6 +478,9 @@ export default function BackupPlanEditPage() {
         limitUpload: toNum(limitUpload),
         limitDownload: toNum(limitDownload),
         webhooks,
+        packSize: parsedPackSize.value,
+        excludeCloudFiles,
+        useFsSnapshot,
       };
       await saveBackupPlan(plan);
       navigate("/backup-plans");
@@ -909,6 +926,75 @@ export default function BackupPlanEditPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Advanced restic options */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Advanced (optional)</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Extra <code className="text-gray-400">restic backup</code> options for this plan.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <label htmlFor="pack-size" className="text-xs text-gray-400 w-28 flex-shrink-0">Pack size</label>
+          <input
+            id="pack-size"
+            type="number"
+            min={MIN_PACK_SIZE_MIB}
+            max={MAX_PACK_SIZE_MIB}
+            step="1"
+            value={packSize}
+            onChange={(e) => setPackSize(e.target.value)}
+            placeholder="16"
+            className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+          />
+          <span className="text-xs text-gray-500">MiB</span>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          Size of the data files restic writes ({MIN_PACK_SIZE_MIB}–{MAX_PACK_SIZE_MIB}). Larger packs (e.g. 64) mean
+          fewer objects on cloud storage. Leave blank for restic&apos;s default (16 MiB). Applies to
+          backups from this plan only — prune and mirror use restic&apos;s default.
+        </p>
+
+        {onWindows && (
+          <div className="mt-3 pt-3 border-t border-gray-800 space-y-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={excludeCloudFiles}
+                onChange={(e) => setExcludeCloudFiles(e.target.checked)}
+                className="rounded bg-gray-700 border-gray-600"
+              />
+              <span className="text-sm text-gray-300">
+                Skip cloud-only placeholder files, e.g. OneDrive (<code className="text-gray-400">--exclude-cloud-files</code>)
+              </span>
+            </label>
+            <div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useFsSnapshot}
+                  onChange={(e) => setUseFsSnapshot(e.target.checked)}
+                  className="rounded bg-gray-700 border-gray-600"
+                />
+                <span className="text-sm text-gray-300">
+                  Use a Volume Shadow Copy (VSS) snapshot (<code className="text-gray-400">--use-fs-snapshot</code>)
+                </span>
+              </label>
+              <p className="text-xs text-amber-400 mt-1 ml-6">
+                Requires running Resty Desktop as Administrator. Without it, restic can&apos;t create the snapshot.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {!onWindows && (excludeCloudFiles || useFsSnapshot) && (
+          <p className="text-xs text-gray-500 mt-3 pt-3 border-t border-gray-800">
+            This plan has Windows-only options enabled (
+            {[excludeCloudFiles && "skip cloud-only files", useFsSnapshot && "VSS snapshot"].filter(Boolean).join(", ")}
+            ). They&apos;re kept but ignored when backing up on this computer.
+          </p>
+        )}
       </div>
 
       {/* Webhooks */}

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
-use super::cache::{AppDb, BackupHandle, CopyHandle, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
+use super::cache::{AppDb, BackupHandle, BackupPlan, CopyHandle, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
 use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
@@ -427,6 +427,117 @@ pub(crate) fn build_exclude_args(
     args
 }
 
+/// `restic backup --pack-size` bounds, in MiB. restic fails the whole backup outside this
+/// range ("pack size larger than limit of 128 MiB" / "smaller than minimum of 4 MiB"), so
+/// anything outside it is refused here instead of surfacing as a failed backup later. Mirrored by `MIN_PACK_SIZE_MIB`/`MAX_PACK_SIZE_MIB` in
+/// `src/lib/config.ts`.
+pub const MIN_PACK_SIZE_MIB: u32 = 4;
+pub const MAX_PACK_SIZE_MIB: u32 = 128;
+
+/// Validates a plan's pack size. `None`/`Some(0)` mean "restic's default" (same "0 = unset"
+/// convention as the `limit_*` fields); `4..=128` is kept; anything else is an error.
+pub(crate) fn normalize_pack_size(v: Option<u32>) -> Result<Option<u32>, String> {
+    match v {
+        None | Some(0) => Ok(None),
+        Some(n) if (MIN_PACK_SIZE_MIB..=MAX_PACK_SIZE_MIB).contains(&n) => Ok(Some(n)),
+        Some(_) => Err(format!(
+            "Pack size must be between {MIN_PACK_SIZE_MIB} and {MAX_PACK_SIZE_MIB} MiB"
+        )),
+    }
+}
+
+/// Every per-plan knob `execute_backup` turns into `restic backup` flags, grouped so the
+/// three callers (manual run, scheduler tick, schedule Run Now) can't transpose adjacent
+/// positional bools. Plan callers build it with `BackupOptions::from(&plan)` — the one
+/// plan→options mapping.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupOptions {
+    #[serde(default)]
+    pub excludes: Vec<String>,
+    #[serde(default)]
+    pub exclude_if_present: Vec<String>,
+    #[serde(default)]
+    pub exclude_caches: bool,
+    #[serde(default)]
+    pub limit_upload: Option<u32>,
+    #[serde(default)]
+    pub limit_download: Option<u32>,
+    #[serde(default)]
+    pub pack_size: Option<u32>,
+    /// Windows-only; ignored (not passed to restic) on every other OS.
+    #[serde(default)]
+    pub exclude_cloud_files: bool,
+    /// Windows-only; ignored (not passed to restic) on every other OS.
+    #[serde(default)]
+    pub use_fs_snapshot: bool,
+}
+
+impl From<&BackupPlan> for BackupOptions {
+    // Deliberately a full struct literal with no `..Default::default()`: a field added to
+    // `BackupOptions` becomes a compile error here instead of silently defaulting.
+    fn from(plan: &BackupPlan) -> Self {
+        BackupOptions {
+            excludes: plan.excludes.clone(),
+            exclude_if_present: plan.exclude_if_present.clone(),
+            exclude_caches: plan.exclude_caches,
+            limit_upload: plan.limit_upload,
+            limit_download: plan.limit_download,
+            pack_size: plan.pack_size,
+            exclude_cloud_files: plan.exclude_cloud_files,
+            use_fs_snapshot: plan.use_fs_snapshot,
+        }
+    }
+}
+
+/// Builds the full `restic backup` argument list (everything after the binary name).
+///
+/// `--exclude-cloud-files` / `--use-fs-snapshot` are emitted only on Windows: restic
+/// doesn't accept them elsewhere, and a plan imported from a Windows export must still run
+/// on macOS/Linux. `--pack-size` is re-checked against the valid range here as defense in
+/// depth for a hand-edited DB row. Paths always come last.
+pub(crate) fn build_backup_args(
+    tags: &[String],
+    paths: &[String],
+    opts: &BackupOptions,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
+    for tag in tags {
+        args.push("--tag".to_string());
+        args.push(tag.clone());
+    }
+    args.extend(build_exclude_args(
+        &opts.excludes,
+        &opts.exclude_if_present,
+        opts.exclude_caches,
+    ));
+    if let Some(kib) = opts.limit_upload.filter(|&v| v > 0) {
+        args.push("--limit-upload".to_string());
+        args.push(kib.to_string());
+    }
+    if let Some(kib) = opts.limit_download.filter(|&v| v > 0) {
+        args.push("--limit-download".to_string());
+        args.push(kib.to_string());
+    }
+    if let Some(mib) = opts
+        .pack_size
+        .filter(|v| (MIN_PACK_SIZE_MIB..=MAX_PACK_SIZE_MIB).contains(v))
+    {
+        args.push("--pack-size".to_string());
+        args.push(mib.to_string());
+    }
+    if cfg!(target_os = "windows") {
+        if opts.exclude_cloud_files {
+            args.push("--exclude-cloud-files".to_string());
+        }
+        if opts.use_fs_snapshot {
+            args.push("--use-fs-snapshot".to_string());
+        }
+    }
+    args.extend(paths.iter().cloned());
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_backup(
     app: &tauri::AppHandle,
@@ -438,11 +549,7 @@ pub async fn execute_backup(
     plan_id: Option<&str>,
     paths: Vec<String>,
     tags: Vec<String>,
-    excludes: Vec<String>,
-    exclude_if_present: Vec<String>,
-    exclude_caches: bool,
-    limit_upload: Option<u32>,
-    limit_download: Option<u32>,
+    opts: BackupOptions,
     origin: TaskOrigin,
 ) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -546,23 +653,7 @@ pub async fn execute_backup(
         started_at: Some(started_at),
     });
 
-    let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
-    for tag in &tags {
-        args.push("--tag".to_string());
-        args.push(tag.clone());
-    }
-    args.extend(build_exclude_args(&excludes, &exclude_if_present, exclude_caches));
-    if let Some(kib) = limit_upload.filter(|&v| v > 0) {
-        args.push("--limit-upload".to_string());
-        args.push(kib.to_string());
-    }
-    if let Some(kib) = limit_download.filter(|&v| v > 0) {
-        args.push("--limit-download".to_string());
-        args.push(kib.to_string());
-    }
-    for path in &paths {
-        args.push(path.clone());
-    }
+    let args = build_backup_args(&tags, &paths, &opts);
 
     // Touch each path so macOS TCC prompts appear upfront, attributed to
     // "Resty Desktop", before restic is spawned. Child processes inherit the
@@ -840,13 +931,9 @@ pub async fn run_backup(
     plan_id: Option<String>,
     paths: Vec<String>,
     tags: Vec<String>,
-    excludes: Vec<String>,
-    exclude_if_present: Vec<String>,
-    exclude_caches: bool,
-    limit_upload: Option<u32>,
-    limit_download: Option<u32>,
+    options: BackupOptions,
 ) -> Result<String, String> {
-    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, excludes, exclude_if_present, exclude_caches, limit_upload, limit_download, TaskOrigin::Manual).await
+    execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, options, TaskOrigin::Manual).await
 }
 
 #[tauri::command]
@@ -1592,8 +1679,163 @@ pub async fn forget_by_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_exclude_args, build_retention_args, parse_diff_output, validate_snapshot_id};
-    use crate::commands::cache::RetentionPolicy;
+    use super::{
+        build_backup_args, build_exclude_args, build_retention_args, normalize_pack_size,
+        parse_diff_output, validate_snapshot_id, BackupOptions,
+    };
+    use crate::commands::cache::{BackupPlan, RetentionPolicy};
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn backup_args_match_legacy_output_when_new_options_unset() {
+        // Guards the build_backup_args refactor: this is byte-for-byte what the old inline
+        // code in execute_backup produced (tags → excludes/markers/caches → limits → paths).
+        let opts = BackupOptions {
+            excludes: strs(&["*.log"]),
+            exclude_if_present: strs(&[".nobackup"]),
+            exclude_caches: true,
+            limit_upload: Some(100),
+            limit_download: Some(200),
+            ..Default::default()
+        };
+        let args = build_backup_args(&strs(&["t1", "t2"]), &strs(&["/a", "/b"]), &opts);
+        assert_eq!(
+            args,
+            strs(&[
+                "backup", "--json",
+                "--tag", "t1", "--tag", "t2",
+                "--exclude", "*.log",
+                "--exclude-if-present", ".nobackup",
+                "--exclude-caches",
+                "--limit-upload", "100",
+                "--limit-download", "200",
+                "/a", "/b",
+            ])
+        );
+    }
+
+    #[test]
+    fn backup_args_zero_limits_are_omitted() {
+        let opts = BackupOptions { limit_upload: Some(0), limit_download: Some(0), ..Default::default() };
+        assert_eq!(build_backup_args(&[], &strs(&["/a"]), &opts), strs(&["backup", "--json", "/a"]));
+    }
+
+    #[test]
+    fn pack_size_emitted_only_in_range() {
+        for v in [None, Some(0), Some(3), Some(129), Some(u32::MAX)] {
+            let opts = BackupOptions { pack_size: v, ..Default::default() };
+            let args = build_backup_args(&[], &strs(&["/a"]), &opts);
+            assert!(!args.iter().any(|a| a == "--pack-size"), "{v:?} must not emit --pack-size");
+        }
+        for v in [4u32, 64, 128] {
+            let opts = BackupOptions { pack_size: Some(v), ..Default::default() };
+            let args = build_backup_args(&[], &strs(&["/a"]), &opts);
+            let i = args.iter().position(|a| a == "--pack-size").expect("flag present");
+            assert_eq!(args[i + 1], v.to_string());
+        }
+    }
+
+    #[test]
+    fn backup_args_paths_are_always_last() {
+        let opts = BackupOptions {
+            excludes: strs(&["x"]),
+            exclude_caches: true,
+            limit_upload: Some(1),
+            pack_size: Some(64),
+            exclude_cloud_files: true,
+            use_fs_snapshot: true,
+            ..Default::default()
+        };
+        let args = build_backup_args(&strs(&["t"]), &strs(&["/a", "/b"]), &opts);
+        assert_eq!(&args[args.len() - 2..], &strs(&["/a", "/b"])[..]);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn windows_flags_never_emitted_off_windows() {
+        // A plan imported from a Windows export must still run on macOS/Linux, where
+        // restic doesn't accept these flags.
+        let opts = BackupOptions { exclude_cloud_files: true, use_fs_snapshot: true, ..Default::default() };
+        let args = build_backup_args(&[], &strs(&["/a"]), &opts);
+        assert!(!args.iter().any(|a| a == "--exclude-cloud-files" || a == "--use-fs-snapshot"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_flags_emitted_on_windows() {
+        let only_cloud = BackupOptions { exclude_cloud_files: true, ..Default::default() };
+        let args = build_backup_args(&[], &strs(&["C:\\a"]), &only_cloud);
+        assert!(args.iter().any(|a| a == "--exclude-cloud-files"));
+        assert!(!args.iter().any(|a| a == "--use-fs-snapshot"));
+
+        let only_vss = BackupOptions { use_fs_snapshot: true, ..Default::default() };
+        let args = build_backup_args(&[], &strs(&["C:\\a"]), &only_vss);
+        assert!(args.iter().any(|a| a == "--use-fs-snapshot"));
+        assert!(!args.iter().any(|a| a == "--exclude-cloud-files"));
+
+        let both = BackupOptions { exclude_cloud_files: true, use_fs_snapshot: true, ..Default::default() };
+        let args = build_backup_args(&[], &strs(&["C:\\a"]), &both);
+        assert!(args.iter().any(|a| a == "--exclude-cloud-files"));
+        assert!(args.iter().any(|a| a == "--use-fs-snapshot"));
+    }
+
+    #[test]
+    fn backup_options_from_plan_copies_every_field() {
+        let plan = BackupPlan {
+            id: "p".into(),
+            name: "n".into(),
+            repo_id: "r".into(),
+            paths: vec![],
+            tags: vec![],
+            excludes: strs(&["e"]),
+            exclude_if_present: strs(&["m"]),
+            exclude_caches: true,
+            retention: None,
+            limit_upload: Some(11),
+            limit_download: Some(22),
+            webhooks: vec![],
+            pack_size: Some(33),
+            exclude_cloud_files: true,
+            use_fs_snapshot: true,
+        };
+        let o = BackupOptions::from(&plan);
+        assert_eq!(o.excludes, strs(&["e"]));
+        assert_eq!(o.exclude_if_present, strs(&["m"]));
+        assert!(o.exclude_caches);
+        assert_eq!(o.limit_upload, Some(11));
+        assert_eq!(o.limit_download, Some(22));
+        assert_eq!(o.pack_size, Some(33));
+        assert!(o.exclude_cloud_files);
+        assert!(o.use_fs_snapshot);
+    }
+
+    #[test]
+    fn backup_options_deserializes_missing_keys_to_defaults() {
+        let o: BackupOptions = serde_json::from_str("{}").unwrap();
+        assert!(o.excludes.is_empty() && !o.exclude_caches);
+        assert_eq!(o.pack_size, None);
+        assert!(!o.exclude_cloud_files && !o.use_fs_snapshot);
+
+        // Explicit nulls (what the frontend sends for unset optionals) also work.
+        let o: BackupOptions =
+            serde_json::from_str(r#"{"limitUpload":null,"packSize":null}"#).unwrap();
+        assert_eq!(o.limit_upload, None);
+        assert_eq!(o.pack_size, None);
+    }
+
+    #[test]
+    fn normalize_pack_size_bounds() {
+        assert_eq!(normalize_pack_size(None), Ok(None));
+        assert_eq!(normalize_pack_size(Some(0)), Ok(None));
+        assert!(normalize_pack_size(Some(3)).is_err());
+        assert_eq!(normalize_pack_size(Some(4)), Ok(Some(4)));
+        assert_eq!(normalize_pack_size(Some(128)), Ok(Some(128)));
+        assert!(normalize_pack_size(Some(129)).is_err());
+        assert!(normalize_pack_size(Some(u32::MAX)).is_err());
+    }
 
     #[test]
     fn exclude_args_emits_repeated_exclude_if_present() {

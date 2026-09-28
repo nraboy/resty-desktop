@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager};
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
-use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure, log_schedule_failure};
+use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure, log_schedule_failure, BackupOptions};
 use crate::tasks::TaskOrigin;
 
 // Seconds to sleep until the next wall-clock minute boundary (:00).
@@ -123,11 +123,7 @@ async fn tick(app: &tauri::AppHandle) {
                 Some(plan.id.as_str()),
                 plan.paths.clone(),
                 plan.tags.clone(),
-                plan.excludes,
-                plan.exclude_if_present,
-                plan.exclude_caches,
-                plan.limit_upload,
-                plan.limit_download,
+                BackupOptions::from(&plan),
                 TaskOrigin::Scheduler,
             )
             .await
