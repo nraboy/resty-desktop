@@ -12,6 +12,11 @@ use crate::tasks::{emit_cancelling, new_operation_id, new_task_slot, OperationCt
 /// error (see the frontend's matching CANCELLED_BACKUP_ERROR in lib/types.ts).
 pub(crate) const CANCELLED_BACKUP_ERROR: &str = "Cancelled";
 
+/// Prefix of the `backup_history.error` value `log_retention_failure` writes. Shared with
+/// `AppDb::list_plan_last_runs`, which must skip these rows — they carry the plan's id but
+/// aren't backup attempts, and would otherwise shadow the backup that preceded them.
+pub(crate) const RETENTION_FAILED_PREFIX: &str = "Retention failed:";
+
 /// Sentinel error string returned by `mirror_repo` when the exact same `(src, dest)` repo
 /// pair already has a queued or running mirror — matches the frontend's
 /// `MIRROR_ALREADY_ACTIVE_ERROR` (lib/types.ts) exactly, same pattern as
@@ -1601,7 +1606,7 @@ pub(crate) fn log_retention_failure(
         0,
         0,
         0,
-        Some(&format!("Retention failed: {error}")),
+        Some(&format!("{RETENTION_FAILED_PREFIX} {error}")),
     );
     // Same event Recent Logs already listens for on every backup outcome — see
     // execute_backup's log_backup call sites above.

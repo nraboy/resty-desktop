@@ -116,6 +116,13 @@ export interface BackupHistoryEntry {
   error?: string;
 }
 
+/** Newest backup attempt for one plan (manual or scheduled) — see list_plan_last_runs. */
+export interface PlanLastRun {
+  planId: string;
+  startedAt: number;
+  error?: string;
+}
+
 /** Sentinel `error` value for a genuinely cancelled backup — see snapshot.rs's
  *  execute_backup Err branch, the only writer of this field. Distinguishes a
  *  cancellation from a real failure so Recent Logs / LogsPage can render it

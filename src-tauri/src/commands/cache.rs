@@ -10,7 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::browse::FileEntry;
 use super::crypto;
 use super::repo::ResticStats;
-use super::snapshot::Snapshot;
+use super::snapshot::{Snapshot, RETENTION_FAILED_PREFIX};
 use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress, TaskSlot};
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
@@ -49,6 +49,15 @@ pub struct BackupHistoryEntry {
     pub files_new: u64,
     pub files_changed: u64,
     pub bytes_added: u64,
+    pub error: Option<String>,
+}
+
+/// The most recent backup attempt for one plan — see `AppDb::list_plan_last_runs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanLastRun {
+    pub plan_id: String,
+    pub started_at: i64,
     pub error: Option<String>,
 }
 
@@ -2354,6 +2363,41 @@ impl AppDb {
         Ok(rows)
     }
 
+    /// Newest backup attempt per existing plan (manual or scheduled, success/failure/cancel).
+    /// Retention-failure rows are filtered out *before* ranking: they carry the plan's id and a
+    /// later `started_at`, so they'd otherwise mask the backup they followed. The join on
+    /// `backup_plans` drops rows for deleted plans and NULL-`plan_id` rows (schedule failures).
+    /// `rowid` breaks same-second ties by insertion order.
+    pub fn list_plan_last_runs(&self) -> Result<Vec<PlanLastRun>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT plan_id, started_at, error FROM (
+                     SELECT h.plan_id, h.started_at, h.error,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY h.plan_id
+                                ORDER BY h.started_at DESC, h.rowid DESC
+                            ) AS rn
+                     FROM backup_history h
+                     JOIN backup_plans p ON p.id = h.plan_id
+                     WHERE h.error IS NULL OR substr(h.error, 1, length(?1)) <> ?1
+                 ) WHERE rn = 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![RETENTION_FAILED_PREFIX], |row| {
+                Ok(PlanLastRun {
+                    plan_id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    error: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
     // ── backup history (insert) ───────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
@@ -3215,6 +3259,11 @@ pub async fn compress_database(app: tauri::AppHandle) -> Result<u64, String> {
 #[tauri::command]
 pub fn list_backup_history(db: tauri::State<'_, AppDb>) -> Result<Vec<BackupHistoryEntry>, String> {
     db.list_backup_history()
+}
+
+#[tauri::command]
+pub fn list_plan_last_runs(db: tauri::State<'_, AppDb>) -> Result<Vec<PlanLastRun>, String> {
+    db.list_plan_last_runs()
 }
 
 #[cfg(test)]
@@ -4392,6 +4441,93 @@ mod tests {
         let history = db.list_backup_history().unwrap();
         assert_eq!(history[0].id, "late");
         assert_eq!(history[1].id, "early");
+    }
+
+    // ── list_plan_last_runs ──────────────────────────────────────────────────
+
+    fn seed_plan(db: &AppDb, id: &str) {
+        db.save_backup_plan(&BackupPlan {
+            id: id.to_string(),
+            name: id.to_string(),
+            repo_id: "repo1".to_string(),
+            paths: vec!["/home".to_string()],
+            tags: vec![],
+            excludes: vec![],
+            exclude_if_present: vec![],
+            exclude_caches: false,
+            retention: None,
+            limit_upload: None,
+            limit_download: None,
+            webhooks: vec![],
+            pack_size: None,
+            exclude_cloud_files: false,
+            use_fs_snapshot: false,
+        })
+        .unwrap();
+    }
+
+    fn log_plan_run(db: &AppDb, id: &str, plan_id: Option<&str>, started_at: i64, error: Option<&str>) {
+        db.log_backup(id, "repo1", plan_id, None, started_at, 1.0, 0, 0, 0, error).unwrap();
+    }
+
+    #[test]
+    fn plan_last_run_picks_newest_attempt_including_failures() {
+        let db = test_db();
+        seed_plan(&db, "a");
+        log_plan_run(&db, "h1", Some("a"), 100, None);
+        log_plan_run(&db, "h2", Some("a"), 200, Some("repository is locked"));
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].plan_id, "a");
+        assert_eq!(runs[0].started_at, 200);
+        assert_eq!(runs[0].error.as_deref(), Some("repository is locked"));
+    }
+
+    #[test]
+    fn plan_last_run_ignores_retention_failure_rows() {
+        let db = test_db();
+        seed_plan(&db, "b");
+        log_plan_run(&db, "h1", Some("b"), 100, None);
+        let retention_err = format!("{RETENTION_FAILED_PREFIX} boom");
+        log_plan_run(&db, "h2", Some("b"), 101, Some(retention_err.as_str()));
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].started_at, 100);
+        assert_eq!(runs[0].error, None);
+    }
+
+    #[test]
+    fn plan_last_run_reports_cancellation() {
+        let db = test_db();
+        seed_plan(&db, "c");
+        log_plan_run(&db, "h1", Some("c"), 100, Some(super::super::snapshot::CANCELLED_BACKUP_ERROR));
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].error.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn plan_last_run_skips_null_plan_and_deleted_plans() {
+        let db = test_db();
+        seed_plan(&db, "live");
+        seed_plan(&db, "no-history");
+        log_plan_run(&db, "h1", None, 100, Some("Schedule 'x' could not be advanced: y"));
+        log_plan_run(&db, "h2", Some("deleted"), 100, None);
+        log_plan_run(&db, "h3", Some("live"), 100, None);
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].plan_id, "live");
+    }
+
+    #[test]
+    fn plan_last_run_breaks_same_second_ties_by_insertion_order() {
+        let db = test_db();
+        seed_plan(&db, "t");
+        log_plan_run(&db, "zzz-first", Some("t"), 100, Some("first failed"));
+        log_plan_run(&db, "aaa-second", Some("t"), 100, None);
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].error, None);
     }
 
     // ── clear_cache / clean_cache ────────────────────────────────────────────

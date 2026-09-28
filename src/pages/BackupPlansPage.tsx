@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
+import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listPlanLastRuns, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { BackupPlan, BackupProgress, Repository } from "../lib/types";
-import { formatDuration } from "../lib/format";
+import type { BackupPlan, BackupProgress, PlanLastRun, Repository } from "../lib/types";
+import { CANCELLED_BACKUP_ERROR } from "../lib/types";
+import { formatDuration, formatRelative, formatTimestamp } from "../lib/format";
+import { useActivity } from "../lib/activity";
 import { isWindows, needsFullDiskAccess } from "../lib/utils";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
@@ -20,6 +22,13 @@ export default function BackupPlansPage() {
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // null until the first successful fetch, so a row never claims "Never" while the answer is
+  // still in flight (or if it failed) — the line is simply omitted in that case.
+  const [lastRuns, setLastRuns] = useState<Record<string, PlanLastRun> | null>(null);
+  // Subscribing to clockTick (bumps every 60s) re-renders the page so the relative
+  // "Last run" labels stay fresh without a refetch.
+  const { clockTick } = useActivity();
+  void clockTick;
 
   const [deleteTarget, setDeleteTarget] = useState<BackupPlan | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -73,6 +82,27 @@ export default function BackupPlansPage() {
   useEffect(() => {
     load();
     checkFullDiskAccess().then(setFdaStatus).catch(() => {});
+  }, []);
+
+  // Fetched apart from load() so a failure here can never blank the plan list or raise the
+  // page-level error banner — it's a cosmetic line. Refreshed on every history write (manual
+  // modal run, scheduler tick, Run Now, cancel), so it stays live while the page is open.
+  useEffect(() => {
+    let seq = 0;
+    const refresh = () => {
+      const mine = ++seq;
+      listPlanLastRuns()
+        .then((rows) => {
+          if (mine !== seq) return; // out-of-order response
+          setLastRuns(Object.fromEntries(rows.map((r) => [r.planId, r])));
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const unlisten = listen("backup:history-updated", refresh);
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   const repoName = (repoId: string) =>
@@ -404,6 +434,24 @@ export default function BackupPlansPage() {
                       Retention: {parts.join(" · ")}
                     </p>
                   ) : null;
+                })()}
+                {(() => {
+                  if (!lastRuns) return null;
+                  const run = lastRuns[plan.id];
+                  if (!run) return <p className="text-xs text-gray-500 mt-0.5 truncate">Last run: Never</p>;
+                  return (
+                    <p
+                      className="text-xs text-gray-500 mt-0.5 truncate"
+                      title={formatTimestamp(run.startedAt)}
+                    >
+                      Last run: {formatRelative(run.startedAt)}
+                      {run.error === CANCELLED_BACKUP_ERROR
+                        ? " · Cancelled"
+                        : run.error
+                          ? <> · <span className="text-red-400">Failed</span></>
+                          : null}
+                    </p>
+                  );
                 })()}
               </div>
               {!selectMode && (

@@ -71,7 +71,7 @@ src/
     SearchPage.tsx        # Full-text file search within one snapshot; index state machine — see docs/frontend.md
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
-    BackupPlansPage.tsx   # List/run/delete plans; backup modal with progress; auto-applies retention — see docs/frontend.md
+    BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
     BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete/run; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
