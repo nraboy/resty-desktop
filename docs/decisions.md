@@ -607,28 +607,23 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   way to clear it short of re-enabling the tray first. The call's result is discarded (`let _ =`)
   deliberately: wiping user data is the part of a reset that must not fail, and
   `set_launch_at_login` is already idempotent for exactly this kind of best-effort call.
-- **Known issue, deliberately not investigated further yet: on Linux, the window's title-bar
-  buttons (minimize/maximize/close) can go unresponsive after the window is shown again from a
-  hidden state — restoring from the tray, or a second launch refocusing the existing window via
-  `tauri_plugin_single_instance`.** Observed by the developer on Ubuntu 26.04 and Fedora 44
-  (both GNOME) while manually testing the Linux auto-unlock work (see the Auto-unlock entries
-  above); no user reports of it so far. The window's own content stays responsive — only the
-  WM-drawn decorations freeze. Both known trigger paths call the same `show_window()` in
-  `lib.rs` (`w.show()` + `w.set_focus()`) after the window was previously hidden via the
-  close-to-tray `WindowEvent::CloseRequested` handler's `win.hide()`, or, on the single-instance
-  path, on a launch where the window may not have been mapped yet. Ruled out as causes: this app
-  sets no `decorations`/`titleBarStyle` override in `tauri.conf.json` (native/WM-drawn title bar),
-  and `gpu_compat.rs` only touches WebKit rendering env vars for an unrelated NVIDIA+Wayland
-  crash — nothing here does custom window-chrome handling. This matches a known class of
-  upstream `tao`/GTK behavior where a window unmapped via `gtk_widget_hide` and remapped via
-  `gtk_widget_show` comes back with its content responsive but its WM-drawn decorations not
-  properly re-registered for input; fits both affected distros being GNOME and neither macOS nor
-  Windows showing it. **Left as documented-but-unfixed on purpose** — not worth chasing an
-  upstream `tao`/GTK quirk with no user impact reported yet. If this is picked up later: start
-  from `show_window()` and its two call sites in `lib.rs` (the tray's `on_menu_event` and the
-  `tauri_plugin_single_instance::init` callback), and check first whether it still reproduces and
-  whether upstream `tao`/`tauri` has since addressed it, rather than assuming this codebase is
-  the cause.
+- **Linux/Wayland: title-bar buttons (minimize/maximize/close) froze after the window was shown
+  again from hidden — root-caused to `tao` 0.35.x and fixed by upgrading to tauri 2.12 (tao
+  0.37.1); not this codebase.** Symptom: every tray restore (and intermittently at other times,
+  plus the single-instance refocus path) left the buttons dead until a maximize/resize, while
+  window content stayed responsive. Cause, read from the locked `tao 0.35.3` source: on Wayland
+  it built its own title bar (`platform_impl/linux/wayland/header.rs`), a `GtkHeaderBar` wrapped
+  in a `GtkEventBox` with `set_above_child(true)` — an invisible input layer stacked over the
+  buttons that swallows their clicks. `win.hide()` in the close-to-tray handler followed by
+  `show_all()` (via `show_window()` in `lib.rs`) reliably leaves it on top; any reallocation
+  (maximize, resize) re-stacks it, which is why those "healed" it. macOS, Windows and X11 never
+  build that header. tao 0.36 removed the custom Wayland title bar (changelog: "Title bar buttons
+  and changing of the title should now work as expected"), and tauri 2.12 depends on tao ≥ 0.37.
+  **Don't pin tauri/tao below that, and don't add an app-side workaround** (e.g. toggling
+  `set_resizable` in `show_window()`) unless it's shown to still reproduce on Wayland after the
+  upgrade — that toggle is the known community workaround for 0.35 and is the fallback if it
+  does. Verified only by build/tests on macOS at the time of the upgrade; the Wayland behavior
+  itself needed a manual check on Ubuntu (GNOME).
 - **The tray icon is created in `setup()` (locked variant) whenever `tray_enabled` is on, not
   lazily after unlock.** Previously `activate_tray` was only ever called from `App.tsx` once
   `authState === "unlocked"`, so a locked app had no tray icon and closing the unlock-screen window
