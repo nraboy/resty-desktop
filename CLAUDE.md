@@ -326,7 +326,9 @@ proposing a change — several are pinned by a named test or reference a confirm
   files, so a tag is the only handle retention has, and requiring it from the first save means adding
   retention later still covers the plan's whole history. `apply_retention`'s `check_retention_scope`
   additionally refuses a `forget` with no tags *and* no paths (it would prune the whole repo) — the
-  backstop for imports, which skip the save-time check on purpose. A hidden auto-tag (plan-name or
+  backstop for imports, which skip the save-time check on purpose. Whitespace-only tags never count
+  as tags and never reach restic (`non_blank_tags`, used by the backup/retention arg builders, the
+  scope check and `validate_plan_sources`): restic's `--tag ""` matches *untagged* snapshots. A hidden auto-tag (plan-name or
   plan-id based) was considered and rejected: it would show on every such snapshot in the UI and CLI,
   and names aren't unique — don't add one without re-reading docs/restic.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)

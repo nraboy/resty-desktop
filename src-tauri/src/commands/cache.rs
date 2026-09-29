@@ -5686,6 +5686,9 @@ mod tests {
         assert_eq!(plans[0].pack_size, None);
         assert!(!plans[0].exclude_cloud_files);
         assert!(!plans[0].use_fs_snapshot);
+        // …and the list-file columns (NULL on migrated rows → empty Vec).
+        assert!(plans[0].files_from.is_empty());
+        assert!(plans[0].exclude_files.is_empty());
     }
 
     /// Covers the Quick-wins browse-cache rewrite: insert two snapshots that

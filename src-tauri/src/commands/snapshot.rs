@@ -543,9 +543,9 @@ pub(crate) fn build_backup_args(
     opts: &BackupOptions,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["backup".to_string(), "--json".to_string()];
-    for tag in tags {
+    for tag in non_blank_tags(tags) {
         args.push("--tag".to_string());
-        args.push(tag.clone());
+        args.push(tag);
     }
     args.extend(build_exclude_args(
         &opts.excludes,
@@ -1493,16 +1493,24 @@ pub async fn unlock_repo(
 /// the repo — not just this plan's. Possible once a plan can source everything from
 /// `--files-from` with no explicit paths.
 pub(crate) fn check_retention_scope(tags: &[String], paths: &[String]) -> Result<(), String> {
-    if tags.is_empty() && paths.is_empty() {
-        return Err("Retention skipped: this plan has no tags or source paths to identify its \
-                    snapshots, so it would apply to every snapshot in the repository. Add a tag \
-                    to the plan."
+    if non_blank_tags(tags).is_empty() && paths.is_empty() {
+        return Err("This plan has no tags or source paths to identify its snapshots, so \
+                    retention would apply to every snapshot in the repository. Add a tag to \
+                    the plan."
             .to_string());
     }
     Ok(())
 }
 
+/// Tags with whitespace-only entries dropped (non-blank tags kept verbatim, not trimmed, so
+/// backup and forget always agree on the exact tag string). A blank tag must never reach
+/// restic: `--tag ""` matches *untagged* snapshots.
+pub(crate) fn non_blank_tags(tags: &[String]) -> Vec<String> {
+    tags.iter().filter(|t| !t.trim().is_empty()).cloned().collect()
+}
+
 fn build_retention_args(tags: &[String], paths: &[String], retention: &RetentionPolicy) -> Vec<String> {
+    let tags = non_blank_tags(tags);
     let mut args: Vec<String> =
         vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
 
@@ -1746,8 +1754,8 @@ pub async fn forget_by_plan(
 mod tests {
     use super::{
         build_backup_args, build_exclude_args, build_list_file_args, build_retention_args,
-        check_retention_scope, normalize_pack_size, parse_diff_output, validate_snapshot_id,
-        BackupOptions,
+        check_retention_scope, non_blank_tags, normalize_pack_size, parse_diff_output,
+        validate_snapshot_id, BackupOptions,
     };
     use crate::commands::cache::{BackupPlan, ExcludeFile, RetentionPolicy};
 
@@ -1936,6 +1944,37 @@ mod tests {
         assert!(check_retention_scope(&[], &[]).is_err());
         assert!(check_retention_scope(&strs(&["t"]), &[]).is_ok());
         assert!(check_retention_scope(&[], &strs(&["/a"])).is_ok());
+        // Blank tags don't count as scope (restic's `--tag ""` matches untagged snapshots).
+        assert!(check_retention_scope(&strs(&[""]), &[]).is_err());
+        assert!(check_retention_scope(&strs(&["  ", ""]), &[]).is_err());
+        assert!(check_retention_scope(&strs(&[""]), &strs(&["/a"])).is_ok());
+    }
+
+    #[test]
+    fn non_blank_tags_keeps_non_blank_verbatim() {
+        assert_eq!(non_blank_tags(&strs(&[" foo", "", "bar "])), strs(&[" foo", "bar "]));
+    }
+
+    #[test]
+    fn backup_args_skip_blank_tags() {
+        let args = build_backup_args(&strs(&["t", "", "  "]), &strs(&["/a"]), &BackupOptions::default());
+        assert_eq!(args, strs(&["backup", "--json", "--tag", "t", "/a"]));
+    }
+
+    #[test]
+    fn retention_args_blank_tags_fall_back_to_paths() {
+        let args = build_retention_args(&strs(&["", "  "]), &strs(&["/a"]), &all_retention());
+        assert!(!args.contains(&"--tag".to_string()));
+        assert!(!args.contains(&"--group-by".to_string()));
+        let i = args.iter().position(|a| a == "--path").expect("--path present");
+        assert_eq!(args[i + 1], "/a");
+    }
+
+    #[test]
+    fn retention_args_drops_blank_tags_among_real_ones() {
+        let args = build_retention_args(&strs(&["home", " ", "work"]), &[], &all_retention());
+        assert!(args.contains(&"home,work".to_string()));
+        assert!(!args.iter().any(|a| a.trim().is_empty()));
     }
 
     #[test]

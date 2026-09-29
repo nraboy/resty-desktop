@@ -346,8 +346,7 @@ export default function BackupPlanEditPage() {
         setExcludeText(excludeItems.join("\n"));
       } else if (excludeMode === "expert") {
         // Leaving expert: fold the textarea back into the list so `excludeItems` is the
-        // single source of truth whenever expert isn't active (simple → files → expert
-        // round-trips).
+        // single source of truth whenever expert isn't active.
         const parsed = excludeText
           .split("\n")
           .map((l) => l.trim())

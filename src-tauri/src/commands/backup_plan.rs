@@ -15,7 +15,7 @@ pub(crate) fn validate_plan_sources(plan: &BackupPlan) -> Result<(), String> {
     if plan.paths.is_empty() && !has_list {
         return Err("Add at least one source path or path-list file.".into());
     }
-    if has_list && plan.tags.iter().all(|t| t.trim().is_empty()) {
+    if has_list && super::snapshot::non_blank_tags(&plan.tags).is_empty() {
         return Err("A plan that uses path-list files needs at least one tag so its \
                     snapshots can be identified."
             .into());
