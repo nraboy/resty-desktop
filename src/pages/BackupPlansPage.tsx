@@ -5,9 +5,9 @@ import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listP
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import type { BackupPlan, BackupProgress, PlanLastRun, Repository } from "../lib/types";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
-import { formatDuration, formatRelative, formatTimestamp } from "../lib/format";
+import { formatDuration, formatPlanSources, formatRelative, formatTimestamp } from "../lib/format";
 import { useActivity } from "../lib/activity";
-import { isWindows, needsFullDiskAccess } from "../lib/utils";
+import { isWindows, needsFullDiskAccess, planReadPaths } from "../lib/utils";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
@@ -214,7 +214,7 @@ export default function BackupPlansPage() {
     if (
       fdaStatus?.supported &&
       !fdaStatus.granted &&
-      plan.paths.some(needsFullDiskAccess)
+      planReadPaths(plan).some(needsFullDiskAccess)
     ) {
       setFdaWarningPlan(plan);
       return;
@@ -410,12 +410,14 @@ export default function BackupPlansPage() {
                 <p className="text-sm font-medium text-gray-100 truncate">{plan.name}</p>
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {repoName(plan.repoId)} &middot;{" "}
-                  {plan.paths.length} {plan.paths.length === 1 ? "path" : "paths"}
+                  {formatPlanSources(plan)}
                   {(() => {
                     const excCount = plan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length;
                     const markerCount = plan.excludeIfPresent.filter(e => e.trim() && !e.trim().startsWith('#')).length + (plan.excludeCaches ? 1 : 0);
+                    const excFileCount = plan.excludeFiles.length;
                     const parts: string[] = [];
                     if (excCount > 0) parts.push(`${excCount} ${excCount === 1 ? "exclusion" : "exclusions"}`);
+                    if (excFileCount > 0) parts.push(`${excFileCount} ${excFileCount === 1 ? "exclude file" : "exclude files"}`);
                     if (markerCount > 0) parts.push(`${markerCount} ${markerCount === 1 ? "marker file" : "marker files"}`);
                     return parts.length > 0 ? ` · ${parts.join(", ")}` : null;
                   })()}
@@ -695,8 +697,8 @@ export default function BackupPlansPage() {
                 <span className="text-gray-200">{repoName(backupPlan.repoId)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500">Paths</span>
-                <span className="text-gray-200">{backupPlan.paths.length} {backupPlan.paths.length === 1 ? "path" : "paths"}</span>
+                <span className="text-gray-500">Sources</span>
+                <span className="text-gray-200">{formatPlanSources(backupPlan)}</span>
               </div>
               {backupPlan.excludes.filter(e => e.trim() && !e.trim().startsWith('#')).length > 0 && (
                 <div className="flex justify-between">

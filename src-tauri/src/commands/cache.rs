@@ -179,6 +179,22 @@ pub struct BackupPlan {
     /// `--use-fs-snapshot` (VSS). Windows-only, same storage/emission split as above.
     #[serde(default)]
     pub use_fs_snapshot: bool,
+    /// `--files-from` text files (one path/glob per line, `#` comments), read by restic
+    /// at backup time. Combined with `paths`; a plan needs at least one of the two.
+    #[serde(default)]
+    pub files_from: Vec<String>,
+    /// `--exclude-file` / `--iexclude-file` pattern files.
+    #[serde(default)]
+    pub exclude_files: Vec<ExcludeFile>,
+}
+
+/// One `--exclude-file` / `--iexclude-file` entry. `ignore_case` picks the `i` variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcludeFile {
+    pub path: String,
+    #[serde(default)]
+    pub ignore_case: bool,
 }
 
 /// Single source of truth for the `backup_plans` column order — every plan SELECT uses
@@ -186,7 +202,8 @@ pub struct BackupPlan {
 /// exactly three places (here, the row mapper, `insert_backup_plan`).
 const BACKUP_PLAN_COLUMNS: &str = "id, name, repo_id, paths_json, tags_json, excludes_json, \
      exclude_if_present_json, exclude_caches, retention_json, limit_upload, limit_download, \
-     webhooks_json, pack_size, exclude_cloud_files, use_fs_snapshot";
+     webhooks_json, pack_size, exclude_cloud_files, use_fs_snapshot, \
+     files_from_json, exclude_files_json";
 
 /// Raw column values for one `backup_plans` row, before JSON decoding.
 struct BackupPlanRow {
@@ -205,6 +222,8 @@ struct BackupPlanRow {
     pack_size: Option<u32>,
     exclude_cloud_files: bool,
     use_fs_snapshot: bool,
+    files_from_json: Option<String>,
+    exclude_files_json: Option<String>,
 }
 
 fn read_backup_plan_row(row: &rusqlite::Row) -> rusqlite::Result<BackupPlanRow> {
@@ -224,6 +243,8 @@ fn read_backup_plan_row(row: &rusqlite::Row) -> rusqlite::Result<BackupPlanRow> 
         pack_size: row.get(12)?,
         exclude_cloud_files: row.get(13)?,
         use_fs_snapshot: row.get(14)?,
+        files_from_json: row.get(15)?,
+        exclude_files_json: row.get(16)?,
     })
 }
 
@@ -251,6 +272,8 @@ impl BackupPlanRow {
             pack_size: self.pack_size,
             exclude_cloud_files: self.exclude_cloud_files,
             use_fs_snapshot: self.use_fs_snapshot,
+            files_from: opt_json(self.files_from_json.as_deref())?.unwrap_or_default(),
+            exclude_files: opt_json(self.exclude_files_json.as_deref())?.unwrap_or_default(),
         })
     }
 }
@@ -268,6 +291,9 @@ fn insert_backup_plan(
     let exclude_if_present_json =
         serde_json::to_string(&plan.exclude_if_present).map_err(|e| e.to_string())?;
     let webhooks_json = serde_json::to_string(&plan.webhooks).map_err(|e| e.to_string())?;
+    let files_from_json = serde_json::to_string(&plan.files_from).map_err(|e| e.to_string())?;
+    let exclude_files_json =
+        serde_json::to_string(&plan.exclude_files).map_err(|e| e.to_string())?;
     let retention_json = plan
         .retention
         .as_ref()
@@ -278,7 +304,7 @@ fn insert_backup_plan(
     conn.execute(
         &format!(
             "{verb} INTO backup_plans ({BACKUP_PLAN_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
         ),
         params![
             plan.id,
@@ -296,6 +322,8 @@ fn insert_backup_plan(
             plan.pack_size,
             plan.exclude_cloud_files,
             plan.use_fs_snapshot,
+            files_from_json,
+            exclude_files_json,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -817,7 +845,9 @@ impl AppDb {
                 webhooks_json   TEXT,
                 pack_size       INTEGER,
                 exclude_cloud_files INTEGER NOT NULL DEFAULT 0,
-                use_fs_snapshot INTEGER NOT NULL DEFAULT 0
+                use_fs_snapshot INTEGER NOT NULL DEFAULT 0,
+                files_from_json    TEXT,
+                exclude_files_json TEXT
             );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
@@ -916,6 +946,10 @@ impl AppDb {
         let _ = conn.execute_batch(
             "ALTER TABLE backup_plans ADD COLUMN use_fs_snapshot INTEGER NOT NULL DEFAULT 0;",
         );
+        // Additive, nullable — `--files-from` list files and `--(i)exclude-file` pattern
+        // files as JSON arrays. NULL on pre-existing rows reads back as an empty Vec.
+        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN files_from_json TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN exclude_files_json TEXT;");
         let _ = conn.execute_batch(
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
         );
@@ -3313,6 +3347,11 @@ mod tests {
             pack_size: Some(64),
             exclude_cloud_files: true,
             use_fs_snapshot: true,
+            files_from: vec!["/lists/a.txt".to_string(), "/lists/b.txt".to_string()],
+            exclude_files: vec![
+                ExcludeFile { path: "/ex/one.txt".to_string(), ignore_case: false },
+                ExcludeFile { path: "/ex/two.txt".to_string(), ignore_case: true },
+            ],
         };
         db.save_backup_plan(&plan).unwrap();
 
@@ -3326,6 +3365,8 @@ mod tests {
         assert_eq!(plans[0].pack_size, Some(64));
         assert!(plans[0].exclude_cloud_files);
         assert!(plans[0].use_fs_snapshot);
+        assert_eq!(plans[0].files_from, plan.files_from);
+        assert_eq!(plans[0].exclude_files, plan.exclude_files);
 
         // get_plans_for_ids shares the same read path — confirm it agrees. This is the
         // scheduler's / Run Now's read path, so it must carry the new fields too.
@@ -3336,12 +3377,16 @@ mod tests {
         assert_eq!(by_id[0].pack_size, Some(64));
         assert!(by_id[0].exclude_cloud_files);
         assert!(by_id[0].use_fs_snapshot);
+        assert_eq!(by_id[0].files_from, plan.files_from);
+        assert_eq!(by_id[0].exclude_files, plan.exclude_files);
 
         // Re-saving with the options cleared must overwrite them (INSERT OR REPLACE).
         let cleared = BackupPlan {
             pack_size: None,
             exclude_cloud_files: false,
             use_fs_snapshot: false,
+            files_from: vec![],
+            exclude_files: vec![],
             ..plan
         };
         db.save_backup_plan(&cleared).unwrap();
@@ -3349,6 +3394,8 @@ mod tests {
         assert_eq!(after[0].pack_size, None);
         assert!(!after[0].exclude_cloud_files);
         assert!(!after[0].use_fs_snapshot);
+        assert!(after[0].files_from.is_empty());
+        assert!(after[0].exclude_files.is_empty());
     }
 
     #[test]
@@ -3369,6 +3416,8 @@ mod tests {
             pack_size: None,
             exclude_cloud_files: false,
             use_fs_snapshot: false,
+            files_from: vec![],
+            exclude_files: vec![],
             webhooks: vec![
                 PlanWebhook {
                     id: "w1".to_string(),
@@ -3455,11 +3504,13 @@ mod tests {
         assert_eq!(plans[0].pack_size, None);
         assert!(!plans[0].exclude_cloud_files);
         assert!(!plans[0].use_fs_snapshot);
+        assert!(plans[0].files_from.is_empty());
+        assert!(plans[0].exclude_files.is_empty());
     }
 
     #[test]
     fn import_bundle_writes_exclude_if_present_and_exclude_caches() {
-        // Exercises the actual INSERT statement import_bundle runs (VALUES ?1..?15) —
+        // Exercises the actual INSERT statement import_bundle runs (VALUES ?1..?17) —
         // a placeholder/column mismatch here would only ever surface on a real import.
         let db = test_db();
         let repo = ImportRepo {
@@ -3488,12 +3539,19 @@ mod tests {
             pack_size: Some(32),
             exclude_cloud_files: true,
             use_fs_snapshot: true,
+            files_from: vec!["/lists/a.txt".to_string()],
+            exclude_files: vec![ExcludeFile { path: "/ex.txt".to_string(), ignore_case: true }],
         };
         db.import_bundle(&[repo], &[plan], &[]).unwrap();
 
         let plans = db.list_backup_plans().unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].exclude_if_present, vec![".nobackup".to_string()]);
+        assert_eq!(plans[0].files_from, vec!["/lists/a.txt".to_string()]);
+        assert_eq!(
+            plans[0].exclude_files,
+            vec![ExcludeFile { path: "/ex.txt".to_string(), ignore_case: true }]
+        );
         assert!(plans[0].exclude_caches);
         // The transactional import INSERT is a separate call site from save_backup_plan.
         assert_eq!(plans[0].pack_size, Some(32));
@@ -4462,6 +4520,8 @@ mod tests {
             pack_size: None,
             exclude_cloud_files: false,
             use_fs_snapshot: false,
+            files_from: vec![],
+            exclude_files: vec![],
         })
         .unwrap();
     }

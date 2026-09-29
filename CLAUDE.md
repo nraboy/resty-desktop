@@ -72,7 +72,7 @@ src/
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
-    BackupPlanEditPage.tsx # Create/edit plan: paths, tags, excludes, retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
+    BackupPlanEditPage.tsx # Create/edit plan: sources (Paths | List files tabs, `--files-from`), tags, excludes (Simple | Expert) + exclude pattern files (`--(i)exclude-file`), retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete/run; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
@@ -92,7 +92,7 @@ src-tauri/
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
       snapshot.rs           # List/delete/tag snapshots; execute_backup; copy/mirror; retention — see docs/restic.md and docs/concurrency.md
       browse.rs             # File listing, restore, indexing (single + batch) — see docs/concurrency.md and docs/decisions.md
-      backup_plan.rs        # List/save/remove backup plans
+      backup_plan.rs        # List/save/remove backup plans; `validate_plan_sources` (paths-or-list-files, list-file plans need a tag) — see docs/restic.md
       schedule.rs           # List/save/remove/toggle schedules; run_schedule_now
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
       webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
@@ -317,6 +317,18 @@ proposing a change — several are pinned by a named test or reference a confirm
   though restic 0.19 accepts the former on macOS — gated on what the 0.17 minimum supports, since
   distro restic lags (Ubuntu ships 0.18.x) and an unknown flag fails the whole backup; see
   docs/decisions.md before widening it
+- Plans can source from `--files-from` list files and exclude via `--exclude-file`/`--iexclude-file`
+  files (no version/platform gate — all predate restic 0.17). **Sources are either/or in the
+  editor only** (Paths | List files tabs; only the active tab is saved) while **excludes are
+  deliberately combinable** (patterns + exclude files apply together); the backend and imports stay
+  permissive, so an imported plan holding both still runs. A list-file plan **must have a tag**,
+  retention or not (editor error + `validate_plan_sources`): its snapshots' paths live in the list
+  files, so a tag is the only handle retention has, and requiring it from the first save means adding
+  retention later still covers the plan's whole history. `apply_retention`'s `check_retention_scope`
+  additionally refuses a `forget` with no tags *and* no paths (it would prune the whole repo) — the
+  backstop for imports, which skip the save-time check on purpose. A hidden auto-tag (plan-name or
+  plan-id based) was considered and rejected: it would show on every such snapshot in the UI and CLI,
+  and names aren't unique — don't add one without re-reading docs/restic.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - Auto-unlock is offered on Linux too (D-Bus Secret Service), but explicitly best-effort — it
@@ -436,7 +448,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash

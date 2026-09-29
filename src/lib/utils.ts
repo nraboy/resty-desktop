@@ -1,4 +1,5 @@
 import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "./config";
+import type { BackupPlan } from "./types";
 
 export function needsFullDiskAccess(p: string): boolean {
   return (
@@ -7,6 +8,13 @@ export function needsFullDiskAccess(p: string): boolean {
     p === "/private" || p.startsWith("/private/") ||
     p === "/var" || p.startsWith("/var/")
   );
+}
+
+/** Every local file restic must read for this plan: source paths plus both list-file kinds. */
+export function planReadPaths(
+  plan: Pick<BackupPlan, "paths" | "filesFrom" | "excludeFiles">,
+): string[] {
+  return [...plan.paths, ...(plan.filesFrom ?? []), ...(plan.excludeFiles ?? []).map((f) => f.path)];
 }
 
 /** True for a Windows WebView2 user-agent (WKWebView reports "Macintosh", WebKitGTK "X11; Linux"). */

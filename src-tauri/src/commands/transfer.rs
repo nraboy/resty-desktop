@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use zeroize::Zeroize;
 
-use super::cache::{AppDb, BackupPlan, Credential, ImportRepo, MasterKey, PlanWebhook, RetentionPolicy, Schedule};
+use super::cache::{AppDb, BackupPlan, Credential, ExcludeFile, ImportRepo, MasterKey, PlanWebhook, RetentionPolicy, Schedule};
 use super::crypto;
 use super::schedule::next_fire_time;
 
@@ -109,6 +109,12 @@ struct ExportPlan {
     exclude_cloud_files: bool,
     #[serde(default)]
     use_fs_snapshot: bool,
+    /// `--files-from` / `--(i)exclude-file` paths — machine-local, exported verbatim like
+    /// `paths`. `#[serde(default)]` = older bundles import with none.
+    #[serde(default)]
+    files_from: Vec<String>,
+    #[serde(default)]
+    exclude_files: Vec<ExcludeFile>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -265,6 +271,8 @@ pub fn export_data(
             pack_size: p.pack_size,
             exclude_cloud_files: p.exclude_cloud_files,
             use_fs_snapshot: p.use_fs_snapshot,
+            files_from: p.files_from.clone(),
+            exclude_files: p.exclude_files.clone(),
         })
         .collect();
 
@@ -698,7 +706,7 @@ pub fn import_backrest_config(
     }
 
     // Plans: remap repo ref, fold case-insensitive excludes into excludes,
-    // map retention. Tags, bandwidth limits, pack size and the Windows-only flags have no
+    // map retention. Tags, bandwidth limits, pack size, list files and the Windows-only flags have no
     // Backrest source (its raw `flags` are dropped, not parsed).
     let mut plans: Vec<BackupPlan> = Vec::with_capacity(cfg.plans.len());
     let mut plan_id_map: HashMap<String, String> = HashMap::new();
@@ -725,6 +733,8 @@ pub fn import_backrest_config(
             pack_size: None,
             exclude_cloud_files: false,
             use_fs_snapshot: false,
+            files_from: Vec::new(),
+            exclude_files: Vec::new(),
         });
     }
 
@@ -784,6 +794,8 @@ fn backup_plan_from_export(p: &ExportPlan, id: String, name: String, repo_id: St
         pack_size: super::snapshot::normalize_pack_size(p.pack_size).unwrap_or(None),
         exclude_cloud_files: p.exclude_cloud_files,
         use_fs_snapshot: p.use_fs_snapshot,
+        files_from: p.files_from.clone(),
+        exclude_files: p.exclude_files.clone(),
     }
 }
 
@@ -811,12 +823,16 @@ mod tests {
             pack_size: Some(64),
             exclude_cloud_files: true,
             use_fs_snapshot: true,
+            files_from: vec!["/list.txt".to_string()],
+            exclude_files: vec![ExcludeFile { path: "/ex.txt".to_string(), ignore_case: true }],
         };
         let json = serde_json::to_string(&plan).unwrap();
         // The on-disk keys are part of the hand-editable bundle format.
         assert!(json.contains("\"packSize\":64"));
         assert!(json.contains("\"excludeCloudFiles\":true"));
         assert!(json.contains("\"useFsSnapshot\":true"));
+        assert!(json.contains("\"filesFrom\":[\"/list.txt\"]"));
+        assert!(json.contains("\"excludeFiles\":[{\"path\":\"/ex.txt\",\"ignoreCase\":true}]"));
         let back: ExportPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exclude_if_present, vec![".nobackup".to_string()]);
         assert!(back.exclude_caches);
@@ -830,6 +846,11 @@ mod tests {
         assert_eq!(imported.pack_size, Some(64));
         assert!(imported.exclude_cloud_files);
         assert!(imported.use_fs_snapshot);
+        assert_eq!(imported.files_from, vec!["/list.txt".to_string()]);
+        assert_eq!(
+            imported.exclude_files,
+            vec![ExcludeFile { path: "/ex.txt".to_string(), ignore_case: true }]
+        );
     }
 
     #[test]
@@ -868,6 +889,8 @@ mod tests {
         assert_eq!(plan.pack_size, None);
         assert!(!plan.exclude_cloud_files);
         assert!(!plan.use_fs_snapshot);
+        assert!(plan.files_from.is_empty());
+        assert!(plan.exclude_files.is_empty());
     }
 
     // ── ExportRepo additive credentials field ───────────────────────────────

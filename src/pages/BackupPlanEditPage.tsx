@@ -12,9 +12,9 @@ import {
   testWebhook,
 } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { BackupPlan, PlanWebhook, Repository, WebhookPreview, WebhookProvider } from "../lib/types";
+import type { BackupPlan, ExcludeFile, PlanWebhook, Repository, WebhookPreview, WebhookProvider } from "../lib/types";
 import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "../lib/config";
-import { isWindows, needsFullDiskAccess, parsePackSize } from "../lib/utils";
+import { isWindows, needsFullDiskAccess, parsePackSize, planReadPaths } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -22,6 +22,33 @@ import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
 
 type ExcludeMode = "simple" | "expert";
+type SourceMode = "paths" | "files";
+
+/** Bordered two/three-way tab switch shared by the Sources and Exclude cards. */
+function SegmentedToggle<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex rounded-lg overflow-hidden border border-gray-700">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          className={`px-3 py-1 text-xs font-medium transition-colors ${value === o.value ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Pre-filled body for a new custom-provider webhook — pinned by a Rust test
  *  (webhook.rs's DEFAULT_TEMPLATE) so the two can't drift apart. */
@@ -120,6 +147,9 @@ export default function BackupPlanEditPage() {
   const [name, setName] = useState("");
   const [repoId, setRepoId] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
+  const [sourceMode, setSourceMode] = useState<SourceMode>("paths");
+  const [filesFrom, setFilesFrom] = useState<string[]>([]);
+  const [excludeFiles, setExcludeFiles] = useState<ExcludeFile[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
   const [excludeMode, setExcludeMode] = useState<ExcludeMode>("simple");
@@ -184,6 +214,12 @@ export default function BackupPlanEditPage() {
               setError("The repository linked to this plan no longer exists. Please select a new one.");
             }
             setPaths(plan.paths);
+            setFilesFrom(plan.filesFrom ?? []);
+            setExcludeFiles(plan.excludeFiles ?? []);
+            // Sources are either/or in the editor: open on the list-file tab only when
+            // that's all the plan has. A plan holding both (only possible via import) opens
+            // on Paths. Excludes are combinable, so they have no such state.
+            if ((plan.filesFrom ?? []).length > 0 && plan.paths.length === 0) setSourceMode("files");
             setTags(plan.tags);
             setExcludeItems(plan.excludes);
             setExcludeText(plan.excludes.join("\n"));
@@ -231,6 +267,42 @@ export default function BackupPlanEditPage() {
 
   const removePath = useCallback((p: string) => setPaths((prev) => prev.filter((x) => x !== p)), []);
 
+  const pickFilesFrom = useCallback(async () => {
+    const selected = await open({ multiple: true });
+    if (!selected) return;
+    const arr = Array.isArray(selected) ? selected : [selected];
+    setFilesFrom((prev) => [...new Set([...prev, ...arr])]);
+  }, []);
+
+  const removeFilesFrom = useCallback(
+    (p: string) => setFilesFrom((prev) => prev.filter((x) => x !== p)),
+    [],
+  );
+
+  const pickExcludeFiles = useCallback(async () => {
+    const selected = await open({ multiple: true });
+    if (!selected) return;
+    const arr = Array.isArray(selected) ? selected : [selected];
+    setExcludeFiles((prev) => {
+      const known = new Set(prev.map((f) => f.path));
+      const added = arr.filter((p) => !known.has(p)).map((path) => ({ path, ignoreCase: false }));
+      return [...prev, ...added];
+    });
+  }, []);
+
+  const removeExcludeFile = useCallback(
+    (p: string) => setExcludeFiles((prev) => prev.filter((x) => x.path !== p)),
+    [],
+  );
+
+  const toggleExcludeFileCase = useCallback(
+    (p: string) =>
+      setExcludeFiles((prev) =>
+        prev.map((x) => (x.path === p ? { ...x, ignoreCase: !x.ignoreCase } : x)),
+      ),
+    [],
+  );
+
   const addTag = useCallback(() => {
     const t = tagInput.trim();
     if (t && !tags.includes(t)) {
@@ -272,7 +344,10 @@ export default function BackupPlanEditPage() {
       if (mode === excludeMode) return;
       if (mode === "expert") {
         setExcludeText(excludeItems.join("\n"));
-      } else {
+      } else if (excludeMode === "expert") {
+        // Leaving expert: fold the textarea back into the list so `excludeItems` is the
+        // single source of truth whenever expert isn't active (simple → files → expert
+        // round-trips).
         const parsed = excludeText
           .split("\n")
           .map((l) => l.trim())
@@ -425,10 +500,34 @@ export default function BackupPlanEditPage() {
       });
   }, [webhookModalOpen, draftProvider, previewTemplate]);
 
+  const hasRetention = [keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly].some(
+    (s) => s.trim() !== "",
+  );
+
+  // Sources are either/or: only the active tab's entries are saved and shown to the FDA check.
+  const activePaths = sourceMode === "paths" ? paths : [];
+  const activeFilesFrom = sourceMode === "files" ? filesFrom : [];
+
+  // A tag typed but not yet added still counts on save (state is left untouched, so a
+  // failed save leaves the form exactly as the user had it).
+  const pendingTag = tagInput.trim();
+  const effectiveTags = pendingTag && !tags.includes(pendingTag) ? [...tags, pendingTag] : tags;
+
   const handleSave = async () => {
     if (!name.trim()) { setError("Plan name is required."); return; }
     if (!repoId) { setError("Select a target repository."); return; }
-    if (paths.length === 0) { setError("Add at least one source path."); return; }
+    if (sourceMode === "paths" && paths.length === 0) {
+      setError("Add at least one source path.");
+      return;
+    }
+    if (sourceMode === "files" && filesFrom.length === 0) {
+      setError("Add at least one path-list file.");
+      return;
+    }
+    if (sourceMode === "files" && effectiveTags.length === 0) {
+      setError("Add at least one tag — a plan that uses path-list files needs one so its snapshots can be identified.");
+      return;
+    }
     // The modal enforces this for every row it creates; this guard only catches rows
     // that arrived from outside the UI (a hand-edited import bundle).
     const badUrl = webhooks.find((w) => !/^https?:\/\//.test(w.url.trim()));
@@ -448,8 +547,7 @@ export default function BackupPlanEditPage() {
         const n = parseInt(s, 10);
         return Number.isNaN(n) ? undefined : n;
       };
-      const retentionFields = [keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly];
-      const retention = retentionFields.some((s) => s.trim() !== "")
+      const retention = hasRetention
         ? {
             keepLast: toNum(keepLast),
             keepDaily: toNum(keepDaily),
@@ -469,8 +567,8 @@ export default function BackupPlanEditPage() {
         id: isNew ? crypto.randomUUID() : planId!,
         name: name.trim(),
         repoId,
-        paths,
-        tags,
+        paths: activePaths,
+        tags: effectiveTags,
         excludes,
         excludeIfPresent,
         excludeCaches,
@@ -481,6 +579,8 @@ export default function BackupPlanEditPage() {
         packSize: parsedPackSize.value,
         excludeCloudFiles,
         useFsSnapshot,
+        filesFrom: activeFilesFrom,
+        excludeFiles,
       };
       await saveBackupPlan(plan);
       navigate("/backup-plans");
@@ -588,40 +688,103 @@ export default function BackupPlanEditPage() {
         )}
       </div>
 
-      {/* Source paths */}
+      {/* Sources: source paths OR path-list files (--files-from) */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-gray-300">Source Paths</h2>
-          <div className="flex gap-2">
-            <Button variant="ghost" size="sm" onClick={pickFile}>+ Files</Button>
-            <Button variant="secondary" size="sm" onClick={pickFolder}>+ Folder</Button>
-          </div>
+          <h2 className="text-sm font-medium text-gray-300">Sources</h2>
+          <SegmentedToggle<SourceMode>
+            value={sourceMode}
+            onChange={setSourceMode}
+            options={[
+              { value: "paths", label: "Paths" },
+              { value: "files", label: "List files" },
+            ]}
+          />
         </div>
 
-        {paths.length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-4">
-            No paths selected. Add a file or folder to back up.
+        {paths.length > 0 && filesFrom.length > 0 && (
+          <p className="text-xs text-amber-400 mb-3">
+            Source paths and path-list files are both set. Only the active tab's entries are kept
+            when you save.
           </p>
-        ) : (
-          <ul className="space-y-1.5">
-            {paths.map((p) => (
-              <li
-                key={p}
-                className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
-              >
-                <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
-                <button
-                  onClick={() => removePath(p)}
-                  className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
         )}
 
-        {paths.some(needsFullDiskAccess) && (fdaStatus?.supported && !fdaStatus.granted) && (
+        {sourceMode === "paths" ? (
+          <>
+            <div className="flex justify-end gap-2 mb-3">
+              <Button variant="ghost" size="sm" onClick={pickFile}>+ Files</Button>
+              <Button variant="secondary" size="sm" onClick={pickFolder}>+ Folder</Button>
+            </div>
+
+            {paths.length === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-4">
+                No paths selected. Add a file or folder to back up.
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {paths.map((p) => (
+                  <li
+                    key={p}
+                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
+                  >
+                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                    <button
+                      onClick={() => removePath(p)}
+                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-gray-500 mb-3">
+              Text files listing what to back up, one path per line, passed to restic as{" "}
+              <code className="text-gray-400">--files-from</code>. Lines starting with{" "}
+              <code className="text-gray-400">#</code> are comments and glob patterns are
+              expanded. Use absolute paths inside the file. restic reads it at backup time, so
+              edits apply to the next run, and a missing file fails the backup.
+            </p>
+            <div className="flex justify-end mb-3">
+              <Button variant="secondary" size="sm" onClick={pickFilesFrom}>+ File</Button>
+            </div>
+
+            {filesFrom.length === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-4">
+                No path-list files. Add a text file listing the paths to back up.
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {filesFrom.map((p) => (
+                  <li
+                    key={p}
+                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
+                  >
+                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                    <button
+                      onClick={() => removeFilesFrom(p)}
+                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {effectiveTags.length === 0 && (
+              <p className="text-xs text-amber-400 mt-3">
+                Plans that use path-list files need at least one tag (below), since their
+                snapshots' paths come from the list files and can't be matched any other way.
+              </p>
+            )}
+          </>
+        )}
+
+        {planReadPaths({ paths: activePaths, filesFrom: activeFilesFrom, excludeFiles }).some(needsFullDiskAccess) && (fdaStatus?.supported && !fdaStatus.granted) && (
           <div className="mt-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg text-xs text-amber-300">
             <span className="font-medium">Full Disk Access may be required.</span>{" "}
             One or more paths (e.g. <code className="text-amber-300">~/Library</code>, system directories) are protected by macOS and cannot be read without Full Disk Access. Go to{" "}
@@ -678,22 +841,14 @@ export default function BackupPlanEditPage() {
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-gray-300">Exclude Patterns (optional)</h2>
-          <div className="flex rounded-lg overflow-hidden border border-gray-700">
-            <button
-              type="button"
-              onClick={() => switchExcludeMode("simple")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${excludeMode === "simple" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
-            >
-              Simple
-            </button>
-            <button
-              type="button"
-              onClick={() => switchExcludeMode("expert")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${excludeMode === "expert" ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
-            >
-              Expert
-            </button>
-          </div>
+          <SegmentedToggle<ExcludeMode>
+            value={excludeMode}
+            onChange={switchExcludeMode}
+            options={[
+              { value: "simple", label: "Simple" },
+              { value: "expert", label: "Expert" },
+            ]}
+          />
         </div>
 
         {excludeMode === "simple" ? (
@@ -783,6 +938,50 @@ export default function BackupPlanEditPage() {
             />
           </>
         )}
+
+        <div className="mt-4 pt-4 border-t border-gray-800">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-sm font-medium text-gray-300">Exclude Pattern Files</h3>
+            <Button variant="secondary" size="sm" onClick={pickExcludeFiles}>+ File</Button>
+          </div>
+          <p className="text-xs text-gray-500 mb-3">
+            Text files of exclude patterns, one per line, with the same syntax as Expert mode
+            (passed as <code className="text-gray-400">--exclude-file</code>). Applied together
+            with the patterns above. Tick <span className="text-gray-400">Ignore case</span> to
+            match regardless of capitalization (
+            <code className="text-gray-400">--iexclude-file</code>).
+          </p>
+
+          {excludeFiles.length === 0 ? (
+            <p className="text-sm text-gray-500 text-center py-3">No exclude pattern files.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {excludeFiles.map((f) => (
+                <li
+                  key={f.path}
+                  className="flex items-center justify-between gap-3 bg-gray-800 rounded-lg px-3 py-2"
+                >
+                  <span className="text-xs font-mono text-gray-300 truncate flex-1">{f.path}</span>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={f.ignoreCase}
+                      onChange={() => toggleExcludeFileCase(f.path)}
+                      className="rounded bg-gray-700 border-gray-600"
+                    />
+                    Ignore case
+                  </label>
+                  <button
+                    onClick={() => removeExcludeFile(f.path)}
+                    className="text-gray-500 hover:text-red-300 transition-colors flex-shrink-0"
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
 
       {/* Exclude if present */}

@@ -307,6 +307,16 @@ export interface BackupPlan {
   excludeCloudFiles: boolean;
   /** Windows-only (`--use-fs-snapshot`, VSS); stored on every OS, only passed to restic on Windows. */
   useFsSnapshot: boolean;
+  /** `--files-from` text files, combined with `paths`; a plan needs at least one of the two. */
+  filesFrom: string[];
+  /** `--exclude-file` / `--iexclude-file` pattern files. */
+  excludeFiles: ExcludeFile[];
+}
+
+/** One `--exclude-file` (or `--iexclude-file` when `ignoreCase`) entry. */
+export interface ExcludeFile {
+  path: string;
+  ignoreCase: boolean;
 }
 
 export interface Schedule {

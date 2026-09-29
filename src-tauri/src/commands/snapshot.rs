@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
-use super::cache::{AppDb, BackupHandle, BackupPlan, CopyHandle, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
+use super::cache::{AppDb, BackupHandle, BackupPlan, CopyHandle, ExcludeFile, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
 use super::repo::{run_restic_blocking, run_restic_with_path};
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
@@ -432,6 +432,32 @@ pub(crate) fn build_exclude_args(
     args
 }
 
+/// `--exclude-file` / `--iexclude-file` / `--files-from` args. Entries are trimmed and
+/// blanks skipped (a `#` prefix is *not* treated as a comment here — these are file
+/// paths, not patterns). All three flags are repeatable and predate restic 0.17, so
+/// unlike the Windows-only flags they need no platform/version gate.
+pub(crate) fn build_list_file_args(
+    files_from: &[String],
+    exclude_files: &[ExcludeFile],
+) -> Vec<String> {
+    let mut args = Vec::new();
+    for f in exclude_files {
+        let p = f.path.trim();
+        if !p.is_empty() {
+            args.push(if f.ignore_case { "--iexclude-file" } else { "--exclude-file" }.to_string());
+            args.push(p.to_string());
+        }
+    }
+    for p in files_from {
+        let p = p.trim();
+        if !p.is_empty() {
+            args.push("--files-from".to_string());
+            args.push(p.to_string());
+        }
+    }
+    args
+}
+
 /// `restic backup --pack-size` bounds, in MiB. restic fails the whole backup outside this
 /// range ("pack size larger than limit of 128 MiB" / "smaller than minimum of 4 MiB"), so
 /// anything outside it is refused here instead of surfacing as a failed backup later. Mirrored by `MIN_PACK_SIZE_MIB`/`MAX_PACK_SIZE_MIB` in
@@ -476,6 +502,12 @@ pub struct BackupOptions {
     /// Windows-only; ignored (not passed to restic) on every other OS.
     #[serde(default)]
     pub use_fs_snapshot: bool,
+    /// `--files-from` list files; combined with the plan's `paths`.
+    #[serde(default)]
+    pub files_from: Vec<String>,
+    /// `--exclude-file` / `--iexclude-file` pattern files.
+    #[serde(default)]
+    pub exclude_files: Vec<ExcludeFile>,
 }
 
 impl From<&BackupPlan> for BackupOptions {
@@ -491,6 +523,8 @@ impl From<&BackupPlan> for BackupOptions {
             pack_size: plan.pack_size,
             exclude_cloud_files: plan.exclude_cloud_files,
             use_fs_snapshot: plan.use_fs_snapshot,
+            files_from: plan.files_from.clone(),
+            exclude_files: plan.exclude_files.clone(),
         }
     }
 }
@@ -500,7 +534,9 @@ impl From<&BackupPlan> for BackupOptions {
 /// `--exclude-cloud-files` / `--use-fs-snapshot` are emitted only on Windows: restic
 /// doesn't accept them elsewhere, and a plan imported from a Windows export must still run
 /// on macOS/Linux. `--pack-size` is re-checked against the valid range here as defense in
-/// depth for a hand-edited DB row. Paths always come last.
+/// depth for a hand-edited DB row. Order: tags → excludes/markers/caches →
+/// exclude-files/files-from → limits → pack size → Windows flags → paths (always last; may
+/// be empty when `--files-from` supplies the sources).
 pub(crate) fn build_backup_args(
     tags: &[String],
     paths: &[String],
@@ -516,6 +552,7 @@ pub(crate) fn build_backup_args(
         &opts.exclude_if_present,
         opts.exclude_caches,
     ));
+    args.extend(build_list_file_args(&opts.files_from, &opts.exclude_files));
     if let Some(kib) = opts.limit_upload.filter(|&v| v > 0) {
         args.push("--limit-upload".to_string());
         args.push(kib.to_string());
@@ -663,9 +700,14 @@ pub async fn execute_backup(
     // Touch each path so macOS TCC prompts appear upfront, attributed to
     // "Resty Desktop", before restic is spawned. Child processes inherit the
     // grants so restic won't re-trigger them. Not needed on other platforms.
+    // List/exclude files are read by restic too, so touch them as well.
     #[cfg(target_os = "macos")]
-    for path in &paths {
-        let _ = std::fs::metadata(path);
+    for path in paths
+        .iter()
+        .chain(opts.files_from.iter())
+        .chain(opts.exclude_files.iter().map(|f| &f.path))
+    {
+        let _ = std::fs::metadata(path.trim());
     }
 
     let started = std::time::Instant::now();
@@ -1447,6 +1489,19 @@ pub async fn unlock_repo(
     Ok(())
 }
 
+/// A `forget` with neither `--tag` nor `--path` would group and prune every snapshot in
+/// the repo — not just this plan's. Possible once a plan can source everything from
+/// `--files-from` with no explicit paths.
+pub(crate) fn check_retention_scope(tags: &[String], paths: &[String]) -> Result<(), String> {
+    if tags.is_empty() && paths.is_empty() {
+        return Err("Retention skipped: this plan has no tags or source paths to identify its \
+                    snapshots, so it would apply to every snapshot in the repository. Add a tag \
+                    to the plan."
+            .to_string());
+    }
+    Ok(())
+}
+
 fn build_retention_args(tags: &[String], paths: &[String], retention: &RetentionPolicy) -> Vec<String> {
     let mut args: Vec<String> =
         vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
@@ -1519,6 +1574,11 @@ pub fn apply_retention(
         origin,
         None,
     );
+
+    if let Err(e) = check_retention_scope(tags, paths) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
 
     let key = match master_key.get() {
         Ok(k) => k,
@@ -1685,10 +1745,11 @@ pub async fn forget_by_plan(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_backup_args, build_exclude_args, build_retention_args, normalize_pack_size,
-        parse_diff_output, validate_snapshot_id, BackupOptions,
+        build_backup_args, build_exclude_args, build_list_file_args, build_retention_args,
+        check_retention_scope, normalize_pack_size, parse_diff_output, validate_snapshot_id,
+        BackupOptions,
     };
-    use crate::commands::cache::{BackupPlan, RetentionPolicy};
+    use crate::commands::cache::{BackupPlan, ExcludeFile, RetentionPolicy};
 
     fn strs(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1752,6 +1813,8 @@ mod tests {
             pack_size: Some(64),
             exclude_cloud_files: true,
             use_fs_snapshot: true,
+            files_from: strs(&["/list.txt"]),
+            exclude_files: vec![ExcludeFile { path: "/ex.txt".into(), ignore_case: true }],
             ..Default::default()
         };
         let args = build_backup_args(&strs(&["t"]), &strs(&["/a", "/b"]), &opts);
@@ -1805,6 +1868,8 @@ mod tests {
             pack_size: Some(33),
             exclude_cloud_files: true,
             use_fs_snapshot: true,
+            files_from: strs(&["/l"]),
+            exclude_files: vec![ExcludeFile { path: "/x".into(), ignore_case: true }],
         };
         let o = BackupOptions::from(&plan);
         assert_eq!(o.excludes, strs(&["e"]));
@@ -1815,6 +1880,8 @@ mod tests {
         assert_eq!(o.pack_size, Some(33));
         assert!(o.exclude_cloud_files);
         assert!(o.use_fs_snapshot);
+        assert_eq!(o.files_from, strs(&["/l"]));
+        assert_eq!(o.exclude_files, vec![ExcludeFile { path: "/x".into(), ignore_case: true }]);
     }
 
     #[test]
@@ -1823,12 +1890,52 @@ mod tests {
         assert!(o.excludes.is_empty() && !o.exclude_caches);
         assert_eq!(o.pack_size, None);
         assert!(!o.exclude_cloud_files && !o.use_fs_snapshot);
+        assert!(o.files_from.is_empty() && o.exclude_files.is_empty());
+
+        // An exclude file without `ignoreCase` is case-sensitive.
+        let o: BackupOptions =
+            serde_json::from_str(r#"{"excludeFiles":[{"path":"/x"}]}"#).unwrap();
+        assert_eq!(o.exclude_files.len(), 1);
+        assert!(!o.exclude_files[0].ignore_case);
 
         // Explicit nulls (what the frontend sends for unset optionals) also work.
         let o: BackupOptions =
             serde_json::from_str(r#"{"limitUpload":null,"packSize":null}"#).unwrap();
         assert_eq!(o.limit_upload, None);
         assert_eq!(o.pack_size, None);
+    }
+
+    #[test]
+    fn list_file_args_emit_in_order_and_skip_blanks() {
+        let exclude_files = vec![
+            ExcludeFile { path: "/a.txt".into(), ignore_case: false },
+            ExcludeFile { path: "  ".into(), ignore_case: true },
+            ExcludeFile { path: "/b.txt".into(), ignore_case: true },
+        ];
+        let args = build_list_file_args(&strs(&["/l1", "", " /l2 "]), &exclude_files);
+        assert_eq!(
+            args,
+            strs(&[
+                "--exclude-file", "/a.txt",
+                "--iexclude-file", "/b.txt",
+                "--files-from", "/l1",
+                "--files-from", "/l2",
+            ])
+        );
+    }
+
+    #[test]
+    fn backup_args_with_files_from_and_no_paths() {
+        let opts = BackupOptions { files_from: strs(&["/list.txt"]), ..Default::default() };
+        let args = build_backup_args(&[], &[], &opts);
+        assert_eq!(args, strs(&["backup", "--json", "--files-from", "/list.txt"]));
+    }
+
+    #[test]
+    fn retention_scope_refuses_unscoped() {
+        assert!(check_retention_scope(&[], &[]).is_err());
+        assert!(check_retention_scope(&strs(&["t"]), &[]).is_ok());
+        assert!(check_retention_scope(&[], &strs(&["/a"])).is_ok());
     }
 
     #[test]

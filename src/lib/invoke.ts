@@ -229,6 +229,8 @@ export const runBackup = (plan: BackupPlan): Promise<string> =>
       packSize: plan.packSize ?? null,
       excludeCloudFiles: plan.excludeCloudFiles,
       useFsSnapshot: plan.useFsSnapshot,
+      filesFrom: plan.filesFrom ?? [],
+      excludeFiles: plan.excludeFiles ?? [],
     },
   });
 

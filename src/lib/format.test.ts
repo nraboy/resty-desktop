@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList } from "./format";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList, formatPlanSources } from "./format";
 import type { ResticStats } from "./types";
 
 describe("formatBytes", () => {
@@ -248,5 +248,25 @@ describe("capList", () => {
 
   it("handles an empty list", () => {
     expect(capList([], 5)).toEqual({ shown: [], remaining: 0 });
+  });
+});
+
+describe("formatPlanSources", () => {
+  it("counts paths only", () => {
+    expect(formatPlanSources({ paths: ["/a", "/b"], filesFrom: [] })).toBe("2 paths");
+    expect(formatPlanSources({ paths: ["/a"], filesFrom: [] })).toBe("1 path");
+  });
+
+  it("counts list files only", () => {
+    expect(formatPlanSources({ paths: [], filesFrom: ["/l"] })).toBe("1 list file");
+    expect(formatPlanSources({ paths: [], filesFrom: ["/l", "/m"] })).toBe("2 list files");
+  });
+
+  it("joins paths and list files", () => {
+    expect(formatPlanSources({ paths: ["/a", "/b"], filesFrom: ["/l"] })).toBe("2 paths · 1 list file");
+  });
+
+  it("falls back to '0 paths' when there are no sources", () => {
+    expect(formatPlanSources({ paths: [], filesFrom: [] })).toBe("0 paths");
   });
 });

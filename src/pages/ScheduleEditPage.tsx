@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { describeCronExpr, listBackupPlans, listRepos, listSchedules, removeSchedule, saveSchedule } from "../lib/invoke";
 import { parseCronToSimple, buildCronExpr } from "../lib/cron";
+import { formatPlanSources } from "../lib/format";
 import type { BackupPlan, Repository, Schedule, ScheduleFrequency } from "../lib/types";
 import Button from "../components/Button";
 import Input from "../components/Input";
@@ -226,7 +227,7 @@ export default function ScheduleEditPage() {
                       )}
                     </div>
                     <p className="text-xs text-gray-500">
-                      {plan.paths.length} {plan.paths.length === 1 ? "path" : "paths"}
+                      {formatPlanSources(plan)}
                     </p>
                   </div>
                 </label>

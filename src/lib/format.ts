@@ -1,6 +1,6 @@
 // Shared display formatters used across pages.
 
-import type { ResticStats } from "./types";
+import type { BackupPlan, ResticStats } from "./types";
 
 /** Human-readable byte size (e.g. "1.5 MB"). */
 export function formatBytes(bytes: number): string {
@@ -132,4 +132,14 @@ export function isOverdue(ts?: number): boolean {
  */
 export function capList<T>(items: T[], limit: number): { shown: T[]; remaining: number } {
   return { shown: items.slice(0, limit), remaining: Math.max(0, items.length - limit) };
+}
+
+/** "3 paths", "2 paths · 1 list file", "1 list file" — the plan's backup sources. */
+export function formatPlanSources(plan: Pick<BackupPlan, "paths" | "filesFrom">): string {
+  const paths = plan.paths.length;
+  const lists = plan.filesFrom?.length ?? 0;
+  const parts: string[] = [];
+  if (paths > 0 || lists === 0) parts.push(`${paths} ${paths === 1 ? "path" : "paths"}`);
+  if (lists > 0) parts.push(`${lists} ${lists === 1 ? "list file" : "list files"}`);
+  return parts.join(" · ");
 }

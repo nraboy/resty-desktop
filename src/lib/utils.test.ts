@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isWindowsUserAgent, needsFullDiskAccess, parsePackSize } from "./utils";
+import { isWindowsUserAgent, needsFullDiskAccess, parsePackSize, planReadPaths } from "./utils";
 
 describe("needsFullDiskAccess", () => {
   describe("~/Library paths", () => {
@@ -127,5 +127,26 @@ describe("parsePackSize", () => {
     for (const bad of ["12.5", "-4", "1e2", "abc", "6 4"]) {
       expect(parsePackSize(bad)).toHaveProperty("error");
     }
+  });
+});
+
+describe("planReadPaths", () => {
+  it("includes source paths, path-list files and exclude-file paths", () => {
+    expect(
+      planReadPaths({
+        paths: ["/a"],
+        filesFrom: ["/l"],
+        excludeFiles: [{ path: "/x", ignoreCase: false }, { path: "/y", ignoreCase: true }],
+      }),
+    ).toEqual(["/a", "/l", "/x", "/y"]);
+  });
+
+  it("lets a protected list file trigger the Full Disk Access check", () => {
+    const plan = {
+      paths: ["/Users/alice/Documents"],
+      filesFrom: [],
+      excludeFiles: [{ path: "/Users/alice/Library/ex.txt", ignoreCase: false }],
+    };
+    expect(planReadPaths(plan).some(needsFullDiskAccess)).toBe(true);
   });
 });
