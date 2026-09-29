@@ -332,7 +332,7 @@ export default function BrowsePage() {
             </button>
           )}
           <div className="w-px h-4 bg-gray-700 flex-shrink-0" />
-          <label className="flex items-center gap-2 cursor-pointer select-none">
+          <label className="flex items-center gap-2 select-none">
             <input
               type="checkbox"
               checked={showHidden}
@@ -534,7 +534,7 @@ export default function BrowsePage() {
                 if (typeof dir === "string") setMultiTargetDir(dir);
               }}>Browse</Button>
             </div>
-            <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+            <label className="flex items-center gap-2 select-none mb-4 text-sm text-gray-400">
               <input
                 type="checkbox"
                 checked={multiStripLeadingPath}
@@ -575,7 +575,7 @@ export default function BrowsePage() {
           </div>
           <Button variant="secondary" onClick={handlePickTargetDir}>Browse</Button>
         </div>
-        <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+        <label className="flex items-center gap-2 select-none mb-4 text-sm text-gray-400">
           <input
             type="checkbox"
             checked={stripLeadingPath}

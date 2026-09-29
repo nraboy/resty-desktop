@@ -94,7 +94,7 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
       to={item.to}
       end={item.to === "/"}
       className={({ isActive }) =>
-        `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+        `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-default ${
           isActive
             ? "bg-blue-600/20 text-blue-400 font-medium"
             : "text-gray-400 hover:text-gray-200 hover:bg-gray-800"

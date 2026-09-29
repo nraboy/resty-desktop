@@ -87,7 +87,7 @@ export default function LogsPage() {
                     return (
                     <Fragment key={entry.id}>
                       <tr
-                        className={`transition-colors ${realError ? "cursor-pointer hover:bg-gray-900/50" : ""}`}
+                        className={`transition-colors ${realError ? "hover:bg-gray-900/50" : ""}`}
                         onClick={() => realError && setExpanded(expanded === entry.id ? null : entry.id)}
                       >
                         <td className="px-4 py-3">

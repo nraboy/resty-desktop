@@ -206,7 +206,7 @@ export default function ScheduleEditPage() {
               {plans.map((plan) => (
                 <label
                   key={plan.id}
-                  className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-800/50 transition-colors"
+                  className="flex items-center gap-3 px-4 py-3 hover:bg-gray-800/50 transition-colors"
                 >
                   <input
                     type="checkbox"

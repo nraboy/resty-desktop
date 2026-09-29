@@ -946,7 +946,7 @@ export default function RepositoriesPage() {
           {repos.map((repo) => (
             <div
               key={repo.id}
-              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors cursor-pointer"
+              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors"
               onClick={() => navigate(`/snapshots/${repo.id}`)}
               onContextMenu={(e) => {
                 e.preventDefault();

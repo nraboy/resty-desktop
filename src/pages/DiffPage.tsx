@@ -274,7 +274,7 @@ export default function DiffPage() {
           </div>
           <Button variant="secondary" onClick={handlePickTargetDir}>Browse</Button>
         </div>
-        <label className="flex items-center gap-2 cursor-pointer select-none mb-4 text-sm text-gray-400">
+        <label className="flex items-center gap-2 select-none mb-4 text-sm text-gray-400">
           <input
             type="checkbox"
             checked={stripLeadingPath}

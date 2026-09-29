@@ -354,7 +354,7 @@ export default function BackupPlansPage() {
 
       {selectMode && (
         <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm text-amber-300 flex items-center justify-between gap-2">
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="flex items-center gap-2">
             <input
               ref={selectAllCheckboxRef}
               type="checkbox"
@@ -406,10 +406,10 @@ export default function BackupPlansPage() {
                 />
               )}
               <div
-                className="flex-1 min-w-0 cursor-pointer"
+                className="group flex-1 min-w-0"
                 onClick={() => selectMode ? toggleSelectOne(plan.id) : navigate(`/backup-plans/${plan.id}`)}
               >
-                <p className="text-sm font-medium text-gray-100 truncate">{plan.name}</p>
+                <p className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate">{plan.name}</p>
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {repoName(plan.repoId)} &middot;{" "}
                   {formatPlanSources(plan)}

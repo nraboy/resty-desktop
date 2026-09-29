@@ -151,4 +151,12 @@
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-gray-500;
   }
+
+  /* Tailwind's preflight makes buttons show the web-style hand. Native desktop apps keep the
+     arrow over controls (hand is for hyperlinks), so restore it. Any explicit cursor utility
+     (cursor-help, disabled:cursor-not-allowed) still wins — utilities load after base. */
+  button,
+  [role="button"] {
+    cursor: default;
+  }
 }

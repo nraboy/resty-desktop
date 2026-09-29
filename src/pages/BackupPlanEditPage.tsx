@@ -971,7 +971,7 @@ export default function BackupPlanEditPage() {
                   className="flex items-center justify-between gap-3 bg-gray-800 rounded-lg px-3 py-2"
                 >
                   <span className="text-xs font-mono text-gray-300 truncate flex-1">{f.path}</span>
-                  <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0 cursor-pointer">
+                  <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0">
                     <input
                       type="checkbox"
                       checked={f.ignoreCase}
@@ -1066,7 +1066,7 @@ export default function BackupPlanEditPage() {
           </p>
         )}
 
-        <label className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-800 cursor-pointer">
+        <label className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-800">
           <input
             type="checkbox"
             checked={excludeCaches}
@@ -1166,7 +1166,7 @@ export default function BackupPlanEditPage() {
 
         {onWindows && (
           <div className="mt-3 pt-3 border-t border-gray-800 space-y-3">
-            <label className="flex items-center gap-2 cursor-pointer">
+            <label className="flex items-center gap-2">
               <input
                 type="checkbox"
                 checked={excludeCloudFiles}
@@ -1178,7 +1178,7 @@ export default function BackupPlanEditPage() {
               </span>
             </label>
             <div>
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={useFsSnapshot}
@@ -1329,7 +1329,7 @@ export default function BackupPlanEditPage() {
               {(["started", "completed", "failed"] as const).map((stage) => (
                 <label
                   key={stage}
-                  className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer"
+                  className="flex items-center gap-1.5 text-xs text-gray-400"
                 >
                   <input
                     type="checkbox"

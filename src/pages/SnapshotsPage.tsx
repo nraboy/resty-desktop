@@ -612,7 +612,7 @@ export default function SnapshotsPage() {
                 {pageEntries.map((snap) => (
                   <tr
                     key={snap.id}
-                    className={`hover:bg-gray-900/50 transition-colors ${selectMode ? "cursor-pointer" : ""} ${selectedIds.has(snap.id) ? "bg-gray-900/40" : ""}`}
+                    className={`hover:bg-gray-900/50 transition-colors ${selectedIds.has(snap.id) ? "bg-gray-900/40" : ""}`}
                     onClick={selectMode ? () => toggleSelectOne(snap.id) : undefined}
                     onContextMenu={(e) => {
                       if (selectMode) return;
@@ -792,7 +792,7 @@ export default function SnapshotsPage() {
           Delete snapshot <span className="font-mono text-blue-400">{deleteTarget?.short_id}</span>?
           This cannot be undone.
         </p>
-        <label className="flex items-center gap-2 text-sm text-gray-300 mb-4 cursor-pointer">
+        <label className="flex items-center gap-2 text-sm text-gray-300 mb-4">
           <input
             type="checkbox"
             checked={pruneOnDelete}
@@ -835,7 +835,7 @@ export default function SnapshotsPage() {
             <p className="text-sm text-gray-300 mb-4">
               Delete {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}? This cannot be undone.
             </p>
-            <label className="flex items-center gap-2 text-sm text-gray-300 mb-4 cursor-pointer">
+            <label className="flex items-center gap-2 text-sm text-gray-300 mb-4">
               <input
                 type="checkbox"
                 checked={multiDeletePrune}

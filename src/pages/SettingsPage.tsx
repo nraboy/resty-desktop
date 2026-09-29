@@ -463,7 +463,7 @@ export default function SettingsPage() {
               quitting — scheduled backups run whenever the app is unlocked, tray icon or not. A
               locked app shows "Locked" in the tray menu until you unlock it.
             </p>
-            <label className="flex items-center gap-3 cursor-pointer select-none">
+            <label className="flex items-center gap-3 select-none">
               <button
                 role="switch"
                 aria-checked={trayEnabled}
@@ -499,10 +499,7 @@ export default function SettingsPage() {
                 : "Start Resty Desktop automatically when you log in. The app opens to the unlock screen; scheduled backups resume once you unlock it."}
             </p>
             <label
-              className={[
-                "flex items-center gap-3 select-none",
-                trayEnabled ? "cursor-pointer" : "cursor-default",
-              ].join(" ")}
+              className="flex items-center gap-3 select-none"
             >
               <button
                 role="switch"
@@ -550,7 +547,7 @@ export default function SettingsPage() {
                 master password. If your credential manager is locked or unavailable when Resty
                 starts, it falls back to asking for your master password.
               </p>
-              <label className="flex items-center gap-3 cursor-pointer select-none">
+              <label className="flex items-center gap-3 select-none">
                 <button
                   role="switch"
                   aria-checked={autoUnlock}
@@ -591,7 +588,7 @@ export default function SettingsPage() {
               browsing is instant. When disabled, file listings are still cached on-demand the first time
               you browse a snapshot. Snapshot metadata is always kept up to date regardless of this setting.
             </p>
-            <label className="flex items-center gap-3 cursor-pointer select-none">
+            <label className="flex items-center gap-3 select-none">
               <button
                 role="switch"
                 aria-checked={autoIndexing}
@@ -627,7 +624,7 @@ export default function SettingsPage() {
               buttons on the Repositories page) always includes remote repositories regardless of this
               setting, since that's an explicit, user-initiated request rather than an automatic one.
             </p>
-            <label className="flex items-center gap-3 cursor-pointer select-none">
+            <label className="flex items-center gap-3 select-none">
               <button
                 role="switch"
                 aria-checked={remoteAutoRefresh}
@@ -671,7 +668,7 @@ export default function SettingsPage() {
           and the Activity panel either way.
         </p>
         <div className="grid grid-cols-3 gap-x-6 gap-y-2">
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm text-gray-400">
             <input
               type="checkbox"
               className="w-4 h-4 accent-blue-500"
@@ -680,7 +677,7 @@ export default function SettingsPage() {
             />
             Backup started
           </label>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm text-gray-400">
             <input
               type="checkbox"
               className="w-4 h-4 accent-blue-500"
@@ -689,7 +686,7 @@ export default function SettingsPage() {
             />
             Success (files changed)
           </label>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm text-gray-400">
             <input
               type="checkbox"
               className="w-4 h-4 accent-blue-500"
@@ -698,7 +695,7 @@ export default function SettingsPage() {
             />
             Success (no files changed)
           </label>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm text-gray-400">
             <input
               type="checkbox"
               className="w-4 h-4 accent-blue-500"

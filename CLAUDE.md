@@ -344,6 +344,13 @@ proposing a change — several are pinned by a named test or reference a confirm
   the editor rejects 0/negative counts; and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
   `> 0` test. Keep those in agreement — the Activity row waits on a `forget` op only when
   retention will actually run. An imported plan with a hand-set zero is simply inert.
+- Controls use the native arrow cursor, not the web-style hand, with **no Settings toggle** (issue
+  #35): a base-layer rule in `index.css` (`button, [role="button"] { cursor: default }`) overrides
+  Tailwind preflight's `cursor: pointer`, no `cursor-pointer` classes remain, and the sidebar's
+  `NavLink`s (real `<a href>`, which webviews hand-cursor regardless of CSS) carry an explicit
+  `cursor-default`. `cursor-help` (tooltip triggers) and `cursor-not-allowed` are meaningful and
+  stay. Don't reintroduce `cursor-pointer`; give clickable non-button surfaces a hover style
+  instead — see docs/frontend.md
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - Auto-unlock is offered on Linux too (D-Bus Secret Service), but explicitly best-effort — it
