@@ -49,6 +49,12 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   Tightening `Rest` to reject unrecognized keys would fail that repo's validation on its very next
   edit, connection test, or import — a regression with no user action to blame it on. Pinned by
   `validate_credentials_allows_arbitrary_keys_for_rest` (`backends.rs`).
+  This allowance is about *ordinary* keys. The reserved set (`is_reserved_key`) is separate and
+  applies to every kind: `PATH`, non-allowlisted `RESTIC_*`, and the dynamic-loader families
+  `LD_*`/`DYLD_*` (code-execution primitives on the restic child), matched case-insensitively
+  (Windows env names are). Denying those doesn't narrow this entry — `HTTPS_PROXY` & friends
+  still pass, pinned by `https_proxy_still_allowed_for_rest_and_other`. Don't widen the denylist
+  into an allowlist.
 - **`"rest:"` stays listed in both `REMOTE_PREFIXES` arrays (`backends.rs` and `backends.ts`)
   even though `detect_kind`/`detectBackend` now match it in a dedicated arm ahead of that list.**
   It reads as dead weight once the arm exists — don't remove it. Both arrays are also the
@@ -62,11 +68,13 @@ as-is. Don't re-flag or "fix" them without understanding why first:
 - **Sync `#[tauri::command]`s are intentionally not wrapped in `spawn_blocking`.** Tauri runs
   non-`async fn` commands (e.g. `get_restic_version`, `list_repos`) on its own thread pool, off
   the async runtime entirely — only `async fn` commands that block need `spawn_blocking`.
-- **`scheduler.rs` and `schedule.rs`'s `run_schedule_now` call the *sync* `apply_retention`
-  directly, not through `spawn_blocking`.** Both run inside their own background
-  `tauri::async_runtime::spawn`ed tasks (not foreground commands), immediately after
-  `execute_backup` (which already does its heavy work via `spawn_blocking`). Only the foreground
-  `forget_by_plan` command wraps `apply_retention` in `spawn_blocking`.
+- **`scheduler.rs` calls the *sync* `apply_retention` directly, not through `spawn_blocking`.**
+  It runs inside its own background `tauri::async_runtime::spawn`ed task (not a foreground
+  command), immediately after `execute_backup` (which already does its heavy work via
+  `spawn_blocking`). Only the foreground `forget_by_plan` command wraps `apply_retention` in
+  `spawn_blocking`. (A former `schedule.rs::run_schedule_now` was a third caller — it was a
+  foreground command, not background-spawned — and was removed as dead code: nothing in the UI
+  ever invoked it.)
 - **`list_snapshots`, `get_snapshot_index_status`, and `get_repo_stats` don't emit on the `task`
   event bus (see Operation Event Bus)** because none of the three shells out to restic — nothing
   runs that a task could represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**,
@@ -813,8 +821,10 @@ omission looks accidental and keeps getting re-proposed from issue tickets. It i
 
 **The root cause is an open upstream bug in Tauri's AppImage bundler, not anything in this codebase**
 — [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665), still open, affecting
-tauri / tauri-cli 2.11.2–2.11.5. This repo pins exactly 2.11.2 in both `src-tauri/Cargo.lock` and
-`package-lock.json`. Three distinct defects, all AppImage-only:
+tauri / tauri-cli 2.11.2–2.11.5. This repo was on 2.11.2 when AppImage was dropped; it has since
+moved to ≥ 2.12 (currently 2.12.0 in both `src-tauri/Cargo.lock` and `package-lock.json`, bumped
+for the Wayland `tao` fix — see above). Whether 2.12 fixes #15665 has not been verified, so the
+exclusion stands. Three distinct defects, all AppImage-only:
 
 - The AppImage bundles its own `libwebkit2gtk` / `WebKitWebProcess`, and — via linuxdeploy's `ldd`
   sweep — its own `libwayland-client.so.0`. On a host running **Mesa 25 or newer**, `eglGetDisplay`

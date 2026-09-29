@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getRestorePath, listFiles, listRepos, listSnapshots, restorePath, tagSnapshot } from "../lib/invoke";
@@ -91,19 +91,26 @@ export default function BrowsePage() {
       .catch((err) => setError(String(err)));
   }, [repoId]);
 
+  // Same out-of-order guard as SearchPage's searchSeqRef: rapid directory navigation can
+  // resolve out of order, and a stale response would render A's entries under B's breadcrumb.
+  const loadSeqRef = useRef(0);
   const load = useCallback(
     async (path?: string) => {
       if (!repoId || !snapshotId) return;
+      const seq = ++loadSeqRef.current;
       setLoading(true);
       setError("");
       setCurrentPath(path);
       try {
         const data = await listFiles(repoId, snapshotId, path);
+        if (seq !== loadSeqRef.current) return; // a newer navigation superseded this one
         setEntries(data);
       } catch (err: any) {
+        if (seq !== loadSeqRef.current) return;
         setError(String(err));
+        setEntries([]); // stale rows no longer match the breadcrumb
       } finally {
-        setLoading(false);
+        if (seq === loadSeqRef.current) setLoading(false);
       }
     },
     [repoId, snapshotId]
@@ -446,7 +453,7 @@ export default function BrowsePage() {
             )}
           </tbody>
         </table>
-        {!loading && entries.length === 0 && (
+        {!loading && !error && entries.length === 0 && (
           <div className="py-10 text-center text-gray-500 text-sm">Empty directory</div>
         )}
       </div>

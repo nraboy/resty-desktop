@@ -55,12 +55,15 @@ export default function DiffPage() {
 
   useEffect(() => {
     if (!repoId || !snapshotA || !snapshotB) return;
+    // A slow older diff must not overwrite the result of the pair the user navigated to since.
+    let cancelled = false;
     setLoading(true);
     setError("");
     diffSnapshots(repoId, snapshotA, snapshotB)
-      .then(setResult)
-      .catch((err) => setError(String(err)))
-      .finally(() => setLoading(false));
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch((err) => { if (!cancelled) setError(String(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [repoId, snapshotA, snapshotB]);
 
   const children = useMemo(

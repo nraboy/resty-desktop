@@ -54,6 +54,22 @@ describe("parseCronToSimple", () => {
     // (schedule.rs) for the same combination.
     expect(parseCronToSimple("0 0 15 * 1")).toBeNull();
   });
+
+  it("returns null for step, list, range and named values Simple mode can't represent", () => {
+    expect(parseCronToSimple("*/5 * * * *")).toBeNull(); // step minute
+    expect(parseCronToSimple("15,45 * * * *")).toBeNull(); // list minute
+    expect(parseCronToSimple("0 9 * * 1-5")).toBeNull(); // range day-of-week
+    expect(parseCronToSimple("0 9 * * MON")).toBeNull(); // named day-of-week
+    expect(parseCronToSimple("0 4 */2 * *")).toBeNull(); // step day-of-month
+    expect(parseCronToSimple("0 2 L * *")).toBeNull(); // "last day" day-of-month
+    expect(parseCronToSimple("0 */6 * * *")).toBeNull(); // step hour
+    expect(parseCronToSimple("0 9,17 * * *")).toBeNull(); // list hour
+  });
+
+  it("returns null when the month field is restricted (Simple mode has no month)", () => {
+    expect(parseCronToSimple("0 2 * 6 *")).toBeNull();
+    expect(parseCronToSimple("0 2 1 6 *")).toBeNull();
+  });
 });
 
 describe("buildCronExpr", () => {

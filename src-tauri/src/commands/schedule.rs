@@ -3,10 +3,7 @@ use chrono::Local;
 use std::str::FromStr;
 use tauri::{Emitter, State};
 
-use super::cache::{AppDb, BackupHandle, MasterKey, Schedule};
-use super::repo_locks::RepoLocks;
-use super::snapshot::{apply_retention, execute_backup, log_retention_failure, BackupOptions};
-use crate::tasks::TaskOrigin;
+use super::cache::{AppDb, Schedule};
 
 // ── cron helpers (pub(crate) so scheduler.rs can reuse) ───────────────────
 
@@ -124,62 +121,6 @@ pub fn toggle_schedule(app: tauri::AppHandle, db: State<'_, AppDb>, schedule_id:
 
     let _ = app.emit("schedules:changed", ());
     Ok(())
-}
-
-#[tauri::command]
-pub async fn run_schedule_now(
-    app: tauri::AppHandle,
-    db: State<'_, AppDb>,
-    master_key: State<'_, MasterKey>,
-    backup_handle: State<'_, BackupHandle>,
-    repo_locks: State<'_, RepoLocks>,
-    schedule_id: String,
-) -> Result<(), String> {
-    let schedules = db.list_schedules()?;
-    let sched = schedules
-        .into_iter()
-        .find(|s| s.id == schedule_id)
-        .ok_or_else(|| "Schedule not found".to_string())?;
-
-    let plans = db.get_plans_for_ids(&sched.plan_ids)?;
-    let mut errors: Vec<String> = Vec::new();
-    for plan in plans {
-        let backup_ok = execute_backup(
-            &app, &db, &master_key, &backup_handle, &repo_locks,
-            &plan.repo_id, Some(plan.id.as_str()),
-            plan.paths.clone(), plan.tags.clone(), BackupOptions::from(&plan),
-            // "Run Now" is user-initiated, same distinction the scheduler:* events
-            // already draw (see scheduler.rs) — not a background scheduler tick.
-            TaskOrigin::Manual,
-        )
-        .await;
-
-        if backup_ok.is_ok() {
-            if let Some(r) = &plan.retention {
-                if r.keep_last.is_some()
-                    || r.keep_daily.is_some()
-                    || r.keep_weekly.is_some()
-                    || r.keep_monthly.is_some()
-                    || r.keep_yearly.is_some()
-                {
-                    if let Err(e) = apply_retention(
-                        &app, &db, &master_key, &repo_locks, &plan.repo_id, Some(&plan.id),
-                        &plan.tags, &plan.paths, r, TaskOrigin::Manual,
-                    ) {
-                        log_retention_failure(&app, &db, &plan.repo_id, Some(&plan.id), &e);
-                    }
-                }
-            }
-        } else if let Err(e) = backup_ok {
-            errors.push(format!("{}: {}", plan.name, e));
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
 }
 
 #[tauri::command]

@@ -1336,7 +1336,7 @@ export default function RepositoriesPage() {
                   // a real "send empty" intent (will be skipped by apply_backend_env,
                   // same as the add modal), not "I didn't type one yet".
                   const credentials = editCredentialRows
-                    .map(([k, v]): [string, string] => [k.trim(), v.trim()])
+                    .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
                     .filter(([k]) => k !== "");
                   await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, credentials);
                   setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });

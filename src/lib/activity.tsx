@@ -123,7 +123,7 @@ export interface ActiveScheduledBackup {
 export interface ActivityState {
   /** Background auto-indexing progress; null when auto-indexing is off or fully caught up. */
   indexing: { cached: number; total: number } | null;
-  /** The scheduler-triggered backup currently running, if any. Manual/"Run Now" backups never
+  /** The scheduler-triggered backup currently running, if any. Manual backups never
    *  populate this — derived from `task` events filtered to `origin === "scheduler"`, see
    *  `reduceSchedulerBackup`. */
   activeBackup: ActiveScheduledBackup | null;
@@ -697,8 +697,21 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     // is ignored here (it's still observed by App.tsx's dev-only console.debug effect).
     const unlistenTask = listen<TaskEvent>("task", (e) => {
       statsOpsRef.current = reduceStatsOps(statsOpsRef.current, e.payload);
-      setStatsRefreshing([...new Set(statsOpsRef.current.inFlight.values())]);
-      setStatsFailed([...statsOpsRef.current.failed]);
+      // Every task event of every kind lands here (a scheduled backup emits one per restic
+      // status line), so keep the previous reference unless the id set actually changed —
+      // same same-reference discipline as the sibling reducers below.
+      const nextRefreshing = [...new Set(statsOpsRef.current.inFlight.values())];
+      setStatsRefreshing((prev) =>
+        prev.length === nextRefreshing.length && prev.every((id) => nextRefreshing.includes(id))
+          ? prev
+          : nextRefreshing,
+      );
+      const nextFailed = [...statsOpsRef.current.failed];
+      setStatsFailed((prev) =>
+        prev.length === nextFailed.length && prev.every((id) => nextFailed.includes(id))
+          ? prev
+          : nextFailed,
+      );
       if (
         e.payload.kind === "index" &&
         (e.payload.phase === "finished" || e.payload.phase === "failed")
@@ -796,9 +809,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         const plan = plans.find((p) => p.id === activePlanId);
         const r = plan?.retention;
+        // Mirrors the backend's has_effective_retention: 0 means unset, so a zero-only
+        // policy never starts a "forget" op and must be dismissed like no retention at all.
         const hasRetention = !!r && (
-          r.keepLast != null || r.keepDaily != null || r.keepWeekly != null ||
-          r.keepMonthly != null || r.keepYearly != null
+          (r.keepLast ?? 0) > 0 || (r.keepDaily ?? 0) > 0 || (r.keepWeekly ?? 0) > 0 ||
+          (r.keepMonthly ?? 0) > 0 || (r.keepYearly ?? 0) > 0
         );
         setActiveBackup((prev) => {
           if (!prev || prev.runId !== activeRunId) return prev; // stale — a newer run has since started

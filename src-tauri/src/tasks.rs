@@ -5,9 +5,12 @@
 //! alongside — not instead of — its existing detailed feed (e.g. `backup:progress`).
 //! See CLAUDE.md's "Operation Event Bus" section for the full design rationale.
 //!
-//! No frontend logic subscribes to this yet by design (see CLAUDE.md) — it exists
-//! so a future background-task consumer has a uniform, `operationId`-correlatable
-//! stream to build on, without having to retrofit every operation at that point.
+//! The frontend's `ActivityProvider` (`src/lib/activity.tsx`) consumes it for seven
+//! stateful views so far — `stats`, `index`'s per-snapshot lifecycle, `index`'s
+//! batch-level progress, the scheduler-backup row, `prune`'s row, mirror's rows, and
+//! cleanup's row; every other kind still emits into the void, ready for a future
+//! consumer to build on its uniform, `operationId`-correlatable stream. See
+//! docs/concurrency.md for the full consumer list.
 
 use serde::Serialize;
 use std::sync::{

@@ -768,6 +768,19 @@ pub struct AppDb {
     db_path: std::path::PathBuf,
 }
 
+/// Idempotent `ALTER TABLE … ADD COLUMN`. SQLite fails an ADD COLUMN whose column already
+/// exists with "duplicate column name: X" — the expected case on every launch after the first —
+/// and that is the *only* failure tolerated. Anything else (I/O error, full disk, corrupt or
+/// locked database) propagates out of `init_schema`, so a migration that genuinely didn't apply
+/// stops startup loudly instead of leaving the schema silently missing a column that every
+/// later read then fails on ("no such column"), far from the cause.
+fn add_column_ignoring_duplicates(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
+    match conn.execute_batch(sql) {
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        other => other,
+    }
+}
+
 impl AppDb {
     pub fn new(conn: Connection, db_path: std::path::PathBuf) -> Self {
         Self {
@@ -921,70 +934,71 @@ impl AppDb {
                 created_at    INTEGER NOT NULL
             );",
         )?;
-        // Migrations for existing installs — silently ignored if columns already exist.
-        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;");
-        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;");
-        let _ = conn.execute_batch(
+        // Migrations for existing installs — a column that already exists is skipped, any
+        // other failure aborts (see add_column_ignoring_duplicates).
+        add_column_ignoring_duplicates(conn, "ALTER TABLE backup_plans ADD COLUMN limit_upload INTEGER;")?;
+        add_column_ignoring_duplicates(conn, "ALTER TABLE backup_plans ADD COLUMN limit_download INTEGER;")?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE backup_plans ADD COLUMN exclude_if_present_json TEXT;",
-        );
-        let _ = conn.execute_batch(
+        )?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE backup_plans ADD COLUMN exclude_caches INTEGER NOT NULL DEFAULT 0;",
-        );
+        )?;
         // Additive, nullable — per-plan webhook configs (URL + provider preset + stage
         // triggers) as a JSON array. NULL on pre-existing rows means "no webhooks" and
         // reads back as an empty Vec, identical to exclude_if_present_json. URLs are
         // stored plaintext — see docs/data.md.
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE backup_plans ADD COLUMN webhooks_json TEXT;",
-        );
+        )?;
         // Additive — `restic backup` pack size (nullable = restic default) and the two
         // Windows-only flags. Pre-existing rows read back as None/false/false.
-        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN pack_size INTEGER;");
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn, "ALTER TABLE backup_plans ADD COLUMN pack_size INTEGER;")?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE backup_plans ADD COLUMN exclude_cloud_files INTEGER NOT NULL DEFAULT 0;",
-        );
-        let _ = conn.execute_batch(
+        )?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE backup_plans ADD COLUMN use_fs_snapshot INTEGER NOT NULL DEFAULT 0;",
-        );
+        )?;
         // Additive, nullable — `--files-from` list files and `--(i)exclude-file` pattern
         // files as JSON arrays. NULL on pre-existing rows reads back as an empty Vec.
-        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN files_from_json TEXT;");
-        let _ = conn.execute_batch("ALTER TABLE backup_plans ADD COLUMN exclude_files_json TEXT;");
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn, "ALTER TABLE backup_plans ADD COLUMN files_from_json TEXT;")?;
+        add_column_ignoring_duplicates(conn, "ALTER TABLE backup_plans ADD COLUMN exclude_files_json TEXT;")?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
-        );
+        )?;
         // Additive, nullable — an existing row's password_nonce/password_ciphertext are
         // never touched, and NULL here means "no stored credentials" (the ambient mode:
         // use restic's own credential chain). See CLAUDE.md's "Backend credentials".
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN credentials_nonce BLOB;",
-        );
-        let _ = conn.execute_batch(
+        )?;
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN credentials_ciphertext BLOB;",
-        );
+        )?;
         // Additive, nullable — on-disk stored size (post-dedup, post-compression) from a
         // second `restic stats --mode raw-data` call. An existing row's NULL here just means
         // "not yet refreshed since this field was added"; the frontend falls back to showing
         // only the restore-size figure it already had. See docs/restic.md.
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE repo_stats_cache ADD COLUMN raw_size INTEGER;",
-        );
+        )?;
         // Additive, nullable — the snapshot's logical size in bytes, taken from the
         // `summary.total_bytes_processed` field restic >=0.17 embeds in `snapshots --json`
         // output. NULL for a snapshot restic recorded without a summary (created by an older
         // restic, or by some `copy` operations); the frontend renders that as an em dash.
         // Snapshots are immutable, so this value never needs invalidation. See docs/restic.md.
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE snapshots_cache ADD COLUMN size INTEGER;",
-        );
+        )?;
         // Additive, nullable — unix-seconds timestamp set once a snapshot's browse-cache rows
         // are known to be orphaned (its id no longer appears in any repo's snapshots_cache).
         // NULL means "not orphaned". Used by mark_orphans/drain_orphans to delete
         // browse_cache_files in bounded batches instead of one unbounded transaction — see
         // clean_cache's doc comment and docs/data.md.
-        let _ = conn.execute_batch(
+        add_column_ignoring_duplicates(conn,
             "ALTER TABLE indexed_snapshots ADD COLUMN orphaned_at INTEGER;",
-        );
+        )?;
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
             "UPDATE browse_cache_status SET status = 'pending' WHERE status = 'in_progress';",
@@ -3369,7 +3383,7 @@ mod tests {
         assert_eq!(plans[0].exclude_files, plan.exclude_files);
 
         // get_plans_for_ids shares the same read path — confirm it agrees. This is the
-        // scheduler's / Run Now's read path, so it must carry the new fields too.
+        // scheduler's read path, so it must carry the new fields too.
         let by_id = db.get_plans_for_ids(&["plan1".to_string()]).unwrap();
         assert_eq!(by_id.len(), 1);
         assert_eq!(by_id[0].exclude_if_present, plans[0].exclude_if_present);
@@ -3716,6 +3730,28 @@ mod tests {
             .query_row("SELECT raw_size FROM repo_stats_cache WHERE repo_id = 'repoA'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(raw_size, None);
+    }
+
+    #[test]
+    fn add_column_ignoring_duplicates_swallows_only_a_duplicate_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (a INTEGER);").unwrap();
+
+        // First call really adds the column; the second hits "duplicate column name" and is Ok.
+        add_column_ignoring_duplicates(&conn, "ALTER TABLE t ADD COLUMN b INTEGER;").unwrap();
+        add_column_ignoring_duplicates(&conn, "ALTER TABLE t ADD COLUMN b INTEGER;").unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(t)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["a", "b"]);
+
+        // Every other failure must surface rather than be swallowed.
+        assert!(add_column_ignoring_duplicates(&conn, "ALTER TABLE missing ADD COLUMN c INTEGER;").is_err());
+        assert!(add_column_ignoring_duplicates(&conn, "ALTER TABLE t ADD COLUMN;").is_err());
     }
 
     #[test]
@@ -5674,8 +5710,8 @@ mod tests {
 
         // 5. The new exclude-if-present columns were added by ALTER TABLE (not CREATE
         // TABLE) on this migrated DB — confirm the read path actually works against
-        // that shape, since init_schema's `let _ = ...ALTER...` silently swallows
-        // failures and every other test builds its schema from CREATE TABLE instead.
+        // that shape — every other test builds its schema from CREATE TABLE instead, so
+        // this is the one place the ALTER path is exercised end to end.
         let db = AppDb::new(conn, std::path::PathBuf::new());
         let plans = db.list_backup_plans().unwrap();
         assert_eq!(plans.len(), 1);

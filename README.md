@@ -49,7 +49,7 @@ sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app
 
 - [Restic](https://restic.readthedocs.io/en/latest/020_installation.html) 0.17 or newer, installed and available on `$PATH` (or configured via Settings)
 - [Rust](https://rustup.rs/) (for building from source)
-- Node.js 18+
+- Node.js 20.19+ or 22.12+ (required by Vite 7)
 
 ## Getting Started
 

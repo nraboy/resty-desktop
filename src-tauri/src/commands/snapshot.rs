@@ -478,7 +478,7 @@ pub(crate) fn normalize_pack_size(v: Option<u32>) -> Result<Option<u32>, String>
 }
 
 /// Every per-plan knob `execute_backup` turns into `restic backup` flags, grouped so the
-/// three callers (manual run, scheduler tick, schedule Run Now) can't transpose adjacent
+/// two callers (manual run, scheduler tick) can't transpose adjacent
 /// positional bools. Plan callers build it with `BackupOptions::from(&plan)` — the one
 /// plan→options mapping.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -893,7 +893,13 @@ pub async fn execute_backup(
             if let Some(ref id) = snapshot_id {
                 // A failed re-fetch leaves the cache exactly as it was — one tick or one
                 // manual refresh stale, never wiped. See docs/decisions.md.
-                if let Ok(new_json) = run_restic_with_path(&repo, vec!["snapshots", "--json", id], &restic_path) {
+                if let Ok(new_json) = run_restic_blocking(
+                    repo.clone(),
+                    vec!["snapshots".into(), "--json".into(), id.clone()],
+                    restic_path.clone(),
+                )
+                .await
+                {
                     let _ = db.append_snapshots(repo_id, &new_json);
                 }
             }
@@ -1526,28 +1532,40 @@ fn build_retention_args(tags: &[String], paths: &[String], retention: &Retention
         }
     }
 
-    if let Some(n) = retention.keep_last {
+    // "0 means unset", like limit_upload/limit_download/pack_size — a zero never reaches restic.
+    let keep = |n: Option<u32>| n.filter(|&v| v > 0);
+    if let Some(n) = keep(retention.keep_last) {
         args.push("--keep-last".to_string());
         args.push(n.to_string());
     }
-    if let Some(n) = retention.keep_daily {
+    if let Some(n) = keep(retention.keep_daily) {
         args.push("--keep-daily".to_string());
         args.push(n.to_string());
     }
-    if let Some(n) = retention.keep_weekly {
+    if let Some(n) = keep(retention.keep_weekly) {
         args.push("--keep-weekly".to_string());
         args.push(n.to_string());
     }
-    if let Some(n) = retention.keep_monthly {
+    if let Some(n) = keep(retention.keep_monthly) {
         args.push("--keep-monthly".to_string());
         args.push(n.to_string());
     }
-    if let Some(n) = retention.keep_yearly {
+    if let Some(n) = keep(retention.keep_yearly) {
         args.push("--keep-yearly".to_string());
         args.push(n.to_string());
     }
 
     args
+}
+
+/// True when at least one `keep_*` value is a real (non-zero) count. `Some(0)` is treated as
+/// unset — `build_retention_args` never emits it, and restic itself rejects a `forget` with
+/// no effective policy ("no policy was specified"), so every retention call site gates on
+/// this rather than `is_some()`.
+pub(crate) fn has_effective_retention(r: &RetentionPolicy) -> bool {
+    [r.keep_last, r.keep_daily, r.keep_weekly, r.keep_monthly, r.keep_yearly]
+        .iter()
+        .any(|n| n.unwrap_or(0) > 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1584,6 +1602,18 @@ pub fn apply_retention(
     );
 
     if let Err(e) = check_retention_scope(tags, paths) {
+        task_ctx.failed(e.clone());
+        return Err(e);
+    }
+
+    // Every call site gates on has_effective_retention already; this is the backstop for the
+    // manual path. It fails (rather than silently returning Ok) so the op still emits its
+    // lifecycle events like every other exit here, and a `forget` with no keep flags — which
+    // restic refuses anyway — is never spawned.
+    if !has_effective_retention(retention) {
+        let e = "No retention rule is set — enter a value of 1 or more for at least one \
+                 keep option (0 is treated as unset)."
+            .to_string();
         task_ctx.failed(e.clone());
         return Err(e);
     }
@@ -1650,10 +1680,10 @@ pub fn apply_retention(
 
 /// Records a failed retention application as its own `backup_history` row so it's visible in
 /// Recent Logs / LogsPage even though `apply_retention` has no history entry of its own.
-/// Called by every retention call site (manual `forget_by_plan`, the 60s scheduler tick,
-/// `run_schedule_now`) whenever `apply_retention` returns `Err` — otherwise all three would
-/// silently discard that error, so a backup could succeed while its retention prune failed
-/// with the failure visible nowhere.
+/// Called by every retention call site (manual `forget_by_plan`, the 60s scheduler tick)
+/// whenever `apply_retention` returns `Err` — otherwise both would silently discard that
+/// error, so a backup could succeed while its retention prune failed with the failure
+/// visible nowhere.
 pub(crate) fn log_retention_failure(
     app: &tauri::AppHandle,
     db: &AppDb,
@@ -1754,8 +1784,8 @@ pub async fn forget_by_plan(
 mod tests {
     use super::{
         build_backup_args, build_exclude_args, build_list_file_args, build_retention_args,
-        check_retention_scope, non_blank_tags, normalize_pack_size, parse_diff_output,
-        validate_snapshot_id, BackupOptions,
+        check_retention_scope, has_effective_retention, non_blank_tags, normalize_pack_size,
+        parse_diff_output, validate_snapshot_id, BackupOptions,
     };
     use crate::commands::cache::{BackupPlan, ExcludeFile, RetentionPolicy};
 
@@ -2166,6 +2196,48 @@ mod tests {
         };
         let args = build_retention_args(&[], &[], &policy);
         assert_eq!(args, vec!["forget", "--prune", "--json"]);
+    }
+
+    fn retention(last: Option<u32>, daily: Option<u32>) -> RetentionPolicy {
+        RetentionPolicy {
+            keep_last: last,
+            keep_daily: daily,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
+        }
+    }
+
+    #[test]
+    fn zero_retention_values_are_omitted() {
+        let args = build_retention_args(&[], &[], &retention(Some(0), Some(7)));
+        let pairs: Vec<(&str, &str)> =
+            args.windows(2).map(|w| (w[0].as_str(), w[1].as_str())).collect();
+        assert!(pairs.contains(&("--keep-daily", "7")));
+        assert!(!args.contains(&"--keep-last".to_string()));
+    }
+
+    #[test]
+    fn all_zero_retention_produces_no_keep_flags() {
+        let zero = Some(0);
+        let policy = RetentionPolicy {
+            keep_last: zero,
+            keep_daily: zero,
+            keep_weekly: zero,
+            keep_monthly: zero,
+            keep_yearly: zero,
+        };
+        assert_eq!(build_retention_args(&[], &[], &policy), vec!["forget", "--prune", "--json"]);
+    }
+
+    #[test]
+    fn has_effective_retention_treats_zero_as_unset() {
+        assert!(!has_effective_retention(&retention(None, None)));
+        assert!(!has_effective_retention(&retention(Some(0), Some(0))));
+        assert!(has_effective_retention(&retention(Some(1), None)));
+        assert!(has_effective_retention(&retention(Some(0), Some(7))));
+        let yearly_only = RetentionPolicy { keep_yearly: Some(2), ..retention(None, None) };
+        assert!(has_effective_retention(&yearly_only));
     }
 
     // ── parse_diff_output ────────────────────────────────────────────────────

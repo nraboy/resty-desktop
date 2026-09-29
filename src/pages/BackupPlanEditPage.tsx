@@ -538,23 +538,33 @@ export default function BackupPlanEditPage() {
     const parsedPackSize = parsePackSize(packSize);
     if ("error" in parsedPackSize) { setError(parsedPackSize.error); return; }
 
+    const toNum = (s: string) => {
+      if (s.trim() === "") return undefined;
+      const n = parseInt(s, 10);
+      return Number.isNaN(n) ? undefined : n;
+    };
+    const retention = hasRetention
+      ? {
+          keepLast: toNum(keepLast),
+          keepDaily: toNum(keepDaily),
+          keepWeekly: toNum(keepWeekly),
+          keepMonthly: toNum(keepMonthly),
+          keepYearly: toNum(keepYearly),
+        }
+      : undefined;
+    // 0 means "unset" throughout the app (restic rejects a forget with no effective policy),
+    // so a 0/negative/non-numeric count is an error here rather than a silently dead rule.
+    if (retention) {
+      const counts = Object.values(retention);
+      if (counts.every((v) => v === undefined) || counts.some((v) => v !== undefined && v < 1)) {
+        setError("Retention counts must be whole numbers of at least 1 — leave a field blank to disable it.");
+        return;
+      }
+    }
+
     setSaving(true);
     setError("");
     try {
-      const toNum = (s: string) => {
-        if (s.trim() === "") return undefined;
-        const n = parseInt(s, 10);
-        return Number.isNaN(n) ? undefined : n;
-      };
-      const retention = hasRetention
-        ? {
-            keepLast: toNum(keepLast),
-            keepDaily: toNum(keepDaily),
-            keepWeekly: toNum(keepWeekly),
-            keepMonthly: toNum(keepMonthly),
-            keepYearly: toNum(keepYearly),
-          }
-        : undefined;
       const excludes =
         excludeMode === "expert"
           ? excludeText

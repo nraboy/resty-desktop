@@ -188,6 +188,21 @@ fn now_ts() -> i64 {
 
 // ── export ──────────────────────────────────────────────────────────────────
 
+/// Backend backstop for the export passphrase — the same ≥8-character floor
+/// `ImportExportCard.tsx` enforces (and `auth::validate_master_password` applies to the master
+/// password), since the bundle is the one artifact designed to leave the machine and is
+/// attacked fully offline. Export-side only: import stays permissive so a legacy bundle made
+/// with a shorter passphrase still opens with its real one.
+fn validate_export_passphrase(pw: Option<&str>) -> Result<&str, String> {
+    let pw = pw
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| "An export passphrase is required when exporting repositories.".to_string())?;
+    if pw.chars().count() < 8 {
+        return Err("Export passphrase must be at least 8 characters.".to_string());
+    }
+    Ok(pw)
+}
+
 #[tauri::command]
 pub fn export_data(
     app: tauri::AppHandle,
@@ -207,10 +222,7 @@ pub fn export_data(
     let encryption = if all_repos.is_empty() {
         None
     } else {
-        let pw = export_password
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| "An export passphrase is required when exporting repositories.".to_string())?;
+        let pw = validate_export_passphrase(export_password.as_deref())?;
         let salt = crypto::random_bytes::<16>();
         let export_key = crypto::derive_key(pw, &salt)?;
         Some((export_key, salt))
@@ -1023,6 +1035,16 @@ mod tests {
         };
         let err = decrypt_secret(&wrong_key, &enc).unwrap_err();
         assert!(err.contains("Incorrect export passphrase"));
+    }
+
+    #[test]
+    fn export_rejects_missing_or_short_passphrase() {
+        assert!(validate_export_passphrase(None).unwrap_err().contains("required"));
+        assert!(validate_export_passphrase(Some("")).unwrap_err().contains("required"));
+        assert!(validate_export_passphrase(Some("1234567")).unwrap_err().contains("at least 8"));
+        // Counts characters, not bytes: 7 multi-byte chars is still too short.
+        assert!(validate_export_passphrase(Some("ééééééé")).is_err());
+        assert_eq!(validate_export_passphrase(Some("12345678")), Ok("12345678"));
     }
 
     #[test]

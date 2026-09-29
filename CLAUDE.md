@@ -19,7 +19,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Rust backend | Tauri v2 `#[tauri::command]` |
 | Settings persistence | SQLite (`app_data.db`) via `AppDb` |
 | File picker | `tauri-plugin-dialog` (xdg-desktop-portal backend on Linux, not GTK; see docs/decisions.md) |
-| Shell plugin | `tauri-plugin-shell` (registered but not exposed to frontend) |
+| Shell plugin | `tauri-plugin-shell` — only `open` is exposed (`shell:allow-open`, used for hardcoded http(s) links in App.tsx/SettingsPage.tsx); `"open": true` applies the plugin's default validator (http(s)/mailto/tel only) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/failure, each gated by a global setting (`commands/notify.rs`) |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
@@ -49,6 +49,7 @@ src/
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
     Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
     ActivityPanel.tsx     # Right-side overlay drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's status strip, open state owned by App.tsx — see docs/concurrency.md
@@ -73,7 +74,7 @@ src/
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
     BackupPlanEditPage.tsx # Create/edit plan: sources (Paths | List files tabs, `--files-from`), tags, excludes (Simple | Expert) + exclude pattern files (`--(i)exclude-file`), retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
-    SchedulesPage.tsx     # List schedules; toggle/delete/run; read-only-repo warnings
+    SchedulesPage.tsx     # List schedules; toggle/delete; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
     SettingsPage.tsx      # Theme, tray, launch-at-login, auto-unlock, restic path, prune all, import/export, cache — see docs/frontend.md and docs/decisions.md
@@ -81,6 +82,7 @@ src-tauri/
   src/
     main.rs               # Calls restic_gui_lib::run()
     lib.rs                # Tauri builder; registers commands; manages app state; native menu bar; tray — see docs/concurrency.md
+    tasks.rs              # Unified `task` event bus (TaskEvent, OperationCtx) — see docs/concurrency.md
     commands/
       mod.rs                # get_restic_path(); NoConsole trait for Finder-launched PATH
       auth.rs               # Setup/unlock/lock master password; auto-unlock — see docs/data.md
@@ -93,7 +95,7 @@ src-tauri/
       snapshot.rs           # List/delete/tag snapshots; execute_backup; copy/mirror; retention — see docs/restic.md and docs/concurrency.md
       browse.rs             # File listing, restore, indexing (single + batch) — see docs/concurrency.md and docs/decisions.md
       backup_plan.rs        # List/save/remove backup plans; `validate_plan_sources` (paths-or-list-files, list-file plans need a tag) — see docs/restic.md
-      schedule.rs           # List/save/remove/toggle schedules; run_schedule_now
+      schedule.rs           # List/save/remove/toggle schedules; cron helpers reused by scheduler.rs
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
       webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
@@ -163,7 +165,7 @@ restic/cron process — the retry-on-"already locked" logic remains the backstop
 
 ## Operation Event Bus
 
-Full detail (six frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
+Full detail (seven stateful frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
 per-run registries): **docs/concurrency.md**.
 
 Retain always: `tasks.rs` defines a uniform `task` event (`TaskEvent`) layered **on top of**,
@@ -194,6 +196,8 @@ Full detail (schema, migrations, stale-while-revalidate patterns, cache warmer):
 Retain always: single SQLite `app_data.db` via `AppDb`, one shared `Mutex<Connection>` — a slow
 synchronous query on a core async-runtime thread starves every other `AppDb`-touching command.
 Any new command doing DB work slow enough to notice should be `async fn` + `spawn_blocking`.
+Schema migrations use `add_column_ignoring_duplicates` (only "duplicate column name" is
+tolerated; any other failure aborts startup) — never a bare `let _ = conn.execute_batch("ALTER …")`.
 
 ## Settled decisions — do not re-flag without reading `docs/decisions.md`
 
@@ -219,7 +223,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
-- `scheduler.rs`/`run_schedule_now` call sync `apply_retention` directly, not via `spawn_blocking`
+- `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
 - `list_snapshots`, `get_snapshot_index_status`, `get_repo_stats` don't emit on the `task` bus
 - `get_repo_stats` is cache-only and must never fall through to a live `restic stats` call
 - `browse_cache_files.parent_path` duplicates a prefix of `path` on purpose (index speed)
@@ -332,6 +336,14 @@ proposing a change — several are pinned by a named test or reference a confirm
   scope check and `validate_plan_sources`): restic's `--tag ""` matches *untagged* snapshots. A hidden auto-tag (plan-name or
   plan-id based) was considered and rejected: it would show on every such snapshot in the UI and CLI,
   and names aren't unique — don't add one without re-reading docs/restic.md
+- Retention `keep_*` of `0` means **unset**, like `limit_upload`/`pack_size` — not "keep none".
+  (Verified against restic 0.19: `--keep-last 0` alone exits "no policy was specified, no
+  snapshots will be removed", so it was never a deletion risk — it made every retention run fail.)
+  `build_retention_args` drops zeros; every call site gates on `has_effective_retention`
+  (`snapshot.rs`) rather than `is_some()`; `apply_retention` fails cleanly with no effective rule;
+  the editor rejects 0/negative counts; and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
+  `> 0` test. Keep those in agreement — the Activity row waits on a `forget` op only when
+  retention will actually run. An imported plan with a hand-set zero is simply inert.
 - Launch-at-login has no `app_settings` row (OS entry is the sole source of truth)
 - Auto-unlock toggle is deliberately not gated on launch-at-login or the tray setting
 - Auto-unlock is offered on Linux too (D-Bus Secret Service), but explicitly best-effort — it
@@ -398,7 +410,7 @@ docs/frontend.md.
 - `text-white` on gray backgrounds → use `text-gray-50` (remaps to near-black in light mode).
 - `hover:text-white` on interactive elements → use `hover:text-gray-50`.
 - `bg-red-700` for buttons → theme-mapped, becomes pastel pink in light mode. Use `bg-red-600 hover:bg-red-800`.
-- Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*`) are NOT theme-mapped — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface, where the surface itself (not the page background) sets the contrast context.
+- Colors outside the extended set (`blue-500/600`, `red-500/6/8`, `yellow-*` other than `yellow-400`, `purple-*` other than `purple-400`) are NOT theme-mapped (`yellow-400`/`purple-400` *are* mapped — don't "fix" their uses) — intentional for colored-background elements like primary/danger buttons where white text is always on a dark surface, where the surface itself (not the page background) sets the contrast context.
 - Amber/red/green/blue text used **without** a colored box behind it (a bare warning line, an
   inline status label) must use a mapped shade (`amber-300/400/500`, `red-300/400`, `green-300/400`,
   `blue-300/400`) — never an unmapped shade like `amber-600` or `red-500` — since that text sits
@@ -438,7 +450,7 @@ deliberately not included. `RESTY_DISABLE_GPU_WORKAROUND` opts out without a reb
 
 ## Releases
 
-`.github/workflows/release.yml` — triggered by `v*` tag; builds on ubuntu-22.04, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. Requires `permissions: contents: write`. Skipped on non-GitHub CI (`github.server_url` check).
+`.github/workflows/release.yml` — triggered by `v*` tag; a `test` job (frontend + Rust tests) gates the build; builds on ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. Requires `permissions: contents: write`. Skipped on non-GitHub CI (`github.server_url` check).
 
 Pre-built macOS binaries are not notarized: `sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app`.
 

@@ -297,13 +297,13 @@ export default function App() {
               <Sidebar onLock={handleLock} activityOpen={activityOpen} onToggleActivity={toggleActivity} />
               <div className="flex-1 flex flex-col overflow-hidden">
                 {showVersionWarning && (
-                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-yellow-900/50 border-b border-yellow-700 text-yellow-200 text-sm flex-shrink-0">
+                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-900/50 border-b border-amber-700 text-amber-300 text-sm flex-shrink-0">
                     <span>
                       For the best experience, upgrade to <strong>restic {MIN_RESTIC_MAJOR}.{MIN_RESTIC_MINOR} or newer</strong>. Some retention and grouping features may not work correctly on older versions.
                     </span>
                     <button
                       onClick={() => setShowVersionWarning(false)}
-                      className="flex-shrink-0 text-yellow-300 hover:text-yellow-100 transition-colors"
+                      className="flex-shrink-0 text-amber-400 hover:text-amber-300 transition-colors"
                       aria-label="Dismiss"
                     >
                       <XIcon className="w-4 h-4" />

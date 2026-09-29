@@ -29,6 +29,11 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), S
 }
 
 pub fn decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+    // Nonce::from_slice panics on any length other than 12, and a bundle's nonce is
+    // attacker/hand-editable. Same message as a wrong key — no extra oracle.
+    if nonce.len() != 12 {
+        return Err("Decryption failed — incorrect master password".to_string());
+    }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Nonce::from_slice(nonce);
     cipher
@@ -47,6 +52,16 @@ mod tests {
     use super::*;
 
     const SALT: &[u8] = b"test_salt_16byte";
+
+    #[test]
+    fn decrypt_with_wrong_length_nonce_returns_err_not_panic() {
+        let key = derive_key("password", SALT).unwrap();
+        let (_, ct) = encrypt(&key, b"secret").unwrap();
+        for len in [0usize, 11, 13, 24] {
+            let err = decrypt(&key, &vec![0u8; len], &ct).unwrap_err();
+            assert_eq!(err, "Decryption failed — incorrect master password");
+        }
+    }
 
     #[test]
     fn derive_key_is_deterministic() {

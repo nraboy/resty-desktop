@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager};
 use crate::commands::cache::{AppDb, BackupHandle, MasterKey};
 use crate::commands::repo_locks::RepoLocks;
 use crate::commands::schedule::next_fire_time;
-use crate::commands::snapshot::{apply_retention, execute_backup, log_retention_failure, log_schedule_failure, BackupOptions};
+use crate::commands::snapshot::{apply_retention, execute_backup, has_effective_retention, log_retention_failure, log_schedule_failure, BackupOptions};
 use crate::tasks::TaskOrigin;
 
 // Seconds to sleep until the next wall-clock minute boundary (:00).
@@ -131,15 +131,11 @@ async fn tick(app: &tauri::AppHandle) {
 
             if ok {
                 if let Some(r) = &plan.retention {
-                    if r.keep_last.is_some()
-                        || r.keep_daily.is_some()
-                        || r.keep_weekly.is_some()
-                        || r.keep_monthly.is_some()
-                        || r.keep_yearly.is_some()
-                    {
+                    if has_effective_retention(r) {
                         // apply_retention's own OperationCtx (kind: Forget) tells the Activity
                         // panel this plan has moved from the byte-transfer phase to the
-                        // retention finalize step (a `forget --prune` that can take 10s+) — the
+                        // retention finalize step (a `forget --prune` that can take 10s+; only
+                        // reached with an effective, non-zero keep value) — the
                         // panel keeps the active task visible and swaps its subtitle to
                         // "Applying retention rules…" on that op's "started" event (see
                         // reduceSchedulerBackup). Only reached when retention actually runs

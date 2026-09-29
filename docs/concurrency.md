@@ -35,8 +35,8 @@ Wired into every shared-lock op (`execute_backup`, `restore_snapshot`, `restore_
 `get_snapshot_stats`, `diff_snapshots`, `refresh_repo_stats`, `check_repo`,
 `list_files`, `run_full_index` — shared by `index_snapshot`/`index_snapshots_batch` **and** the
 `cache_warmer` auto-sweep) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
-`prune_repo`/`prune_all_repos`, `apply_retention` — covering all three callers: `forget_by_plan`,
-the scheduler tick, `run_schedule_now`). For a streaming op the guard is a local held across the
+`prune_repo`/`prune_all_repos`, `apply_retention` — covering both callers: `forget_by_plan`
+and the scheduler tick). For a streaming op the guard is a local held across the
 `spawn_blocking(...).await`, claimed for the whole child-process lifetime. `mirror_repo` is the one
 exception to "acquired in the outer command body": since it queues and returns its `operationId`
 immediately (see Restic Integration), its guards are acquired *inside* the detached `spawn`ed task,
@@ -348,8 +348,8 @@ it makes "task says finished" provably imply "cache read will see the new value,
 usually true.
 
 `backup`/`forget` are now consumed too, but only partially — `reduceSchedulerBackup` filters to
-`origin: "scheduler"`, so manual/"Run Now" backups and manual retention (`forget_by_plan`,
-`run_schedule_now`'s retention call) still emit into the void for Activity-panel purposes; they
+`origin: "scheduler"`, so manual backups and manual retention (`forget_by_plan`) still emit
+into the void for Activity-panel purposes; they
 already have their own progress modals per the "Restore/copy/manual backup" exclusion above (`mirror`
 is no longer part of that list — see its consumer paragraph above). For every other kind (`restore`,
 `copy`, …) **no stateful frontend code subscribes to `task`** at all yet — that remains deliberate,

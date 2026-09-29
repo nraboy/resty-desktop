@@ -86,7 +86,7 @@ export default function BackupPlansPage() {
 
   // Fetched apart from load() so a failure here can never blank the plan list or raise the
   // page-level error banner — it's a cosmetic line. Refreshed on every history write (manual
-  // modal run, scheduler tick, Run Now, cancel), so it stays live while the page is open.
+  // modal run, scheduler tick, cancel), so it stays live while the page is open.
   useEffect(() => {
     let seq = 0;
     const refresh = () => {
@@ -177,7 +177,8 @@ export default function BackupPlansPage() {
 
   const hasRetentionRules = (plan: BackupPlan) => {
     const r = plan.retention;
-    return r && (r.keepLast != null || r.keepDaily != null || r.keepWeekly != null || r.keepMonthly != null || r.keepYearly != null);
+    // 0 means unset (matches the backend's has_effective_retention).
+    return r && ((r.keepLast ?? 0) > 0 || (r.keepDaily ?? 0) > 0 || (r.keepWeekly ?? 0) > 0 || (r.keepMonthly ?? 0) > 0 || (r.keepYearly ?? 0) > 0);
   };
 
   // Backup and retention both write to the repo — unavailable once it's read-only
@@ -285,7 +286,8 @@ export default function BackupPlansPage() {
 
     try {
       await runBackup(backupPlan);
-      if (backupPlan.retention) {
+      // Same effective-retention test as the scheduler (a zero-only policy is inert).
+      if (backupPlan.retention && hasRetentionRules(backupPlan)) {
         setApplyingRetention(true);
         try {
           await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention, backupPlan.id);

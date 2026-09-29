@@ -352,9 +352,6 @@ export const removeSchedule = (scheduleId: string): Promise<void> =>
 export const toggleSchedule = (scheduleId: string, enabled: boolean): Promise<void> =>
   invoke("toggle_schedule", { scheduleId, enabled });
 
-export const runScheduleNow = (scheduleId: string): Promise<void> =>
-  invoke("run_schedule_now", { scheduleId });
-
 export const describeCronExpr = (cronExpr: string): Promise<string> =>
   invoke("describe_cron_expr", { cronExpr });
 

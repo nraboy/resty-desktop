@@ -97,14 +97,24 @@ pub fn detect_kind(path: &str) -> BackendKind {
 const ALLOWED_RESTIC_KEYS: &[&str] = &["RESTIC_REST_USERNAME", "RESTIC_REST_PASSWORD"];
 
 /// Env var names the app controls itself and a stored credential must never set:
-/// `PATH` (see `NoConsole::augment_path`) and every `RESTIC_*` var except the two
+/// `PATH` (see `NoConsole::augment_path`), every `RESTIC_*` var except the two
 /// REST auth vars in `ALLOWED_RESTIC_KEYS` (repository, password, compression, …
-/// all stay reserved). Shared by `validate_credentials` — which rejects such a
-/// key at entry, the earlier and louder guard — and `repo::apply_backend_env`, which
+/// all stay reserved), and the dynamic-loader families `LD_*` / `DYLD_*`
+/// (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, … — code-execution primitives on the restic
+/// child; no restic backend uses them). A prefix match, so a future loader var is
+/// covered too. Matching is case-insensitive because Windows env names are: a
+/// credential named `restic_repository` or `Path` would otherwise slip past and override
+/// the very variable this guards. Other arbitrary keys (`HTTPS_PROXY`, …) stay allowed for
+/// `Other`/`Rest` — see docs/decisions.md. Shared by `validate_credentials` — which rejects
+/// such a key at entry, the earlier and louder guard — and `repo::apply_backend_env`, which
 /// skips it at apply time so the guarantee holds even for a credential that reached
 /// the DB some other way (e.g. a hand-edited import bundle).
 pub fn is_reserved_key(key: &str) -> bool {
-    key == "PATH" || (key.starts_with("RESTIC_") && !ALLOWED_RESTIC_KEYS.contains(&key))
+    let key = key.to_ascii_uppercase();
+    key == "PATH"
+        || key.starts_with("LD_")
+        || key.starts_with("DYLD_")
+        || (key.starts_with("RESTIC_") && !ALLOWED_RESTIC_KEYS.contains(&key.as_str()))
 }
 
 /// Validates a proposed credential set for `kind`. An empty set is always valid —
@@ -355,6 +365,43 @@ mod tests {
         // Neighbours of the allowlist stay reserved — it is an exact-match list, not a prefix.
         assert!(is_reserved_key("RESTIC_REST_FOO"));
         assert!(is_reserved_key("RESTIC_REST_USERNAME_2"));
+    }
+
+    #[test]
+    fn loader_env_vars_are_reserved() {
+        for key in ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH"] {
+            assert!(is_reserved_key(key), "{key} should be reserved");
+        }
+        // Prefix, not substring — unrelated names that merely contain "LD_" stay allowed.
+        assert!(!is_reserved_key("OLD_TOKEN"));
+        assert!(!is_reserved_key("SOLD_OUT"));
+    }
+
+    #[test]
+    fn reserved_keys_match_case_insensitively() {
+        // Windows env names are case-insensitive, so these would collide there.
+        assert!(is_reserved_key("Path"));
+        assert!(is_reserved_key("restic_repository"));
+        assert!(is_reserved_key("Restic_Password"));
+        assert!(is_reserved_key("ld_preload"));
+        // The allowlist is case-insensitive too, and lowercase proxy vars remain fine.
+        assert!(!is_reserved_key("restic_rest_password"));
+        assert!(!is_reserved_key("https_proxy"));
+    }
+
+    #[test]
+    fn validate_credentials_rejects_ld_preload() {
+        let err = validate_credentials(BackendKind::Rest, &kv(&[("LD_PRELOAD", "/tmp/evil.so")])).unwrap_err();
+        assert!(err.contains("reserved"));
+        assert!(validate_credentials(BackendKind::Other, &kv(&[("DYLD_INSERT_LIBRARIES", "x")])).is_err());
+    }
+
+    #[test]
+    fn https_proxy_still_allowed_for_rest_and_other() {
+        // Pins the settled arbitrary-keys allowance — the loader denylist must not widen
+        // into a general allowlist.
+        assert!(validate_credentials(BackendKind::Rest, &kv(&[("HTTPS_PROXY", "http://p:3128")])).is_ok());
+        assert!(validate_credentials(BackendKind::Other, &kv(&[("HTTPS_PROXY", "http://p:3128")])).is_ok());
     }
 
     // ── duplicate keys ──────────────────────────────────────────────────────

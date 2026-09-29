@@ -587,7 +587,6 @@ pub fn run() {
             schedule::save_schedule,
             schedule::remove_schedule,
             schedule::toggle_schedule,
-            schedule::run_schedule_now,
             schedule::describe_cron_expr,
             // cache
             cache::clear_browse_cache,

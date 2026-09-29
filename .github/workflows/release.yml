@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -64,6 +65,7 @@ jobs:
           - os: macos-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4

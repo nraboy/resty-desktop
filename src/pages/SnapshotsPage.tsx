@@ -144,6 +144,9 @@ export default function SnapshotsPage() {
         setAllRepos(repos);
         const found = repos.find((r) => r.id === repoId) ?? null;
         setRepo(found);
+        // No match means load() (which needs a repo) will never run to clear `loading`, so
+        // release it here — same class as the catch below — to reach "Repository not found".
+        if (!found) setLoading(false);
       })
       .catch((err) => {
         // Without this, a failed repo list leaves `repo` at its initial null and `loading`
@@ -340,6 +343,11 @@ export default function SnapshotsPage() {
       } catch (err: any) {
         setMultiDeleteError(String(err));
         setMultiDeleting(false);
+        // ids[0..i) were already deleted: drop them from the selection so a retry doesn't
+        // re-target gone snapshots, and reload (a cache read — delete_snapshot updates it) so
+        // they leave the list. Mirrors BackupPlansPage/SchedulesPage's identical error path.
+        setSelectedIds(new Set(ids.slice(i)));
+        await load();
         return;
       }
     }
