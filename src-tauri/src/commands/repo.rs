@@ -1212,14 +1212,27 @@ pub fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
         if home.is_empty() {
             return Ok(FullDiskAccessStatus { supported: true, granted: false });
         }
-        let db_path = format!("{home}/Library/Application Support/com.apple.TCC/TCC.db");
-        match std::fs::File::open(&db_path) {
-            Ok(_) => Ok(FullDiskAccessStatus { supported: true, granted: true }),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                Ok(FullDiskAccessStatus { supported: true, granted: false })
+        // Probe several TCC-protected locations. The per-user TCC.db is not present on every
+        // macOS version, so a failed probe (NotFound or denied) just moves on to the next; only
+        // a successful read means "granted"; if every probe fails, report "not granted".
+        let probes = [
+            format!("{home}/Library/Safari"),
+            format!("{home}/Library/Mail"),
+            format!("{home}/Library/Messages"),
+            format!("{home}/Library/Application Support/com.apple.TCC/TCC.db"),
+        ];
+        for p in &probes {
+            let path = std::path::Path::new(p);
+            let res = if path.is_dir() {
+                std::fs::read_dir(path).map(|_| ())
+            } else {
+                std::fs::File::open(path).map(|_| ())
+            };
+            if res.is_ok() {
+                return Ok(FullDiskAccessStatus { supported: true, granted: true });
             }
-            Err(_) => Ok(FullDiskAccessStatus { supported: true, granted: false }),
         }
+        Ok(FullDiskAccessStatus { supported: true, granted: false })
     }
     #[cfg(not(target_os = "macos"))]
     Ok(FullDiskAccessStatus { supported: false, granted: false })
