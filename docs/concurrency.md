@@ -88,6 +88,12 @@ retrofitting every operation at that point.
   modal and the Activity panel. Rich, per-kind detail (current file names, ETA) lives here, not in
   the normalized `task` envelope.
 
+**`retentionSkipped`** (optional, only on a *finished* `backup`, via `OperationCtx::finished_backup`):
+true when the backup completed but no post-backup `forget` will follow (a source path was missing — see
+docs/decisions.md). `task_ctx.finished` fires before `log_backup`, so the Activity panel can't learn this from
+history; `reduceSchedulerBackup` dismisses the scheduled-backup row immediately on it instead of waiting for a
+`forget` op that never starts. Absent (not `false`) on every other event, so their JSON is unchanged.
+
 **Envelope** (`TaskEvent`, camelCase over the wire):
 `operationId` (unique per operation instance — see below), `kind` (`backup`|`restore`|
 `restorePath`|`copy`|`mirror`|`prune`|`forget`|`tag`|`check`|`diff`|`index`|`unlock`|`stats`|

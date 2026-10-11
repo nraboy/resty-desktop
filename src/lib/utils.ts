@@ -10,6 +10,11 @@ export function needsFullDiskAccess(p: string): boolean {
   );
 }
 
+/** True when a restic warning message is a permission problem (Unix and Windows wording). */
+export function isPermissionWarning(message: string): boolean {
+  return /permission denied|operation not permitted|access is denied/i.test(message);
+}
+
 /** Every local file restic must read for this plan: source paths plus both list-file kinds. */
 export function planReadPaths(
   plan: Pick<BackupPlan, "paths" | "filesFrom" | "excludeFiles">,

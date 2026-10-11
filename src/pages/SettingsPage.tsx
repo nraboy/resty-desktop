@@ -21,6 +21,7 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   successChanged: true,
   successUnchanged: false,
   failures: true,
+  warnings: true,
 };
 
 const THEMES: { value: Theme; label: string; description: string }[] = [
@@ -694,6 +695,17 @@ export default function SettingsPage() {
               onChange={(e) => updateNotifications({ successUnchanged: e.target.checked })}
             />
             Success (no files changed)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-400">
+            <input
+              type="checkbox"
+              className="w-4 h-4 accent-blue-500"
+              checked={notifications.warnings}
+              onChange={(e) => updateNotifications({ warnings: e.target.checked })}
+            />
+            <Tooltip content="Backups that saved a snapshot but couldn't read some files, or skipped a missing source path.">
+              <span className="underline decoration-dotted underline-offset-2">Warnings</span>
+            </Tooltip>
           </label>
           <label className="flex items-center gap-2 text-sm text-gray-400">
             <input

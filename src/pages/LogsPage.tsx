@@ -1,12 +1,15 @@
 import { Fragment, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listBackupHistory } from "../lib/invoke";
+import { checkFullDiskAccess, getBackupWarnings, listBackupHistory } from "../lib/invoke";
+import type { FullDiskAccessStatus } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
-import type { BackupHistoryEntry } from "../lib/types";
+import type { BackupHistoryEntry, BackupWarning } from "../lib/types";
 import { formatBytes, formatDate, formatDuration } from "../lib/format";
+import { isPermissionWarning } from "../lib/utils";
 import Button from "../components/Button";
 import EmptyState from "../components/EmptyState";
-import { CheckCircleIcon, XCircleIcon, MinusCircleIcon } from "../components/icons";
+import BackupWarningsList from "../components/BackupWarningsList";
+import { CheckCircleIcon, XCircleIcon, MinusCircleIcon, WarningIcon } from "../components/icons";
 
 const PAGE_SIZE = 10;
 
@@ -17,6 +20,21 @@ export default function LogsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [error, setError] = useState("");
+  // Warning detail per history id, fetched on first expand (the list endpoint omits it).
+  // `null` = fetch failed; the row then shows the count with no detail.
+  const [warningDetail, setWarningDetail] = useState<Record<string, BackupWarning[] | null>>({});
+  // macOS Full Disk Access state, for the hint on permission warnings. Unknown = no hint.
+  const [fdaStatus, setFdaStatus] = useState<FullDiskAccessStatus | null>(null);
+
+  const toggleExpanded = (entry: BackupHistoryEntry) => {
+    const opening = expanded !== entry.id;
+    setExpanded(opening ? entry.id : null);
+    if (opening && entry.warningCount > 0 && !(entry.id in warningDetail)) {
+      getBackupWarnings(entry.id)
+        .then((list) => setWarningDetail((prev) => ({ ...prev, [entry.id]: list })))
+        .catch(() => setWarningDetail((prev) => ({ ...prev, [entry.id]: null })));
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -32,6 +50,9 @@ export default function LogsPage() {
   };
 
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    checkFullDiskAccess().then(setFdaStatus).catch(() => {});
+  }, []);
 
   if (loading) {
     return (
@@ -84,11 +105,13 @@ export default function LogsPage() {
                   {pageEntries.map((entry) => {
                     const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
                     const realError = entry.error && !cancelled;
+                    const hasWarnings = !entry.error && entry.warningCount > 0;
+                    const expandable = realError || hasWarnings;
                     return (
                     <Fragment key={entry.id}>
                       <tr
-                        className={`transition-colors ${realError ? "hover:bg-gray-900/50" : ""}`}
-                        onClick={() => realError && setExpanded(expanded === entry.id ? null : entry.id)}
+                        className={`transition-colors ${expandable ? "hover:bg-gray-900/50" : ""}`}
+                        onClick={() => expandable && toggleExpanded(entry)}
                       >
                         <td className="px-4 py-3">
                           {cancelled ? (
@@ -98,6 +121,10 @@ export default function LogsPage() {
                           ) : entry.error ? (
                             <span title={entry.error}>
                               <XCircleIcon className="w-4 h-4 text-red-300" />
+                            </span>
+                          ) : hasWarnings ? (
+                            <span title={entry.missingSourceCount > 0 ? "Incomplete: source path missing" : `Completed with warnings (${entry.warningCount})`}>
+                              <WarningIcon className="w-4 h-4 text-amber-400" />
                             </span>
                           ) : (
                             <CheckCircleIcon className="w-4 h-4 text-green-400" />
@@ -131,6 +158,25 @@ export default function LogsPage() {
                         <tr className="bg-red-900/20">
                           <td colSpan={9} className="px-4 py-3">
                             <p className="text-xs font-mono text-red-300 whitespace-pre-wrap break-all">{entry.error}</p>
+                          </td>
+                        </tr>
+                      )}
+                      {expanded === entry.id && hasWarnings && (
+                        <tr className="bg-amber-900/20">
+                          <td colSpan={9} className="px-4 py-3">
+                            {entry.id in warningDetail ? (() => {
+                              const list = warningDetail[entry.id] ?? [];
+                              return (
+                                <BackupWarningsList
+                                  warnings={list}
+                                  warningCount={entry.warningCount}
+                                  missingSourceCount={entry.missingSourceCount}
+                                  fdaHint={!!fdaStatus?.supported && !fdaStatus.granted && list.some((w) => isPermissionWarning(w.message))}
+                                />
+                              );
+                            })() : (
+                              <p className="text-xs text-gray-500">Loading…</p>
+                            )}
                           </td>
                         </tr>
                       )}

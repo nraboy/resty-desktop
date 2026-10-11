@@ -580,6 +580,231 @@ pub(crate) fn build_backup_args(
     args
 }
 
+// ── backup outcome classification (restic exit codes) ────────────────────────
+
+/// Max `BackupWarning`s kept per backup run (the uncapped total is still counted). A backup of
+/// `/` as a normal user can produce tens of thousands of unreadable-file errors, and every one
+/// would otherwise land in `backup_history.warnings_json`.
+const WARNING_CAP: usize = 100;
+/// Max chars kept of one warning's message; longer ones are truncated with an ellipsis.
+const WARNING_MSG_MAX: usize = 500;
+/// Max candidate paths `find_missing_sources` will `stat` (positional paths + list-file entries).
+const MISSING_SOURCE_SCAN_CAP: usize = 10_000;
+
+/// One thing restic reported while still completing the backup (an unreadable file), or a
+/// source path that no longer exists. Serialized to the frontend and stored as JSON in
+/// `backup_history.warnings_json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupWarning {
+    pub item: String,
+    pub message: String,
+    /// True for a plan source path (or `--files-from` entry) that doesn't exist at all — a
+    /// stronger condition than one unreadable file, and the one that suppresses retention.
+    pub missing_source: bool,
+}
+
+/// What a *completed* backup (restic exit 0 or 3) returns. `Err` is reserved for runs that
+/// produced no usable snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupOutcome {
+    pub snapshot_id: Option<String>,
+    /// Total issues: unreadable files restic reported (uncapped) plus missing source paths.
+    pub warning_count: u64,
+    pub missing_source_count: u64,
+    /// Capped detail list, missing sources first.
+    pub warnings: Vec<BackupWarning>,
+    /// Decided once, here: retention must not run after a backup that skipped a whole source
+    /// path (its snapshot is missing data the older ones have, so `keep-*` would prune the
+    /// complete ones). Unreadable *files* alone do not set this. The scheduler, the manual
+    /// backup modal and the Activity panel all read this flag rather than re-deriving it.
+    pub retention_skipped: bool,
+    #[serde(skip)]
+    pub summary_line: String,
+}
+
+/// How a finished `restic backup` process is treated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackupExit {
+    Success,
+    /// Exit 3: the snapshot was saved but some source data couldn't be read.
+    Warnings,
+    /// `prefix` is a friendlier line placed *in front of* restic's own stderr (never replacing
+    /// it — retry-on-"already locked" logic elsewhere matches on that text).
+    Failure { prefix: Option<&'static str> },
+}
+
+/// Maps restic's documented exit codes. 10/11/12 were added in restic 0.17, this app's minimum.
+/// Exit 3 only counts as completed when the summary carried a snapshot id — otherwise we'd log
+/// a success with no snapshot. 130 (interrupt) and a signal kill (`None`) are plain failures
+/// here; a genuine cancel is recognised by the caller's `cancelled` flag, not the code.
+pub(crate) fn classify_backup_exit(code: Option<i32>, has_snapshot: bool) -> BackupExit {
+    match code {
+        Some(0) => BackupExit::Success,
+        Some(3) if has_snapshot => BackupExit::Warnings,
+        Some(3) => BackupExit::Failure {
+            prefix: Some("restic reported an incomplete backup but no snapshot was recorded."),
+        },
+        Some(10) => BackupExit::Failure {
+            prefix: Some("Repository not found. Check the repository path."),
+        },
+        Some(11) => BackupExit::Failure {
+            prefix: Some("Could not lock the repository. Another restic process may be using it."),
+        },
+        Some(12) => BackupExit::Failure { prefix: Some("Wrong repository password.") },
+        _ => BackupExit::Failure { prefix: None },
+    }
+}
+
+/// `(item, message)` from a restic `error` JSON message, or `None` for any other line. Tolerant
+/// of missing fields: a quirk in restic's format degrades to a plainer warning, never a panic.
+pub(crate) fn backup_error_fields(v: &serde_json::Value) -> Option<(String, String)> {
+    if v.get("message_type").and_then(|t| t.as_str()) != Some("error") {
+        return None;
+    }
+    let item = v.get("item").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    let message = match v.get("error") {
+        Some(e) => e
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .or_else(|| e.as_str().map(str::to_string)),
+        None => None,
+    }
+    .unwrap_or_else(|| v.to_string());
+    Some((item, message))
+}
+
+pub(crate) fn parse_backup_error_line(line: &str) -> Option<(String, String)> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    backup_error_fields(&v)
+}
+
+/// Collects restic's per-file errors: always counts, stores only the first `WARNING_CAP`.
+#[derive(Debug, Default)]
+pub(crate) struct WarningCollector {
+    pub total: u64,
+    pub entries: Vec<(String, String)>,
+}
+
+impl WarningCollector {
+    pub fn push(&mut self, item: String, message: String) {
+        self.total += 1;
+        if self.entries.len() < WARNING_CAP {
+            self.entries.push((item, truncate_chars(&message, WARNING_MSG_MAX)));
+        }
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// Entries of a `--files-from` list: trimmed, blanks and `#` comments skipped (restic's own
+/// rules), plus anything containing a glob character, which restic expands and we can't `stat`.
+pub(crate) fn files_from_entries(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.contains(['*', '?', '[']))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Comparison key for matching restic's reported `item` against one of our own paths: trimmed,
+/// `\` → `/`, trailing `/` dropped (a lone root kept), lowercased on Windows.
+pub(crate) fn normalize_source(p: &str, windows: bool) -> String {
+    let mut s = p.trim().replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if windows {
+        s = s.to_lowercase();
+    }
+    s
+}
+
+/// Source paths (positional paths plus non-glob `--files-from` entries) that don't exist.
+/// Only `NotFound` counts — a permission error is an ordinary warning. Deterministic across
+/// OSes and restic versions, unlike matching restic's error text. Blocking `stat`s: call from
+/// `spawn_blocking` only (a hung network mount can stall one indefinitely).
+pub(crate) fn find_missing_sources(paths: &[String], files_from: &[String]) -> Vec<String> {
+    let mut candidates: Vec<String> = paths
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    for file in files_from {
+        // Best-effort: an unreadable list file fails the backup on its own, not here.
+        if let Ok(contents) = std::fs::read_to_string(file.trim()) {
+            candidates.extend(files_from_entries(&contents));
+        }
+        if candidates.len() >= MISSING_SOURCE_SCAN_CAP {
+            break;
+        }
+    }
+    candidates.truncate(MISSING_SOURCE_SCAN_CAP);
+    let mut missing: Vec<String> = Vec::new();
+    for p in candidates {
+        let not_found = matches!(
+            std::fs::symlink_metadata(&p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+        if not_found && !missing.contains(&p) {
+            missing.push(p);
+        }
+    }
+    missing
+}
+
+/// Builds the final warning list for an exit-3 run: missing sources first (stronger wording),
+/// then restic's own entries, dropping any whose `item` is a missing source we already report.
+/// Returns `(list, warning_count, missing_source_count)`.
+pub(crate) fn assemble_warnings(
+    missing: &[String],
+    restic: WarningCollector,
+    windows: bool,
+) -> (Vec<BackupWarning>, u64, u64) {
+    let missing_keys: Vec<String> = missing.iter().map(|m| normalize_source(m, windows)).collect();
+    let mut list: Vec<BackupWarning> = missing
+        .iter()
+        .take(WARNING_CAP)
+        .map(|m| BackupWarning {
+            item: m.clone(),
+            message: "Source path not found".to_string(),
+            missing_source: true,
+        })
+        .collect();
+    let mut dropped: u64 = 0;
+    for (item, message) in restic.entries {
+        if missing_keys.contains(&normalize_source(&item, windows)) {
+            dropped += 1;
+            continue;
+        }
+        if list.len() < WARNING_CAP * 2 {
+            list.push(BackupWarning { item, message, missing_source: false });
+        }
+    }
+    let missing_count = missing.len() as u64;
+    let warning_count = restic.total.saturating_sub(dropped) + missing_count;
+    (list, warning_count, missing_count)
+}
+
+/// `snapshot_id` from a restic `summary` line, if present and non-empty.
+fn summary_snapshot_id(summary_line: Option<&str>) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(summary_line?).ok()?;
+    v.get("snapshot_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_backup(
     app: &tauri::AppHandle,
@@ -593,7 +818,7 @@ pub async fn execute_backup(
     tags: Vec<String>,
     opts: BackupOptions,
     origin: TaskOrigin,
-) -> Result<String, String> {
+) -> Result<BackupOutcome, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     // Serialize backups: only one may run at a time. A second concurrent attempt
@@ -661,7 +886,7 @@ pub async fn execute_backup(
             .map(char::from)
             .collect();
         let _ = db.log_backup(
-            &history_id, repo_id, plan_id, None, started_at, 0.0, 0, 0, 0, Some(e.as_str()),
+            &history_id, repo_id, plan_id, None, started_at, 0.0, 0, 0, 0, Some(e.as_str()), None,
         );
         let _ = app.emit("backup:history-updated", ());
         super::notify::notify(app, db, super::notify::NotifyCategory::Failures, "Backup failed", &e);
@@ -675,6 +900,8 @@ pub async fn execute_backup(
             snapshot_id: None,
             error: Some(&e),
             started_at: Some(started_at),
+            warning_count: None,
+            missing_source_count: None,
         });
         return Err(e);
     }
@@ -693,6 +920,8 @@ pub async fn execute_backup(
         snapshot_id: None,
         error: None,
         started_at: Some(started_at),
+        warning_count: None,
+        missing_source_count: None,
     });
 
     let args = build_backup_args(&tags, &paths, &opts);
@@ -721,6 +950,8 @@ pub async fn execute_backup(
     let restic_path_inner = restic_path.clone();
     let restic_path_for_unlock = restic_path.clone();
     let compression_inner = compression.clone();
+    let paths_inner = paths.clone();
+    let files_from_inner = opts.files_from.clone();
     let repo_id_inner = repo_id.to_string();
     let plan_id_inner = plan_id.map(|s| s.to_string());
     let task_progress_inner = task_progress.clone();
@@ -735,8 +966,8 @@ pub async fn execute_backup(
     let child_arc = std::sync::Arc::clone(&backup_handle.child);
     let cancelled_arc = std::sync::Arc::clone(&backup_handle.cancelled);
 
-    let result: Result<String, String> = tauri::async_runtime::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader, Read};
+    let result: Result<BackupOutcome, String> = tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
         use std::process::Stdio;
 
         let mut cmd = std::process::Command::new(&restic_path_inner);
@@ -757,10 +988,28 @@ pub async fn execute_backup(
             .map_err(|e| format!("Failed to run restic: {e}"))?;
 
         let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+        // Read line by line (lossy UTF-8, so an odd byte can't discard the whole capture) while
+        // rebuilding the identical raw stderr text failure messages use; JSON `error` lines
+        // are also parsed in case restic reports per-file errors on this stream.
         let stderr_thread = std::thread::spawn(move || {
-            let mut s = String::new();
-            BufReader::new(stderr).read_to_string(&mut s).ok();
-            s
+            let mut raw = String::new();
+            let mut warns = WarningCollector::default();
+            let mut reader = BufReader::new(stderr);
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf);
+                        if let Some((item, message)) = parse_backup_error_line(line.trim()) {
+                            warns.push(item, message);
+                        }
+                        raw.push_str(&line);
+                    }
+                }
+            }
+            (raw, warns)
         });
 
         let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
@@ -770,6 +1019,7 @@ pub async fn execute_backup(
 
         let reader = BufReader::new(stdout);
         let mut summary_line: Option<String> = None;
+        let mut stdout_warns = WarningCollector::default();
 
         // Drain to EOF unconditionally, even after a cancel is requested — the killed
         // process closes stdout quickly on its own, and breaking early here risks missing
@@ -812,6 +1062,11 @@ pub async fn execute_backup(
                         });
                     }
                     Some("summary") => summary_line = Some(line),
+                    Some("error") => {
+                        if let Some((item, message)) = backup_error_fields(&v) {
+                            stdout_warns.push(item, message);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -821,13 +1076,45 @@ pub async fn execute_backup(
             Some(mut c) => c.wait().map_err(|e| e.to_string())?,
             None => return Err("cancelled".to_string()),
         };
-        let stderr_str = stderr_thread.join().unwrap_or_default();
+        let (stderr_str, stderr_warns) = stderr_thread.join().unwrap_or_default();
 
-        // A successful exit always wins, even if `cancelled` got set in a race (e.g. Stop
-        // clicked just as restic finished) — the backup genuinely completed and must not
-        // be reported as cancelled (which would also discard a valid summary_line).
-        if status.success() {
-            return Ok(summary_line.unwrap_or_default());
+        let snapshot_id = summary_snapshot_id(summary_line.as_deref());
+        let exit = classify_backup_exit(status.code(), snapshot_id.is_some());
+
+        // A completed exit (0, or 3 with a saved snapshot) always wins, even if `cancelled` got
+        // set in a race (e.g. Stop clicked just as restic finished) — the backup genuinely
+        // completed and must not be reported as cancelled (which would also discard a valid
+        // summary_line).
+        match exit {
+            BackupExit::Success => {
+                return Ok(BackupOutcome {
+                    snapshot_id,
+                    warning_count: 0,
+                    missing_source_count: 0,
+                    warnings: Vec::new(),
+                    retention_skipped: false,
+                    summary_line: summary_line.unwrap_or_default(),
+                });
+            }
+            BackupExit::Warnings => {
+                // Prefer the structured stdout stream; stderr is the fallback, never summed
+                // with it (restic reports each error once, so summing could only double-count).
+                let restic_warns = if stdout_warns.total > 0 { stdout_warns } else { stderr_warns };
+                // Stat after the run (not before): costs nothing on clean runs and can't
+                // misreport a path that was there when restic read it.
+                let missing = find_missing_sources(&paths_inner, &files_from_inner);
+                let (warnings, warning_count, missing_source_count) =
+                    assemble_warnings(&missing, restic_warns, cfg!(target_os = "windows"));
+                return Ok(BackupOutcome {
+                    snapshot_id,
+                    warning_count,
+                    missing_source_count,
+                    warnings,
+                    retention_skipped: missing_source_count > 0,
+                    summary_line: summary_line.unwrap_or_default(),
+                });
+            }
+            BackupExit::Failure { .. } => {}
         }
 
         if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
@@ -836,6 +1123,10 @@ pub async fn execute_backup(
 
         let msg = stderr_str.trim();
         let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
+        let base = match exit {
+            BackupExit::Failure { prefix: Some(p) } => format!("{p}\n\n{base}"),
+            _ => base,
+        };
         #[cfg(target_os = "macos")]
         if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
             return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
@@ -848,7 +1139,7 @@ pub async fn execute_backup(
     // Mirrors the "successful exit always wins over a raced cancel" rule just
     // below: report `Finished` even if `cancelled` got set in the same race.
     match &result {
-        Ok(_) => task_ctx.finished(),
+        Ok(o) => task_ctx.finished_backup(o.retention_skipped),
         Err(_) if backup_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) => task_ctx.cancelled(),
         Err(e) => task_ctx.failed(e.clone()),
     }
@@ -876,10 +1167,11 @@ pub async fn execute_backup(
         .collect();
 
     match result {
-        Ok(ref stdout) => {
+        Ok(ref outcome) => {
             // Stats cache is intentionally left alone here — it only refreshes via the
             // manual Refresh button/Refresh All now (see repo.rs's refresh_repo_stats).
-            let summary = stdout
+            let summary = outcome
+                .summary_line
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .find(|v| v.get("message_type").and_then(|t| t.as_str()) == Some("summary"));
@@ -904,9 +1196,16 @@ pub async fn execute_backup(
                 }
             }
 
+            let has_warnings = outcome.warning_count > 0 || outcome.missing_source_count > 0;
+            let history_warnings = has_warnings.then(|| super::cache::HistoryWarnings {
+                count: outcome.warning_count,
+                missing_count: outcome.missing_source_count,
+                list: &outcome.warnings,
+            });
             let _ = db.log_backup(
                 &history_id, repo_id, plan_id, snapshot_id.as_deref(),
                 started_at, duration, files_new, files_changed, bytes_added, None,
+                history_warnings.as_ref(),
             );
             // Fires for every backup (manual or scheduled) — the Activity panel's Recent
             // Logs section listens for this to refresh; the scheduler-only `task` bus
@@ -914,9 +1213,19 @@ pub async fn execute_backup(
             // doesn't cover manual runs, so this stays the one signal both share.
             let _ = app.emit("backup:history-updated", ());
 
-            let category = super::notify::classify_success(files_new, files_changed);
-            let body = format!("{} new, {} changed · {:.1}s", files_new, files_changed, duration);
-            super::notify::notify(app, db, category, "Backup completed", &body);
+            if has_warnings {
+                let first_missing = outcome.warnings.iter().find(|w| w.missing_source).map(|w| w.item.as_str());
+                let (title, body) = super::notify::warning_message(
+                    outcome.warning_count,
+                    outcome.missing_source_count,
+                    first_missing,
+                );
+                super::notify::notify(app, db, super::notify::NotifyCategory::Warnings, title, &body);
+            } else {
+                let category = super::notify::classify_success(files_new, files_changed);
+                let body = format!("{} new, {} changed · {:.1}s", files_new, files_changed, duration);
+                super::notify::notify(app, db, category, "Backup completed", &body);
+            }
             // Webhooks fire for BOTH success variants — a "completed" trigger is not
             // split into changed/unchanged like the OS notification categories are.
             super::webhook::fire_webhooks(db, plan_id, super::webhook::WebhookEvent {
@@ -929,9 +1238,11 @@ pub async fn execute_backup(
                 snapshot_id: snapshot_id.as_deref(),
                 error: None,
                 started_at: Some(started_at),
+                warning_count: (outcome.warning_count > 0).then_some(outcome.warning_count),
+                missing_source_count: (outcome.missing_source_count > 0).then_some(outcome.missing_source_count),
             });
 
-            Ok(stdout.clone())
+            Ok(outcome.clone())
         }
         Err(ref err) => {
             // A genuine cancellation is not a failure — log/notify it distinctly instead of
@@ -941,7 +1252,7 @@ pub async fn execute_backup(
             let log_error = if was_cancelled { CANCELLED_BACKUP_ERROR.to_string() } else { err.clone() };
             let _ = db.log_backup(
                 &history_id, repo_id, plan_id, None,
-                started_at, duration, 0, 0, 0, Some(log_error.as_str()),
+                started_at, duration, 0, 0, 0, Some(log_error.as_str()), None,
             );
             let _ = app.emit("backup:history-updated", ());
 
@@ -964,6 +1275,8 @@ pub async fn execute_backup(
                     snapshot_id: None,
                     error: Some(err),
                     started_at: Some(started_at),
+                    warning_count: None,
+                    missing_source_count: None,
                 });
             }
 
@@ -985,7 +1298,7 @@ pub async fn run_backup(
     paths: Vec<String>,
     tags: Vec<String>,
     options: BackupOptions,
-) -> Result<String, String> {
+) -> Result<BackupOutcome, String> {
     execute_backup(&app, &db, &master_key, &backup_handle, &repo_locks, &repo_id, plan_id.as_deref(), paths, tags, options, TaskOrigin::Manual).await
 }
 
@@ -1705,6 +2018,7 @@ pub(crate) fn log_retention_failure(
         0,
         0,
         Some(&format!("{RETENTION_FAILED_PREFIX} {error}")),
+        None,
     );
     // Same event Recent Logs already listens for on every backup outcome — see
     // execute_backup's log_backup call sites above.
@@ -1736,6 +2050,7 @@ pub(crate) fn log_schedule_failure(app: &tauri::AppHandle, db: &AppDb, schedule_
         0,
         0,
         Some(&format!("Schedule '{schedule_name}' could not be advanced: {error}")),
+        None,
     );
     let _ = app.emit("backup:history-updated", ());
 }
@@ -1786,6 +2101,9 @@ mod tests {
         build_backup_args, build_exclude_args, build_list_file_args, build_retention_args,
         check_retention_scope, has_effective_retention, non_blank_tags, normalize_pack_size,
         parse_diff_output, validate_snapshot_id, BackupOptions,
+        assemble_warnings, backup_error_fields, classify_backup_exit, files_from_entries,
+        find_missing_sources, normalize_source, parse_backup_error_line, BackupExit,
+        WarningCollector, WARNING_CAP, WARNING_MSG_MAX,
     };
     use crate::commands::cache::{BackupPlan, ExcludeFile, RetentionPolicy};
 
@@ -2388,5 +2706,140 @@ mod tests {
             .expect("waiter must resolve promptly, not wait for the held turn to release")
             .unwrap();
         assert_eq!(result, "cancelled");
+    }
+
+    // ── backup exit classification / warnings ────────────────────────────────
+
+    #[test]
+    fn classify_exit_codes() {
+        assert_eq!(classify_backup_exit(Some(0), true), BackupExit::Success);
+        assert_eq!(classify_backup_exit(Some(0), false), BackupExit::Success);
+        assert_eq!(classify_backup_exit(Some(3), true), BackupExit::Warnings);
+        for (code, needle) in [(10, "not found"), (11, "lock"), (12, "password")] {
+            match classify_backup_exit(Some(code), true) {
+                BackupExit::Failure { prefix: Some(p) } => {
+                    assert!(p.to_lowercase().contains(needle), "code {code}: {p}");
+                    assert!(!p.to_lowercase().contains("cancelled"));
+                }
+                other => panic!("code {code}: {other:?}"),
+            }
+        }
+        for code in [Some(1), Some(130), Some(2), None] {
+            assert_eq!(classify_backup_exit(code, true), BackupExit::Failure { prefix: None });
+        }
+    }
+
+    #[test]
+    fn exit_3_without_snapshot_is_a_failure() {
+        match classify_backup_exit(Some(3), false) {
+            BackupExit::Failure { prefix: Some(p) } => assert!(p.contains("no snapshot")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_line_variants() {
+        let full = r#"{"message_type":"error","error":{"message":"open /etc/shadow: permission denied"},"during":"archival","item":"/etc/shadow"}"#;
+        assert_eq!(
+            parse_backup_error_line(full),
+            Some(("/etc/shadow".to_string(), "open /etc/shadow: permission denied".to_string()))
+        );
+        // error as a bare string
+        let s = r#"{"message_type":"error","error":"boom","item":"/x"}"#;
+        assert_eq!(parse_backup_error_line(s), Some(("/x".to_string(), "boom".to_string())));
+        // missing item and error: falls back to the raw JSON, never panics
+        let bare = r#"{"message_type":"error"}"#;
+        let (item, msg) = parse_backup_error_line(bare).unwrap();
+        assert_eq!(item, "");
+        assert!(msg.contains("message_type"));
+        // other message types and non-JSON are ignored
+        assert_eq!(parse_backup_error_line(r#"{"message_type":"status"}"#), None);
+        assert_eq!(parse_backup_error_line(r#"{"message_type":"exit_error","code":3}"#), None);
+        assert_eq!(parse_backup_error_line("Warning: at least one source file could not be read"), None);
+        assert!(backup_error_fields(&serde_json::json!({"message_type": "summary"})).is_none());
+    }
+
+    #[test]
+    fn collector_caps_entries_but_counts_all() {
+        let mut c = WarningCollector::default();
+        for i in 0..(WARNING_CAP + 50) {
+            c.push(format!("/f{i}"), "denied".to_string());
+        }
+        assert_eq!(c.total as usize, WARNING_CAP + 50);
+        assert_eq!(c.entries.len(), WARNING_CAP);
+        assert_eq!(c.entries[0].0, "/f0");
+    }
+
+    #[test]
+    fn collector_truncates_long_messages_on_char_boundaries() {
+        let mut c = WarningCollector::default();
+        c.push("/x".into(), "é".repeat(WARNING_MSG_MAX + 10));
+        let m = &c.entries[0].1;
+        assert_eq!(m.chars().count(), WARNING_MSG_MAX + 1);
+        assert!(m.ends_with('…'));
+        c.push("/y".into(), "short".into());
+        assert_eq!(c.entries[1].1, "short");
+    }
+
+    #[test]
+    fn files_from_entries_skips_blanks_comments_and_globs() {
+        let txt = "/a\n  /b  \n\n# comment\n/c/*.log\n/d?\n/e[1]\n/f";
+        assert_eq!(files_from_entries(txt), strs(&["/a", "/b", "/f"]));
+    }
+
+    #[test]
+    fn normalize_source_handles_slashes_and_case() {
+        assert_eq!(normalize_source(" /mnt/x/ ", false), "/mnt/x");
+        assert_eq!(normalize_source("/", false), "/");
+        assert_eq!(normalize_source("C:\\Data\\", true), "c:/data");
+        assert_eq!(normalize_source("C:\\Data", false), "C:/Data");
+    }
+
+    #[test]
+    fn find_missing_sources_only_reports_not_found() {
+        let dir = std::env::temp_dir().join(format!("resty-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("present");
+        std::fs::write(&present, "x").unwrap();
+        let gone = dir.join("gone");
+        let gone_in_list = dir.join("gone-in-list");
+        let list = dir.join("list.txt");
+        std::fs::write(
+            &list,
+            format!("{}\n{}\n# {}\n", present.display(), gone_in_list.display(), dir.join("commented").display()),
+        )
+        .unwrap();
+
+        let paths = vec![present.display().to_string(), gone.display().to_string(), gone.display().to_string()];
+        let missing = find_missing_sources(&paths, &[list.display().to_string(), "/nonexistent-list-file".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(missing, vec![gone.display().to_string(), gone_in_list.display().to_string()]);
+    }
+
+    #[test]
+    fn assemble_warnings_orders_missing_first_and_drops_duplicates() {
+        let mut c = WarningCollector::default();
+        c.push("/etc/shadow".into(), "permission denied".into());
+        c.push("/mnt/x/".into(), "lstat /mnt/x: no such file or directory".into());
+        c.push("/etc/gshadow".into(), "permission denied".into());
+        let (list, count, missing) = assemble_warnings(&strs(&["/mnt/x"]), c, false);
+        assert_eq!(missing, 1);
+        assert_eq!(count, 3); // 2 unreadable files + 1 missing source; restic's /mnt/x line dropped
+        assert_eq!(list.len(), 3);
+        assert!(list[0].missing_source && list[0].item == "/mnt/x");
+        assert!(list[1..].iter().all(|w| !w.missing_source));
+    }
+
+    #[test]
+    fn assemble_warnings_without_missing_keeps_uncapped_count() {
+        let mut c = WarningCollector::default();
+        for i in 0..(WARNING_CAP + 5) {
+            c.push(format!("/f{i}"), "denied".into());
+        }
+        let (list, count, missing) = assemble_warnings(&[], c, false);
+        assert_eq!(missing, 0);
+        assert_eq!(count as usize, WARNING_CAP + 5);
+        assert_eq!(list.len(), WARNING_CAP);
     }
 }

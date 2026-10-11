@@ -21,7 +21,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | File picker | `tauri-plugin-dialog` (xdg-desktop-portal backend on Linux, not GTK; see docs/decisions.md) |
 | Shell plugin | `tauri-plugin-shell` — only `open` is exposed (`shell:allow-open`, used for hardcoded http(s) links in App.tsx/SettingsPage.tsx); `"open": true` applies the plugin's default validator (http(s)/mailto/tel only) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
-| Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/failure, each gated by a global setting (`commands/notify.rs`) |
+| Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/warnings/failure, each gated by a global setting (`commands/notify.rs`) |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 4 (`v1` feature), opt-in, stores the *derived* master key; macOS/Windows guaranteed, Linux (Secret Service) best-effort; see docs/data.md |
@@ -41,6 +41,7 @@ src/
   index.css             # Tailwind directives + global styles
   components/
     ActionButton.tsx      # Canonical row-action button: icon + label, label reveals as text at the `wide` breakpoint — see docs/frontend.md
+    BackupWarningsList.tsx # Shared detail view for a backup that completed with warnings (restic exit 3): missing sources first, unreadable files, retention-skipped note, macOS FDA hint — see docs/frontend.md
     Button.tsx            # primary/secondary/danger/ghost variants
     ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen
     EmptyState.tsx        # Empty list placeholder
@@ -172,7 +173,7 @@ Retain always: `tasks.rs` defines a uniform `task` event (`TaskEvent`) layered *
 never instead of, existing detailed feeds (`backup:progress`, etc.). Envelope: `operationId`
 (unique per operation instance — the correlation key, since `repoId` alone can't distinguish
 concurrent operations), `kind`, `phase` (`started`|`progress`|`cancelling`|`cancelled`|
-`finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at`. Every
+`finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at` (plus `retentionSkipped`, set only on a finished `backup`). Every
 restic-shelling operation is wired via `OperationCtx`, except pure-DB reads (`list_snapshots`,
 `get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
 (`clean_cache`, the "Clean Orphaned Data" button) is the one kind that emits `repoId: ""` — it
@@ -204,12 +205,19 @@ tolerated; any other failure aborts startup) — never a bare `let _ = conn.exec
 These were deliberately kept as-is after prior audits raised them. Read the linked entry before
 proposing a change — several are pinned by a named test or reference a confirmed regression.
 
-- Notification preferences have no "Warnings" category — restic ≥0.17 (this app's own minimum
-  supported version) always exits non-zero for the one condition it would represent (per-file read
-  errors during an otherwise-successful backup), so `execute_backup`'s exit-0 success path can never
-  observe `error_count > 0`. Re-adding it needs `execute_backup` to specifically detect restic exit
-  code 3 and reclassify that case (a `backup_history`/LogsPage semantics change, not just a
-  notification one) — not a trivial toggle re-add.
+- A restic backup that exits **3** (snapshot saved, some source data unreadable) is **completed
+  with warnings**, not a failure (issue #36): `execute_backup` classifies the exit code through the
+  pure `classify_backup_exit` (3 counts only when the summary carried a `snapshot_id`, otherwise a
+  failure), logs it with its `snapshot_id` plus `warning_count`/`missing_source_count`/
+  `warnings_json`, appends the snapshot to the cache, and notifies under the `Warnings` category.
+  A plan source path that no longer exists is a stronger warning (its own wording), found by the
+  app's own post-run `stat` (`find_missing_sources`), not by matching restic's error text.
+  **Retention is skipped only when a source path is missing** — never merely because files were
+  unreadable, or a chronically-warning plan (e.g. `/etc` as non-root) would never prune. The backend
+  decides this once (`BackupOutcome::retention_skipped`, also carried on the finished `backup` task
+  event as `retentionSkipped`); the scheduler, BackupPlansPage and the Activity panel all read the
+  flag rather than re-deriving it. Don't re-add a notification-only "warnings" path or make warning
+  runs apply/skip retention differently — see docs/decisions.md
 - Webhook delivery is fire-and-forget **by design, with silent failures**: all of a plan's
   endpoints are POSTed sequentially on one detached `spawn_blocking` thread, every result
   discarded (`let _ =`), no retry/log/notification — a dead webhook must never fail or delay

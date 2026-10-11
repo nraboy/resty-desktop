@@ -66,7 +66,7 @@ import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
 import Tooltip from "./Tooltip";
-import { CheckCircleIcon, XCircleIcon, MinusCircleIcon } from "./icons";
+import { CheckCircleIcon, XCircleIcon, MinusCircleIcon, WarningIcon } from "./icons";
 
 function SectionHeading({ children }: { children: string }) {
   return <h3 className="text-xs font-semibold text-gray-500 tracking-wider uppercase px-4 pt-4 pb-2">{children}</h3>;
@@ -568,6 +568,7 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
           <div className="space-y-2 px-4 pb-4">
             {recentLogs.map((entry) => {
               const cancelled = entry.error === CANCELLED_BACKUP_ERROR;
+              const hasWarnings = !entry.error && entry.warningCount > 0;
               return (
               <div key={entry.id} className="space-y-0.5">
                 <div className="flex items-center gap-2">
@@ -575,6 +576,8 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
                     <MinusCircleIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
                   ) : entry.error ? (
                     <XCircleIcon className="w-4 h-4 text-red-300 flex-shrink-0" />
+                  ) : hasWarnings ? (
+                    <WarningIcon className="w-4 h-4 text-amber-400 flex-shrink-0" />
                   ) : (
                     <CheckCircleIcon className="w-4 h-4 text-green-400 flex-shrink-0" />
                   )}
@@ -583,7 +586,7 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
                   </p>
                 </div>
                 <p className="text-xs text-gray-500 truncate pl-6" title={cancelled ? undefined : entry.error}>
-                  {cancelled ? `Cancelled, ${formatRelative(entry.startedAt)}` : entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
+                  {cancelled ? `Cancelled, ${formatRelative(entry.startedAt)}` : entry.error ? `Failed, ${formatRelative(entry.startedAt)}` : hasWarnings ? `${entry.missingSourceCount > 0 ? "Incomplete" : "Completed with warnings"}, ${formatRelative(entry.startedAt)}` : `Completed, ${formatRelative(entry.startedAt)}`}
                 </p>
               </div>
               );

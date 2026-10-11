@@ -303,6 +303,26 @@ describe("reduceSchedulerBackup", () => {
     expect(state).toMatchObject({ phase: "backup", backupFinished: true, currentOperationId: "opBackup1" });
   });
 
+  it("clears immediately when the finished backup says retention is skipped", () => {
+    const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    const result = reduceSchedulerBackup(started, schedulerEvent({ operationId: "opBackup1", phase: "finished", retentionSkipped: true }));
+    expect(result).toBeNull();
+  });
+
+  it("keeps waiting for retention when retentionSkipped is false or absent", () => {
+    for (const retentionSkipped of [false, undefined]) {
+      const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+      const result = reduceSchedulerBackup(started, schedulerEvent({ operationId: "opBackup1", phase: "finished", retentionSkipped }));
+      expect(result).toMatchObject({ backupFinished: true });
+    }
+  });
+
+  it("ignores a retentionSkipped finish for a stale operationId", () => {
+    const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));
+    const result = reduceSchedulerBackup(started, schedulerEvent({ operationId: "opOther", phase: "finished", retentionSkipped: true }));
+    expect(result).toBe(started);
+  });
+
   it("clears on a matching backup failed/cancelled event", () => {
     for (const phase of ["failed", "cancelled"] as const) {
       const started = reduceSchedulerBackup(null, schedulerEvent({ operationId: "opBackup1", phase: "started" }));

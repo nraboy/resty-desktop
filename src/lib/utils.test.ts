@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isWindowsUserAgent, needsFullDiskAccess, parsePackSize, planReadPaths } from "./utils";
+import { isPermissionWarning, isWindowsUserAgent, needsFullDiskAccess, parsePackSize, planReadPaths } from "./utils";
 
 describe("needsFullDiskAccess", () => {
   describe("~/Library paths", () => {
@@ -148,5 +148,18 @@ describe("planReadPaths", () => {
       excludeFiles: [{ path: "/Users/alice/Library/ex.txt", ignoreCase: false }],
     };
     expect(planReadPaths(plan).some(needsFullDiskAccess)).toBe(true);
+  });
+});
+
+describe("isPermissionWarning", () => {
+  it("matches Unix and Windows permission wording", () => {
+    expect(isPermissionWarning("open /etc/shadow: permission denied")).toBe(true);
+    expect(isPermissionWarning("Operation not permitted")).toBe(true);
+    expect(isPermissionWarning("Access is denied.")).toBe(true);
+  });
+
+  it("does not match other read errors", () => {
+    expect(isPermissionWarning("Source path not found")).toBe(false);
+    expect(isPermissionWarning("input/output error")).toBe(false);
   });
 });

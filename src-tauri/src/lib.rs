@@ -596,6 +596,7 @@ pub fn run() {
             cache::get_db_size,
             cache::list_backup_history,
             cache::list_plan_last_runs,
+            cache::get_backup_warnings,
             // import / export
             transfer::export_data,
             transfer::preview_import,

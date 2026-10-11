@@ -68,6 +68,8 @@ const WEBHOOK_PLACEHOLDERS = [
   "{bytesAdded}",
   "{snapshotId}",
   "{errorMessage}",
+  "{warningCount}",
+  "{missingSourceCount}",
 ];
 
 const WEBHOOK_PROVIDER_LABELS: Record<WebhookProvider, string> = {

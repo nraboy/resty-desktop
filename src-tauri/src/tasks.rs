@@ -129,6 +129,11 @@ pub struct TaskEvent {
     pub progress: Option<TaskProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set only on a finished `Backup` (see `OperationCtx::finished_backup`): true when the
+    /// backup completed but retention must not follow, so a consumer waiting for the
+    /// post-backup `forget` op (the Activity panel) knows none is coming. Absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_skipped: Option<bool>,
     pub at: i64,
 }
 
@@ -205,6 +210,7 @@ fn build_event(
         origin,
         progress,
         error,
+        retention_skipped: None,
         at: now_millis(),
     }
 }
@@ -422,18 +428,23 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
     }
 
     pub fn finished(self) {
-        self.terminate(TaskPhase::Finished, None);
+        self.terminate(TaskPhase::Finished, None, None);
+    }
+
+    /// `finished` for a completed backup, carrying whether retention is being skipped.
+    pub fn finished_backup(self, retention_skipped: bool) {
+        self.terminate(TaskPhase::Finished, None, Some(retention_skipped));
     }
 
     pub fn failed(self, error: impl Into<String>) {
-        self.terminate(TaskPhase::Failed, Some(error.into()));
+        self.terminate(TaskPhase::Failed, Some(error.into()), None);
     }
 
     pub fn cancelled(self) {
-        self.terminate(TaskPhase::Cancelled, None);
+        self.terminate(TaskPhase::Cancelled, None, None);
     }
 
-    fn terminate(&self, phase: TaskPhase, error: Option<String>) {
+    fn terminate(&self, phase: TaskPhase, error: Option<String>, retention_skipped: Option<bool>) {
         // compare_exchange so a concurrent Drop (unwind) and an explicit terminal
         // call can never both fire — first one wins, matching the busy-guard
         // pattern used elsewhere in this codebase.
@@ -449,7 +460,7 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
                 *guard = None;
             }
         }
-        let ev = build_event(
+        let mut ev = build_event(
             &self.operation_id,
             self.kind,
             phase,
@@ -459,6 +470,7 @@ impl<S: TaskSink + Clone> OperationCtx<S> {
             None,
             error,
         );
+        ev.retention_skipped = retention_skipped;
         self.sink.send(&ev);
     }
 }
@@ -468,7 +480,7 @@ impl<S: TaskSink + Clone> Drop for OperationCtx<S> {
         // Backstop only — see struct doc comment. Every wired call site calls a
         // terminal method explicitly; reaching here un-terminated means an early
         // return or panic unwind skipped it.
-        self.terminate(TaskPhase::Failed, Some("operation dropped".to_string()));
+        self.terminate(TaskPhase::Failed, Some("operation dropped".to_string()), None);
     }
 }
 
@@ -553,6 +565,31 @@ mod tests {
             assert_eq!(ev.target_id.as_deref(), Some("plan-1"));
             assert_eq!(ev.origin, TaskOrigin::Manual);
         }
+    }
+
+    #[test]
+    fn retention_skipped_only_serialized_on_finished_backup() {
+        let make = || {
+            let sink = RecordingSink::new();
+            let ctx = OperationCtx::new(
+                sink.clone(), TaskKind::Backup, "repo-1", None, TaskOrigin::Scheduler, None,
+            );
+            (sink, ctx)
+        };
+        let (sink, ctx) = make();
+        ctx.finished();
+        let json = serde_json::to_value(&sink.events()[1]).unwrap();
+        assert!(json.get("retentionSkipped").is_none());
+
+        let (sink, ctx) = make();
+        ctx.finished_backup(true);
+        let json = serde_json::to_value(&sink.events()[1]).unwrap();
+        assert_eq!(json["retentionSkipped"], true);
+
+        let (sink, ctx) = make();
+        ctx.finished_backup(false);
+        let json = serde_json::to_value(&sink.events()[1]).unwrap();
+        assert_eq!(json["retentionSkipped"], false);
     }
 
     #[test]
@@ -662,8 +699,8 @@ mod tests {
             TaskOrigin::Manual,
             None,
         );
-        ctx.terminate(TaskPhase::Finished, None);
-        ctx.terminate(TaskPhase::Failed, Some("should not appear".to_string()));
+        ctx.terminate(TaskPhase::Finished, None, None);
+        ctx.terminate(TaskPhase::Failed, Some("should not appear".to_string()), None);
 
         let events = sink.events();
         // started + one terminal only — the second terminate() call is a no-op.

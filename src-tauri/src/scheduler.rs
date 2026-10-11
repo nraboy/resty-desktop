@@ -113,7 +113,7 @@ async fn tick(app: &tauri::AppHandle) {
             // reduceSchedulerBackup. The legacy scheduler:backup-started/-finished and
             // retention-started events this loop used to emit alongside were retired once that
             // migration landed; the bus already carries everything they did.
-            let ok = execute_backup(
+            let outcome = execute_backup(
                 app,
                 &db,
                 &master_key,
@@ -126,10 +126,12 @@ async fn tick(app: &tauri::AppHandle) {
                 BackupOptions::from(&plan),
                 TaskOrigin::Scheduler,
             )
-            .await
-            .is_ok();
+            .await;
+            // Retention follows a completed backup unless the backend flagged it skipped (a
+            // whole source path was missing — see BackupOutcome::retention_skipped).
+            let retention_ok = matches!(&outcome, Ok(o) if !o.retention_skipped);
 
-            if ok {
+            if retention_ok {
                 if let Some(r) = &plan.retention {
                     if has_effective_retention(r) {
                         // apply_retention's own OperationCtx (kind: Forget) tells the Activity

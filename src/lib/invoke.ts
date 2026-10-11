@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupPlan, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -214,7 +214,7 @@ export const tagSnapshot = (
 ): Promise<void> =>
   invoke("tag_snapshot", { repoId, snapshotId, addTags, removeTags });
 
-export const runBackup = (plan: BackupPlan): Promise<string> =>
+export const runBackup = (plan: BackupPlan): Promise<BackupOutcome> =>
   invoke("run_backup", {
     repoId: plan.repoId,
     planId: plan.id,
@@ -376,6 +376,9 @@ export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>
 
 export const listPlanLastRuns = (): Promise<PlanLastRun[]> =>
   invoke("list_plan_last_runs");
+
+export const getBackupWarnings = (historyId: string): Promise<BackupWarning[]> =>
+  invoke("get_backup_warnings", { historyId });
 
 // ── import / export ─────────────────────────────────────────────────────────
 

@@ -91,7 +91,7 @@ export interface SnapshotStats {
   totalFileCount: number;
 }
 
-/** Global notification toggles, gating the five `.show()` sites in execute_backup (Rust) —
+/** Global notification toggles, gating the `.show()` sites in execute_backup (Rust) —
  * see notify.rs. Applies to manual and scheduled backups alike; muting a category only hides
  * the desktop notification, never the Recent Logs entry or Activity panel event. */
 export interface NotificationSettings {
@@ -99,6 +99,8 @@ export interface NotificationSettings {
   successChanged: boolean;
   successUnchanged: boolean;
   failures: boolean;
+  /** Backup saved its snapshot but couldn't read some files, or skipped a missing source. */
+  warnings: boolean;
 }
 
 export interface BackupHistoryEntry {
@@ -114,6 +116,11 @@ export interface BackupHistoryEntry {
   filesChanged: number;
   bytesAdded: number;
   error?: string;
+  /** Issues on a run that still saved its snapshot (restic exit 3); 0 on a clean run. The
+   *  detail list is fetched on demand with `getBackupWarnings`. */
+  warningCount: number;
+  /** Subset of `warningCount`: plan source paths that no longer exist. */
+  missingSourceCount: number;
 }
 
 /** Newest backup attempt for one plan (manual or scheduled) — see list_plan_last_runs. */
@@ -121,6 +128,25 @@ export interface PlanLastRun {
   planId: string;
   startedAt: number;
   error?: string;
+  warningCount: number;
+  missingSourceCount: number;
+}
+
+/** One unreadable file restic reported, or a plan source path that doesn't exist. */
+export interface BackupWarning {
+  item: string;
+  message: string;
+  missingSource: boolean;
+}
+
+/** What `run_backup` resolves with for a backup that completed (restic exit 0 or 3). */
+export interface BackupOutcome {
+  snapshotId?: string;
+  warningCount: number;
+  missingSourceCount: number;
+  warnings: BackupWarning[];
+  /** True when retention must not follow (a whole source path was missing). */
+  retentionSkipped: boolean;
 }
 
 /** Sentinel `error` value for a genuinely cancelled backup — see snapshot.rs's
@@ -227,6 +253,8 @@ export interface TaskEvent {
   origin: TaskOrigin;
   progress?: TaskProgress;
   error?: string;
+  /** Only on a finished `backup`: true when no post-backup `forget` op will follow. */
+  retentionSkipped?: boolean;
   at: number;
 }
 

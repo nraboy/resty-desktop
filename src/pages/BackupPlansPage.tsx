@@ -3,17 +3,18 @@ import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { cancelBackup, checkFullDiskAccess, forgetByPlan, listBackupPlans, listPlanLastRuns, listRepos, removeBackupPlan, runBackup } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { BackupPlan, BackupProgress, PlanLastRun, Repository } from "../lib/types";
+import type { BackupOutcome, BackupPlan, BackupProgress, PlanLastRun, Repository } from "../lib/types";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatDuration, formatPlanSources, formatRelative, formatTimestamp } from "../lib/format";
 import { useActivity } from "../lib/activity";
-import { isWindows, needsFullDiskAccess, planReadPaths } from "../lib/utils";
+import { isPermissionWarning, isWindows, needsFullDiskAccess, planReadPaths } from "../lib/utils";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Spinner from "../components/Spinner";
+import BackupWarningsList from "../components/BackupWarningsList";
 import { TrashIcon, PencilIcon, WarningIcon } from "../components/icons";
 
 export default function BackupPlansPage() {
@@ -38,6 +39,8 @@ export default function BackupPlansPage() {
   const [backupCancelling, setBackupCancelling] = useState(false);
   const [backupError, setBackupError] = useState("");
   const [backupDone, setBackupDone] = useState(false);
+  // What the last completed run reported (warnings, retention skipped); null until one finishes.
+  const [backupOutcome, setBackupOutcome] = useState<BackupOutcome | null>(null);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
   const [applyingRetention, setApplyingRetention] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -223,6 +226,7 @@ export default function BackupPlansPage() {
     setBackupPlan(plan);
     setBackupError("");
     setBackupDone(false);
+    setBackupOutcome(null);
     setProgress(null);
   };
 
@@ -233,6 +237,7 @@ export default function BackupPlansPage() {
       setBackupPlan(plan);
       setBackupError("");
       setBackupDone(false);
+      setBackupOutcome(null);
       setProgress(null);
     }
   };
@@ -267,6 +272,7 @@ export default function BackupPlansPage() {
     setBackupCancelling(false);
     setBackupError("");
     setBackupDone(false);
+    setBackupOutcome(null);
     setProgress(null);
     setApplyingRetention(false);
 
@@ -285,9 +291,12 @@ export default function BackupPlansPage() {
     unlistenRef.current = unlisten;
 
     try {
-      await runBackup(backupPlan);
-      // Same effective-retention test as the scheduler (a zero-only policy is inert).
-      if (backupPlan.retention && hasRetentionRules(backupPlan)) {
+      const outcome = await runBackup(backupPlan);
+      setBackupOutcome(outcome);
+      // Same effective-retention test as the scheduler (a zero-only policy is inert), plus the
+      // backend's retentionSkipped flag (a whole source path was missing, so this snapshot is
+      // incomplete and pruning against it could delete complete ones).
+      if (backupPlan.retention && hasRetentionRules(backupPlan) && !outcome.retentionSkipped) {
         setApplyingRetention(true);
         try {
           await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention, backupPlan.id);
@@ -453,7 +462,9 @@ export default function BackupPlansPage() {
                         ? " · Cancelled"
                         : run.error
                           ? <> · <span className="text-red-400">Failed</span></>
-                          : null}
+                          : run.warningCount > 0
+                            ? <> · <span className="text-amber-400">{run.missingSourceCount > 0 ? "Incomplete" : "Warnings"}</span></>
+                            : null}
                     </p>
                   );
                 })()}
@@ -784,7 +795,24 @@ export default function BackupPlansPage() {
                   {backupError}
                 </div>
               )}
-              {backupDone && (
+              {backupDone && backupOutcome && backupOutcome.warningCount > 0 && (
+                <div className="p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg text-sm space-y-2 max-h-72 overflow-auto">
+                  <p className="text-amber-300 font-medium">
+                    {backupOutcome.missingSourceCount > 0
+                      ? "Backup incomplete: source path missing."
+                      : "Backup completed with warnings."}
+                    {" "}A snapshot was saved.
+                  </p>
+                  <BackupWarningsList
+                    warnings={backupOutcome.warnings}
+                    warningCount={backupOutcome.warningCount}
+                    missingSourceCount={backupOutcome.missingSourceCount}
+                    retentionSkipped={backupOutcome.retentionSkipped && !!backupPlan?.retention && hasRetentionRules(backupPlan)}
+                    fdaHint={!!fdaStatus?.supported && !fdaStatus.granted && backupOutcome.warnings.some((w) => isPermissionWarning(w.message))}
+                  />
+                </div>
+              )}
+              {backupDone && !(backupOutcome && backupOutcome.warningCount > 0) && (
                 <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
                   Backup completed successfully.
                 </div>

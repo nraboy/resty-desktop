@@ -24,6 +24,10 @@ pub struct WebhookEvent<'a> {
     pub snapshot_id: Option<&'a str>,
     pub error: Option<&'a str>,
     pub started_at: Option<i64>,
+    /// Set only on a completed-with-warnings run (> 0), so a clean run's payload and message
+    /// are byte-identical to before this existed.
+    pub warning_count: Option<u64>,
+    pub missing_source_count: Option<u64>,
 }
 
 /// Flat JSON body for the generic provider — camelCase keys, absent fields omitted.
@@ -47,6 +51,10 @@ struct GenericPayload<'a> {
     snapshot_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing_source_count: Option<u64>,
 }
 
 pub(crate) fn event_name(stage: WebhookStage) -> &'static str {
@@ -61,14 +69,22 @@ pub(crate) fn event_name(stage: WebhookStage) -> &'static str {
 pub(crate) fn build_message(ev: &WebhookEvent, plan_name: &str) -> String {
     match ev.stage {
         WebhookStage::Started => format!("Backup started — {plan_name} ({})", ev.repo_name),
-        WebhookStage::Completed => format!(
-            "Backup completed — {plan_name} ({}): {} new, {} changed, +{} bytes in {:.1}s",
-            ev.repo_name,
-            ev.files_new.unwrap_or(0),
-            ev.files_changed.unwrap_or(0),
-            ev.bytes_added.unwrap_or(0),
-            ev.duration_secs.unwrap_or(0.0),
-        ),
+        WebhookStage::Completed => {
+            let mut msg = format!(
+                "Backup completed — {plan_name} ({}): {} new, {} changed, +{} bytes in {:.1}s",
+                ev.repo_name,
+                ev.files_new.unwrap_or(0),
+                ev.files_changed.unwrap_or(0),
+                ev.bytes_added.unwrap_or(0),
+                ev.duration_secs.unwrap_or(0.0),
+            );
+            if ev.missing_source_count.unwrap_or(0) > 0 {
+                msg.push_str(" — source path missing");
+            } else if let Some(n) = ev.warning_count.filter(|&n| n > 0) {
+                msg.push_str(&format!(" — {n} {} could not be read", if n == 1 { "file" } else { "files" }));
+            }
+            msg
+        }
         WebhookStage::Failed => format!(
             "Backup failed — {plan_name} ({}): {}",
             ev.repo_name,
@@ -99,6 +115,8 @@ pub(crate) fn build_body(
             bytes_added: ev.bytes_added,
             snapshot_id: ev.snapshot_id,
             error: ev.error,
+            warning_count: ev.warning_count,
+            missing_source_count: ev.missing_source_count,
         })
         .unwrap_or_default(),
         WebhookProvider::Discord => {
@@ -144,6 +162,8 @@ pub(crate) const PLACEHOLDERS: &[&str] = &[
     "bytesAdded",
     "snapshotId",
     "errorMessage",
+    "warningCount",
+    "missingSourceCount",
 ];
 
 /// (name, interpolated text) pairs for one event. String values are JSON-escaped
@@ -162,6 +182,8 @@ fn placeholder_pairs(ev: &WebhookEvent, plan_name: &str) -> Vec<(&'static str, S
         ("bytesAdded", ev.bytes_added.unwrap_or(0).to_string()),
         ("snapshotId", json_escape(ev.snapshot_id.unwrap_or(""))),
         ("errorMessage", json_escape(ev.error.unwrap_or(""))),
+        ("warningCount", ev.warning_count.unwrap_or(0).to_string()),
+        ("missingSourceCount", ev.missing_source_count.unwrap_or(0).to_string()),
     ]
 }
 
@@ -398,6 +420,8 @@ fn sample_event(stage: WebhookStage) -> WebhookEvent<'static> {
         snapshot_id: Some("a1b2c3d4"),
         error: (stage == WebhookStage::Failed).then_some("restic backup failed"),
         started_at: Some(1_700_000_000),
+        warning_count: None,
+        missing_source_count: None,
     }
 }
 
@@ -455,6 +479,8 @@ mod tests {
             snapshot_id: Some("abc123"),
             error: None,
             started_at: Some(1_700_000_000),
+            warning_count: None,
+            missing_source_count: None,
         }
     }
 
@@ -487,6 +513,8 @@ mod tests {
             snapshot_id: None,
             error: None,
             started_at: None,
+            warning_count: None,
+            missing_source_count: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&build_body(WebhookProvider::Generic, None, &ev, "Daily")).unwrap();
@@ -550,6 +578,8 @@ mod tests {
             snapshot_id: None,
             error: Some("failed \"hard\" \\"),
             started_at: None,
+            warning_count: None,
+            missing_source_count: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&build_body(WebhookProvider::Discord, None, &ev, "pl\"an")).unwrap();
@@ -571,6 +601,8 @@ mod tests {
             snapshot_id: None,
             error: None,
             started_at: None,
+            warning_count: None,
+            missing_source_count: None,
         };
         let msg = build_message(&started, "Daily");
         assert!(msg.contains("Backup started"));
@@ -594,6 +626,8 @@ mod tests {
             snapshot_id: None,
             error: Some("disk full"),
             started_at: None,
+            warning_count: None,
+            missing_source_count: None,
         };
         let msg = build_message(&failed, "Daily");
         assert!(msg.contains("Backup failed"));
@@ -650,6 +684,8 @@ mod tests {
             snapshot_id: None,
             error: None,
             started_at: Some(1_700_000_000),
+            warning_count: None,
+            missing_source_count: None,
         }
     }
 
@@ -852,5 +888,44 @@ mod tests {
         let padded = "  https://example.com/hook  ";
         assert!(valid_url(padded));
         assert_eq!(padded.trim(), "https://example.com/hook");
+    }
+
+    #[test]
+    fn clean_completed_payload_and_message_are_unchanged_by_warning_fields() {
+        let ev = completed_event();
+        let v: serde_json::Value =
+            serde_json::from_str(&build_body(WebhookProvider::Generic, None, &ev, "Daily")).unwrap();
+        assert!(v.get("warningCount").is_none());
+        assert!(v.get("missingSourceCount").is_none());
+        assert_eq!(
+            build_message(&ev, "Daily"),
+            "Backup completed — Daily (my-repo): 3 new, 4 changed, +1024 bytes in 12.3s"
+        );
+    }
+
+    #[test]
+    fn warning_run_adds_fields_message_and_placeholders() {
+        let mut ev = completed_event();
+        ev.warning_count = Some(2);
+        let v: serde_json::Value =
+            serde_json::from_str(&build_body(WebhookProvider::Generic, None, &ev, "Daily")).unwrap();
+        assert_eq!(v["warningCount"], 2);
+        assert!(v.get("missingSourceCount").is_none());
+        assert!(build_message(&ev, "Daily").ends_with(" — 2 files could not be read"));
+
+        ev.warning_count = Some(1);
+        assert!(build_message(&ev, "Daily").ends_with(" — 1 file could not be read"));
+
+        ev.missing_source_count = Some(1);
+        assert!(build_message(&ev, "Daily").ends_with(" — source path missing"));
+
+        let out = interpolate(r#"{"w":{warningCount},"m":{missingSourceCount}}"#, &ev, "Daily");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["w"], 1);
+        assert_eq!(parsed["m"], 1);
+        // a clean event defaults both to 0 so one template works for every run
+        let clean = interpolate(r#"{"w":{warningCount},"m":{missingSourceCount}}"#, &completed_event(), "Daily");
+        let parsed: serde_json::Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!((parsed["w"].as_i64(), parsed["m"].as_i64()), (Some(0), Some(0)));
     }
 }

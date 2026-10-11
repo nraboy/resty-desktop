@@ -10,7 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::browse::FileEntry;
 use super::crypto;
 use super::repo::ResticStats;
-use super::snapshot::{Snapshot, RETENTION_FAILED_PREFIX};
+use super::snapshot::{BackupWarning, Snapshot, RETENTION_FAILED_PREFIX};
 use crate::tasks::{emit_cancelling, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress, TaskSlot};
 
 /// Max rows retained in `backup_history`. Read and trim both use this so they
@@ -50,6 +50,13 @@ pub struct BackupHistoryEntry {
     pub files_changed: u64,
     pub bytes_added: u64,
     pub error: Option<String>,
+    /// Issues restic reported on a run that still saved its snapshot (exit 3), plus missing
+    /// source paths. The detail list is deliberately not in this struct — this endpoint ships
+    /// up to `BACKUP_HISTORY_LIMIT` rows; see `AppDb::get_backup_warnings`.
+    #[serde(default)]
+    pub warning_count: u64,
+    #[serde(default)]
+    pub missing_source_count: u64,
 }
 
 /// The most recent backup attempt for one plan — see `AppDb::list_plan_last_runs`.
@@ -59,6 +66,17 @@ pub struct PlanLastRun {
     pub plan_id: String,
     pub started_at: i64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub warning_count: u64,
+    #[serde(default)]
+    pub missing_source_count: u64,
+}
+
+/// Warning detail handed to `AppDb::log_backup` for a backup that completed with warnings.
+pub struct HistoryWarnings<'a> {
+    pub count: u64,
+    pub missing_count: u64,
+    pub list: &'a [BackupWarning],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -998,6 +1016,20 @@ impl AppDb {
         // clean_cache's doc comment and docs/data.md.
         add_column_ignoring_duplicates(conn,
             "ALTER TABLE indexed_snapshots ADD COLUMN orphaned_at INTEGER;",
+        )?;
+        // Additive — a backup that completed with warnings (restic exit 3: snapshot saved, some
+        // source data unreadable). `warning_count` is every issue (uncapped restic errors plus
+        // missing sources), `missing_source_count` just the missing-source subset, and
+        // `warnings_json` the capped detail list (NULL = none), read on demand by
+        // `get_backup_warnings` rather than shipped with every history row. Existing rows get 0/NULL.
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE backup_history ADD COLUMN warning_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE backup_history ADD COLUMN missing_source_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE backup_history ADD COLUMN warnings_json TEXT;",
         )?;
         // Reset any mid-index state left by a crash or unexpected close.
         let _ = conn.execute_batch(
@@ -2380,7 +2412,8 @@ impl AppDb {
             .prepare_cached(
                 "SELECT h.id, h.repo_id, r.name, h.plan_id, p.name,
                         h.snapshot_id, h.started_at, h.duration_seconds,
-                        h.files_new, h.files_changed, h.bytes_added, h.error
+                        h.files_new, h.files_changed, h.bytes_added, h.error,
+                        h.warning_count, h.missing_source_count
                  FROM backup_history h
                  LEFT JOIN repositories r ON r.id = h.repo_id
                  LEFT JOIN backup_plans p ON p.id = h.plan_id
@@ -2403,6 +2436,8 @@ impl AppDb {
                     files_changed: row.get::<_, i64>(9)? as u64,
                     bytes_added: row.get::<_, i64>(10)? as u64,
                     error: row.get(11)?,
+                    warning_count: row.get::<_, i64>(12)? as u64,
+                    missing_source_count: row.get::<_, i64>(13)? as u64,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -2420,8 +2455,8 @@ impl AppDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare_cached(
-                "SELECT plan_id, started_at, error FROM (
-                     SELECT h.plan_id, h.started_at, h.error,
+                "SELECT plan_id, started_at, error, warning_count, missing_source_count FROM (
+                     SELECT h.plan_id, h.started_at, h.error, h.warning_count, h.missing_source_count,
                             ROW_NUMBER() OVER (
                                 PARTITION BY h.plan_id
                                 ORDER BY h.started_at DESC, h.rowid DESC
@@ -2438,12 +2473,32 @@ impl AppDb {
                     plan_id: row.get(0)?,
                     started_at: row.get(1)?,
                     error: row.get(2)?,
+                    warning_count: row.get::<_, i64>(3)? as u64,
+                    missing_source_count: row.get::<_, i64>(4)? as u64,
                 })
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         Ok(rows)
+    }
+
+    /// The stored warning detail for one history row. Empty on NULL, an unknown id, or
+    /// unparseable JSON — it's a display aid, never worth failing the Logs page over.
+    pub fn get_backup_warnings(&self, history_id: &str) -> Result<Vec<BackupWarning>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT warnings_json FROM backup_history WHERE id = ?1",
+                params![history_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten();
+        Ok(json
+            .and_then(|j| serde_json::from_str::<Vec<BackupWarning>>(&j).ok())
+            .unwrap_or_default())
     }
 
     // ── backup history (insert) ───────────────────────────────────────────────
@@ -2461,16 +2516,27 @@ impl AppDb {
         files_changed: u64,
         bytes_added: u64,
         error: Option<&str>,
+        warnings: Option<&HistoryWarnings>,
     ) -> Result<(), String> {
+        let (warning_count, missing_count, warnings_json) = match warnings {
+            Some(w) => (
+                w.count as i64,
+                w.missing_count as i64,
+                serde_json::to_string(w.list).ok(),
+            ),
+            None => (0, 0, None),
+        };
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO backup_history
              (id, repo_id, plan_id, snapshot_id, started_at, duration_seconds,
-              files_new, files_changed, bytes_added, error)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+              files_new, files_changed, bytes_added, error,
+              warning_count, missing_source_count, warnings_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 id, repo_id, plan_id, snapshot_id, started_at, duration_seconds,
-                files_new as i64, files_changed as i64, bytes_added as i64, error
+                files_new as i64, files_changed as i64, bytes_added as i64, error,
+                warning_count, missing_count, warnings_json
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -3307,6 +3373,11 @@ pub async fn compress_database(app: tauri::AppHandle) -> Result<u64, String> {
 #[tauri::command]
 pub fn list_backup_history(db: tauri::State<'_, AppDb>) -> Result<Vec<BackupHistoryEntry>, String> {
     db.list_backup_history()
+}
+
+#[tauri::command]
+pub fn get_backup_warnings(db: tauri::State<'_, AppDb>, history_id: String) -> Result<Vec<BackupWarning>, String> {
+    db.get_backup_warnings(&history_id)
 }
 
 #[tauri::command]
@@ -4508,7 +4579,7 @@ mod tests {
     // ── log_backup / history trim ───────────────────────────────────────────
 
     fn log_entry(db: &AppDb, id: &str, started_at: i64) {
-        db.log_backup(id, "repo1", None, None, started_at, 1.0, 0, 0, 0, None).unwrap();
+        db.log_backup(id, "repo1", None, None, started_at, 1.0, 0, 0, 0, None, None).unwrap();
     }
 
     #[test]
@@ -4525,6 +4596,64 @@ mod tests {
         assert!(!history.iter().any(|e| e.id == "id-0"));
         // Newest entry must be present.
         assert!(history.iter().any(|e| e.id == format!("id-{}", BACKUP_HISTORY_LIMIT)));
+    }
+
+    fn sample_warnings() -> Vec<BackupWarning> {
+        vec![
+            BackupWarning { item: "/mnt/x".into(), message: "Source path not found".into(), missing_source: true },
+            BackupWarning { item: "/etc/shadow".into(), message: "permission denied".into(), missing_source: false },
+        ]
+    }
+
+    #[test]
+    fn log_backup_with_warnings_round_trips() {
+        let db = test_db();
+        let list = sample_warnings();
+        let w = HistoryWarnings { count: 7, missing_count: 1, list: &list };
+        db.log_backup("w1", "repo1", None, Some("snap"), 100, 1.0, 1, 2, 3, None, Some(&w)).unwrap();
+        log_entry(&db, "clean", 50);
+
+        let history = db.list_backup_history().unwrap();
+        let w1 = history.iter().find(|e| e.id == "w1").unwrap();
+        assert_eq!((w1.warning_count, w1.missing_source_count), (7, 1));
+        assert!(w1.error.is_none());
+        let clean = history.iter().find(|e| e.id == "clean").unwrap();
+        assert_eq!((clean.warning_count, clean.missing_source_count), (0, 0));
+
+        assert_eq!(db.get_backup_warnings("w1").unwrap(), list);
+    }
+
+    #[test]
+    fn get_backup_warnings_is_empty_for_null_unknown_and_bad_json() {
+        let db = test_db();
+        log_entry(&db, "clean", 1);
+        assert!(db.get_backup_warnings("clean").unwrap().is_empty());
+        assert!(db.get_backup_warnings("nope").unwrap().is_empty());
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE backup_history SET warnings_json = 'not json' WHERE id = 'clean'", [])
+                .unwrap();
+        }
+        assert!(db.get_backup_warnings("clean").unwrap().is_empty());
+    }
+
+    #[test]
+    fn last_run_carries_warning_counts() {
+        let db = test_db();
+        seed_plan(&db, "p1");
+        let list = sample_warnings();
+        let w = HistoryWarnings { count: 2, missing_count: 1, list: &list };
+        db.log_backup("r1", "repo1", Some("p1"), None, 10, 1.0, 0, 0, 0, None, Some(&w)).unwrap();
+        let runs = db.list_plan_last_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].warning_count, runs[0].missing_source_count), (2, 1));
+    }
+
+    #[test]
+    fn warning_columns_migration_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        AppDb::init_schema(&conn).unwrap();
+        AppDb::init_schema(&conn).unwrap(); // re-running must tolerate the existing columns
     }
 
     #[test]
@@ -4563,7 +4692,7 @@ mod tests {
     }
 
     fn log_plan_run(db: &AppDb, id: &str, plan_id: Option<&str>, started_at: i64, error: Option<&str>) {
-        db.log_backup(id, "repo1", plan_id, None, started_at, 1.0, 0, 0, 0, error).unwrap();
+        db.log_backup(id, "repo1", plan_id, None, started_at, 1.0, 0, 0, 0, error, None).unwrap();
     }
 
     #[test]

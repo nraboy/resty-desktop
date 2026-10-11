@@ -567,6 +567,10 @@ export function reduceSchedulerBackup(
         return { ...state, progress: event.progress ?? state.progress };
       case "finished":
         if (!state || state.currentOperationId !== event.operationId) return state;
+        // The backend already decided retention won't follow (a source path was missing — see
+        // BackupOutcome::retention_skipped), so no "forget" op is coming: dismiss now rather
+        // than hang waiting for one.
+        if (event.retentionSkipped) return null;
         // Stays visible — a "forget" op may still follow (see the no-retention note above).
         return { ...state, backupFinished: true };
       case "failed":

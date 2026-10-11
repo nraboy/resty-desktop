@@ -9,6 +9,36 @@ to this file specifically so these aren't re-litigated from scratch.
 These have come up as apparent inefficiencies during codebase audits and were deliberately kept
 as-is. Don't re-flag or "fix" them without understanding why first:
 
+- **Restic exit 3 = completed with warnings; retention skips only on a missing source path
+  (issue #36).** Restic exits 3 after *saving* the snapshot when some source data was unreadable;
+  `execute_backup` used to treat every non-zero exit as a failure, so such runs logged a failure
+  with no `snapshot_id`, skipped the cache append and retention, and fired "Backup failed" for a
+  snapshot that existed. Rules, each with a reason:
+  - Exit 3 is a success **only with a `snapshot_id`** in the summary; otherwise it stays a failure,
+    so we never log a success that has no snapshot.
+  - Exit 10/11/12 get a friendlier line placed *in front of* restic's stderr, never replacing it
+    (retry-on-"already locked" logic matches that text). Codes 10–12 exist since restic 0.17, the
+    minimum. A genuine cancel is still recognised by the `cancelled` flag, not by code 130.
+  - A missing source path is detected by `find_missing_sources` (`symlink_metadata`, `NotFound`
+    only) *after* the run and only on exit 3 — deterministic across OSes/restic versions unlike
+    matching error text, free on clean runs, and can't misreport a path restic did read. Run inside
+    `spawn_blocking` (a hung mount can stall a `stat`).
+  - **Retention is skipped only for a missing source** (`retention_skipped`). Unreadable files are
+    absent from every snapshot alike, so pruning against them is safe; skipping on them would stop a
+    chronically-warning plan from ever pruning. A missing source, by contrast, makes this snapshot
+    lack data older ones have, and `keep-*` could prune the complete ones. The backend decides once;
+    `finished` fires before `log_backup`, so the Activity panel learns it from the task event's
+    `retentionSkipped`, not from history.
+  - Per-file errors come from restic's `error` JSON lines. Verified against restic 0.19.1: they
+    arrive on **stderr** (not stdout), and a missing source path produces *no* JSON error at all —
+    only the plain line `<path> does not exist, skipping` and exit 3 (exit 1 only when *every*
+    source is missing), which is why missing sources are found by our own `stat`. Both streams are
+    parsed (stdout preferred, never summed with stderr); stored capped (`WARNING_CAP`) with the true total counted, and
+    the detail loaded on demand (`get_backup_warnings`) so `list_backup_history`'s up-to-1000 rows
+    stay small.
+  - Known gap, not fixed: an unplugged drive whose *mountpoint directory stays* backs up as an empty
+    directory with exit 0 — no warning, retention runs (same as before). A whole directory *inside* a
+    source becoming unreadable also still lets retention run.
 - **Backend credentials live in their own nullable `credentials_nonce`/`credentials_ciphertext`
   columns, not folded into the existing `password_ciphertext` blob as a single JSON envelope.**
   A single-envelope design (`{"password": "…", "credentials": {...}}` all under one
