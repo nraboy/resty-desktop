@@ -745,7 +745,8 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   both list `xdg-desktop-portal` so a package install can't land without it (the base package
   itself recommends a desktop-specific backend, so backends aren't listed explicitly). A
   **startup DBus probe** for `org.freedesktop.portal.Desktop`, to warn proactively when no
-  portal is reachable, was considered and deliberately **not** added — the remaining exposure
+  portal is reachable, was considered and deliberately **not** added for packaged installs (it
+  now exists for AppImage only, which has no `depends` — see the "AppImage" entry) — the remaining exposure
   after the packaging fix is tarball/self-built installs on bare window managers, a narrow
   enough slice that the same population is already likely to have a portal from using
   Flatpak/screen-sharing/etc., and doesn't justify a new dependency and a new banner. Don't
@@ -840,78 +841,82 @@ Two vars are applied, cheapest first: `__NV_DISABLE_EXPLICIT_SYNC=1` (often fixe
 
 The core decision logic (`should_apply`, `is_opted_out`, `is_wayland`) is a pure, `cfg`-free function unit-tested on every platform (including macOS, where this was developed) — only the real environment-reading wrapper (`apply()`'s Linux body) is `#[cfg(target_os = "linux")]`. Because the pure items have no non-test caller off Linux, they each carry `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]` with a comment — omitting it passes `npm run test:rust` but fails `npm run lint:rust` (`cargo clippy --all-targets -D warnings` builds the lib target too, where they're genuinely unreferenced off Linux). Don't "simplify" this by gating the whole module behind `#[cfg(target_os = "linux")]` — that would make the unit tests only run in CI, never on a non-Linux dev machine, which defeats the reason the pure/wrapper split exists.
 
-## Linux Bundle Targets — why there is no AppImage
+## AppImage — re-enabled (issue #28)
 
-`src-tauri/tauri.conf.json`'s `bundle.targets` is `["deb", "rpm", "dmg", "nsis", "msi"]` — an
-explicit list with **no `"appimage"`**. This is deliberate. Commit `bb3ad59` (2026-06-21) changed
-`"targets"` from `"all"` to this list precisely to stop producing AppImage artifacts, citing
-"WebKitGTK DMA-BUF rendering issues on modern Linux distros (Fedora, etc.) causing black windows."
-Because the change reads as "someone typed out a list" rather than "someone removed a feature", the
-omission looks accidental and keeps getting re-proposed from issue tickets. It is not accidental.
+`src-tauri/tauri.conf.json`'s `bundle.targets` is `["deb", "appimage", "rpm", "dmg", "nsis", "msi"]`.
+AppImage was dropped in v0.0.8 (commit `bb3ad59`) for black windows on modern distros, and re-added
+once the upstream bundler bugs were verified fixed (2026-10-11). **`"deb"` must stay in the list**:
+Tauri's AppImage bundler builds its AppDir from the deb output tree (`bundle/appimage_deb/`), so
+dropping `"deb"` breaks the AppImage build. `release.yml` needs no AppImage-specific step; the
+AppImage builds in the same per-arch Linux job as `.deb`/`.rpm`, so a failed AppImage step fails that
+job (visibly, in the draft release) rather than silently shipping a partial set.
 
-**The root cause is an open upstream bug in Tauri's AppImage bundler, not anything in this codebase**
-— [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665), still open, affecting
-tauri / tauri-cli 2.11.2–2.11.5. This repo was on 2.11.2 when AppImage was dropped; it has since
-moved to ≥ 2.12 (currently 2.12.0 in both `src-tauri/Cargo.lock` and `package-lock.json`, bumped
-for the Wayland `tao` fix — see above). Whether 2.12 fixes #15665 has not been verified, so the
-exclusion stands. Three distinct defects, all AppImage-only:
+**What was wrong, and where it was fixed.** All three defects were AppImage-only (the `.deb`/`.rpm`
+link the host's WebKitGTK, so the version-skew class never arises for them):
 
-- The AppImage bundles its own `libwebkit2gtk` / `WebKitWebProcess`, and — via linuxdeploy's `ldd`
-  sweep — its own `libwayland-client.so.0`. On a host running **Mesa 25 or newer**, `eglGetDisplay`
-  fails with `EGL_BAD_PARAMETER`, `WebKitWebProcess` aborts, and the window never paints; the app
-  keeps running, headless. Fedora reached Mesa 25 well before Ubuntu, which is why Fedora was the
-  reported distro.
-- AppRun unconditionally exports `GST_PLUGIN_SYSTEM_PATH_1_0=$APPDIR/usr/lib/gstreamer-1.0`, a
-  directory that does not exist under the default `bundleMediaFramework: false`. That variable
-  *replaces* rather than extends GStreamer's system plugin path, so WebKit's media backend finds zero
-  plugins.
-- The bundled `linuxdeploy-plugin-gtk` hook hardcodes `GDK_BACKEND=x11` and sets no `WEBKIT_*`
-  variables ([tauri#15781](https://github.com/tauri-apps/tauri/issues/15781)).
+- Black window on Mesa 25+: the AppImage bundled `libwayland-client.so.0`, so `eglGetDisplay` failed
+  with `EGL_BAD_PARAMETER` and `WebKitWebProcess` aborted ([tauri#15665](https://github.com/tauri-apps/tauri/issues/15665),
+  [#15976](https://github.com/tauri-apps/tauri/issues/15976)). **Fixed** by
+  [PR #16062](https://github.com/tauri-apps/tauri/pull/16062) (updated linuxdeploy +
+  linuxdeploy-plugin-gtk), shipped in **tauri-bundler 2.10.0 / `@tauri-apps/cli` 2.12.0**.
+- Hardcoded `GDK_BACKEND=x11` in the GTK hook ([#15781](https://github.com/tauri-apps/tauri/issues/15781)).
+  **Fixed** by #15786 and then superseded by #16062: AppImages now use native Wayland on Wayland
+  sessions. Same release.
+- `GST_PLUGIN_SYSTEM_PATH_1_0` pointing at a directory that doesn't exist under the default
+  `bundleMediaFramework: false`. **Not fixed upstream** (a maintainer: "wontfix until someone can
+  prove this causes app crashes"). Handled in-app, below.
 
-**Why the `.deb` and `.rpm` builds are unaffected:** they link the *host's* WebKitGTK instead of
-bundling one, so the entire version-skew class simply does not arise. This is the fact that makes "it
-works for me on Ubuntu" and "it's a black window on Fedora" consistent reports of the same underlying
-problem.
+**Floor: the Tauri CLI must stay ≥ 2.12.0** (that is what pulls bundler 2.10.0). Don't pin it lower.
+The 2.12.0 fix was confirmed from the changelog, not yet from field reports on #15976 — which is why
+the manual Mesa 25+ test below is still required before a release that ships an AppImage.
 
-**What re-enabling AppImage would take** (recorded so a future attempt starts from the finished
-analysis rather than redoing it):
+**What we do in the app** (both strictly AppImage-only — `.deb`/`.rpm`/macOS/Windows are no-ops):
 
-- An AppImage gate in `gpu_compat.rs`: detect `APPIMAGE` / `APPDIR` and set
-  `WEBKIT_DISABLE_DMABUF_RENDERER=1` unconditionally within an AppImage, independent of the existing
-  NVIDIA + Wayland gate. `gpu_compat::apply()` already runs as the first statement of `run()`
-  (`lib.rs`), before any GTK/WebKit initialization, so it is the correct hook. `APPDIR` must count on
-  its own — `APPIMAGE` is unset under `--appimage-extract-and-run` and under AppImageLauncher's
-  extraction path.
-- Unsetting the dangling `GST_PLUGIN_SYSTEM_PATH_1_0` from inside that same gate, rather than paying
-  the 15–35 MB of `bundleMediaFramework: true` just to make the directory it points at exist.
-- A portal probe plus a warning banner. **An AppImage has no `depends` mechanism**, so the
-  `xdg-desktop-portal` guarantee that `bundle.linux.deb.depends` / `rpm.depends` provides is
-  unavailable — and per the "Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature"
-  entry above, a missing portal makes every Browse button in the app go silently inert with no error.
-  That entry's accepted residual exposure ("tarball/self-built installs") would widen considerably.
-- A launch-at-login caveat that **cannot be fixed from app code**: `auto-launch` 0.5.0's `linux.rs`
-  writes the autostart `Exec={app_path} {args}` line unquoted, and `tauri-bundler` names the artifact
-  `"{product_name}_{version}_{arch}.AppImage"` with no sanitization — i.e.
-  `Resty Desktop_0.5.2_amd64.AppImage`, containing a space. The XDG desktop entry is therefore broken
-  by construction, not merely on unusual paths, and the only mitigation is telling the user to rename
-  the file. (`tauri-plugin-autostart` 2.5.1 *does* already prefer `app.env().appimage` over
-  `current_exe()`, so the ephemeral-mount-path problem is **not** among the issues — stated here so
-  nobody re-checks it.)
+- `gpu_compat::apply_appimage_fixups()` (called from `apply()`, so before any GTK/WebKit init)
+  unsets `GST_PLUGIN_SYSTEM_PATH_1_0` when running inside an AppImage and none of its entries exist,
+  rather than paying 15–35 MB for `bundleMediaFramework: true`. It only unsets when the directory is
+  missing, so enabling media framework bundling later keeps working. Detection is the pure
+  `is_appimage`: `APPIMAGE` or `APPDIR`, either alone (`APPIMAGE` is unset under
+  `--appimage-extract-and-run` and AppImageLauncher). It is independent of the NVIDIA+Wayland gate and
+  is not skipped by `RESTY_DISABLE_GPU_WORKAROUND`, which is a rendering opt-out.
+- `commands/portal.rs`'s `file_portal_missing` + a dismissible banner in `App.tsx`. An AppImage has no
+  `depends` mechanism, so the `xdg-desktop-portal` guarantee that `bundle.linux.deb.depends` /
+  `rpm.depends` gives is unavailable, and per the "Linux file dialogs use `tauri-plugin-dialog`'s
+  `xdg-portal` feature" entry a missing portal makes every Browse button silently inert. The probe
+  reads `org.freedesktop.portal.FileChooser`'s `version` property over the session bus (which
+  D-Bus-activates the portal and proves a backend serves FileChooser, unlike `NameHasOwner`), with a
+  3 s timeout; any error means "missing". It returns `false` without touching D-Bus outside an
+  AppImage, so the "no startup probe for packaged installs" ruling in that entry is unchanged.
+  `zbus` is a direct Linux-only dependency but was already in the tree via keyring/ashpd/notify-rust
+  with the identical feature set — adding it changed no feature resolution.
 
-**Why it was deferred rather than built:** these workarounds target a bug that is still open
-upstream, so they would need re-verification on every bundler bump; AppImage is not the primary Linux
-distribution mechanism and `.deb` / `.rpm` already cover the large majority of users; and shipping an
-AppImage that black-screens for some people is a worse outcome than shipping none. Demand at the time
-of this decision (2026-09-01) was a single inconvenience report.
+**Deliberately not added: a `WEBKIT_DISABLE_DMABUF_RENDERER` AppImage gate.** The earlier analysis
+proposed one; with libwayland no longer bundled the EGL failure is fixed at its root and the gate
+would cost the DMA-BUF fast path for nothing. Add it only if the Mesa 25+ test below fails. The
+existing NVIDIA+Wayland gate still applies inside AppImages (more relevant now that they run native
+Wayland).
 
-**What would change the decision:** tauri#15665 closing, or sustained demand. Either way, **re-test
-on a Mesa 25+ host before shipping** — Ubuntu 26.04 ships Mesa 26 and a Wayland-only GNOME 50 session,
-so it reproduces the trigger condition, but a VM's virtual GPU may or may not, so an *unfixed* control
-build must first be confirmed to fail before any fix is believed to work.
+**Known caveats, not fixable from app code:**
 
-**One implementation trap to preserve if AppImage is ever re-added:** `"deb"` must stay in
-`bundle.targets`. Tauri's AppImage bundler builds its AppDir from the deb output tree
-(`bundle/appimage_deb/`), so dropping `"deb"` breaks the AppImage build.
+- Launch-at-login: `auto-launch` 0.5.0 (`linux.rs`) writes the autostart `Exec={path} {args}` line
+  unquoted. The bundler names the artifact `Resty Desktop_<ver>_<arch>.AppImage` (a space), but
+  GitHub rewrites spaces to dots in release asset names (`Resty.Desktop_0.7.2_amd64.deb`), so a
+  downloaded file is fine. It breaks only if the user renames the file with a space or keeps it
+  under a path containing one. `tauri-plugin-autostart` already prefers `app.env().appimage` over
+  `current_exe()`, so the ephemeral-mount-path problem does not exist — don't re-check it.
+- The AppImage bundles its own WebKitGTK, so its security fixes arrive only with our releases, not
+  through the distro like `.deb`/`.rpm`.
+- Other defects found while testing #16062 that do **not** affect us: bundled gnutls breaking
+  webview HTTPS on Fedora/openSUSE (our CSP is `default-src 'self'` and webhooks use rustls `ureq`),
+  and SVG loading breaking only for AppImages *built* on Fedora/Arch (we build on ubuntu-22.04).
+  `GIO_MODULE_DIR` leaking into child processes is the one to watch: check that Settings/About links
+  (`shell:allow-open`) still open the host browser.
 
-Don't re-propose adding `"appimage"` to `bundle.targets` without reading this entry first.
+**Before shipping a release with an AppImage — re-test on a Mesa 25+ host** (Fedora 44, or Ubuntu
+26.04 on real hardware; a VM's virtual GPU may not reproduce the trigger). First run an old v0.0.7
+AppImage to confirm that host actually shows the black window, so a passing new build means
+something. Then check: window paints, tray icon, Browse dialog (and the banner with
+`xdg-desktop-portal` stopped), external links, a backup, auto-unlock, and launch-at-login using the
+downloaded filename. Also check a Debian 12 / X11 host (the issue reporter's environment).
 
+Don't remove `"appimage"` from `bundle.targets` or the `"deb"` dependency without reading this entry.

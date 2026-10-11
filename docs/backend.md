@@ -33,6 +33,10 @@ is_app_setup, setup_master_password, unlock_app (clears stale locks via the shar
 
 Argon2id key derivation, AES-GCM encrypt/decrypt
 
+### `portal.rs`
+
+`file_portal_missing` — async, no restic. `false` off Linux and outside an AppImage (`gpu_compat::is_appimage`), so `.deb`/`.rpm` never touch D-Bus. Inside an AppImage it reads the FileChooser portal's `version` property over the session bus (3 s timeout; any error = missing); `App.tsx` shows a dismissible amber banner on unlock. See docs/decisions.md's "AppImage" entry.
+
 ### `keychain.rs`
 
 Auto-unlock's OS credential-manager access, via `keyring` 4's `v1` compatibility feature (not target-scoped — see Stack table): the macOS Keychain, Windows Credential Manager, and the D-Bus Secret Service on Linux (pure-Rust zbus, no libdbus). Stores the *derived* 32-byte master key under one fixed service/account pair, never the master password. `LoadOutcome` is a deliberate three-way enum, not `Result<Option<_>>`: `Missing` (keyring::Error::NoEntry — safe to clear the row) vs. `Unreadable` (a denied dialog, a locked Linux collection, corrupt data, any other failure — proves nothing, so the entry and row are left untouched) are never conflated, so a single denied macOS permission dialog or locked Linux keyring can't destroy the user's setup. All four public functions (`is_supported`/`store_key`/`load_key`/`delete_key`) are defined on every platform — a target with none of macOS/Windows/Linux falls through to a stub `mod platform` (`is_supported() → false`, `load_key() → Missing`, no store contact ever) rather than `#[cfg]`-ed away, so callers and `lib.rs`'s `invoke_handler!` stay platform-independent. On Linux, `is_supported()` is a cheap session-bus presence probe (env/filesystem only, never a D-Bus round trip) rather than a guarantee a provider answers — see docs/decisions.md. Every base64 string and decoded byte buffer touching the key is zeroized on every path. `KEYCHAIN_LOCK` (macOS/Windows/Linux) serializes access per the crate's own thread-safety warning, which specifically names Linux's RPC-based store.

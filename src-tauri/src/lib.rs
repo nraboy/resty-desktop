@@ -5,7 +5,8 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, repo, repo_locks, schedule, snapshot, transfer, webhook,
+    auth, backup_plan, browse, cache, notify, portal, repo, repo_locks, schedule, snapshot, transfer,
+    webhook,
 };
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -523,6 +524,7 @@ pub fn run() {
             repo::get_restic_path,
             repo::set_restic_path,
             repo::get_restic_version,
+            portal::file_portal_missing,
             repo::get_compression,
             repo::set_compression,
             repo::get_restore_path,

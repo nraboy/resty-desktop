@@ -126,6 +126,10 @@ export const setResticPath = (path: string): Promise<void> =>
 export const getResticVersion = (): Promise<string> =>
   invoke("get_restic_version");
 
+// AppImage only — always false for .deb/.rpm/macOS/Windows. See commands/portal.rs.
+export const filePortalMissing = (): Promise<boolean> =>
+  invoke("file_portal_missing");
+
 export const getCompression = (): Promise<string> =>
   invoke("get_compression");
 

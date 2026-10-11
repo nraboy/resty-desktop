@@ -44,6 +44,12 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 # docs/decisions.md for why the crate needed no Linux-specific code, only this dependency.
 keyring = "4"
 
+# File-chooser portal probe (commands/portal.rs) — AppImage has no `depends`, so the app checks
+# for xdg-desktop-portal itself. Already in the tree via keyring/ashpd/notify-rust with the same
+# `default` + `tokio` feature set, so this adds no crate and changes no feature resolution.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", features = ["tokio"] }
+
 [profile.release]
 strip = true
 lto = true

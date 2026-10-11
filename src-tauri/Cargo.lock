@@ -3546,6 +3546,7 @@ dependencies = [
  "tokio",
  "ureq",
  "uuid",
+ "zbus",
  "zeroize",
 ]
 

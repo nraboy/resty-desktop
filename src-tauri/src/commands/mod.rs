@@ -6,6 +6,7 @@ pub mod cache;
 pub mod crypto;
 pub mod keychain;
 pub mod notify;
+pub mod portal;
 pub mod repo;
 pub mod repo_locks;
 pub mod schedule;

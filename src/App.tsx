@@ -21,7 +21,7 @@ import LogsPage from "./pages/LogsPage";
 import SearchPage from "./pages/SearchPage";
 import RepoSearchPage from "./pages/RepoSearchPage";
 import AuthPage from "./pages/AuthPage";
-import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, deactivateTray, showMainWindow, getTrayEnabled, getResticVersion } from "./lib/invoke";
+import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, deactivateTray, showMainWindow, getTrayEnabled, getResticVersion, filePortalMissing } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
 import type { TaskEvent } from "./lib/types";
 
@@ -100,6 +100,7 @@ export default function App() {
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [menuResetTriggered, setMenuResetTriggered] = useState(false);
   const [showVersionWarning, setShowVersionWarning] = useState(false);
+  const [showPortalWarning, setShowPortalWarning] = useState(false);
   const [autoUnlockReason, setAutoUnlockReason] = useState("");
   // Guards the startup effect below against React StrictMode's deliberate double-invoke of
   // effects in development — without this, tryAutoUnlock() (and the real macOS keychain
@@ -202,6 +203,7 @@ export default function App() {
           if (major === MIN_RESTIC_MAJOR && minor < MIN_RESTIC_MINOR) setShowVersionWarning(true);
         }
       }).catch(() => {});
+      filePortalMissing().then(setShowPortalWarning).catch(() => {});
     }
   }, [authState]);
 
@@ -303,6 +305,20 @@ export default function App() {
                     </span>
                     <button
                       onClick={() => setShowVersionWarning(false)}
+                      className="flex-shrink-0 text-amber-400 hover:text-amber-300 transition-colors"
+                      aria-label="Dismiss"
+                    >
+                      <XIcon className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                {showPortalWarning && (
+                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-900/50 border-b border-amber-700 text-amber-300 text-sm flex-shrink-0">
+                    <span>
+                      No file chooser portal was found, so Browse buttons won't open. Install <strong>xdg-desktop-portal</strong> and a desktop backend (for example <strong>xdg-desktop-portal-gtk</strong>), then restart the app.
+                    </span>
+                    <button
+                      onClick={() => setShowPortalWarning(false)}
                       className="flex-shrink-0 text-amber-400 hover:text-amber-300 transition-colors"
                       aria-label="Dismiss"
                     >

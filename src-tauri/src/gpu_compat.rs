@@ -5,6 +5,11 @@
 //! "Linux GPU Compatibility" section for the full rationale, including why the detection is
 //! gated rather than unconditional and why `WEBKIT_DISABLE_COMPOSITING_MODE` is excluded.
 //!
+//! Also hosts the AppImage-only environment fixup (`apply_appimage_fixups`) and the
+//! `is_appimage` detector the file-portal probe reuses — see docs/decisions.md's "AppImage"
+//! entry. Unlike the GPU workaround it is not a rendering workaround, so
+//! `RESTY_DISABLE_GPU_WORKAROUND` does not skip it.
+//!
 //! Must run before `tauri::Builder::default()` — see `lib.rs::run()`.
 
 #[cfg(target_os = "linux")]
@@ -55,11 +60,67 @@ pub(crate) fn is_wayland(wayland_display: Option<&str>, xdg_session_type: Option
     matches!(wayland_display, Some(v) if !v.is_empty()) || xdg_session_type == Some("wayland")
 }
 
+/// True when running from inside an AppImage. Either variable alone counts: `APPIMAGE` is
+/// unset under `--appimage-extract-and-run` and AppImageLauncher's extraction path, while
+/// `APPDIR` is always exported by AppRun. Set-but-empty doesn't count, matching `is_wayland`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn is_appimage(appimage: Option<&str>, appdir: Option<&str>) -> bool {
+    matches!(appimage, Some(v) if !v.is_empty()) || matches!(appdir, Some(v) if !v.is_empty())
+}
+
+/// Name of the variable AppRun exports pointing at a gstreamer directory that doesn't exist
+/// under the default `bundleMediaFramework: false` (tauri-apps/tauri#15665, GStreamer defect —
+/// not fixed upstream). It *replaces* rather than extends GStreamer's system plugin path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const GST_PATH_VAR: &str = "GST_PLUGIN_SYSTEM_PATH_1_0";
+
+/// Pure decision: unset `GST_PLUGIN_SYSTEM_PATH_1_0` only inside an AppImage, only when it is
+/// set, and only when none of its (colon-separated) entries exist — so a future
+/// `bundleMediaFramework: true` build, where the directory is real, keeps working.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn should_unset_gst_path(
+    in_appimage: bool,
+    value: Option<&str>,
+    entry_exists: impl Fn(&str) -> bool,
+) -> bool {
+    if !in_appimage {
+        return false;
+    }
+    match value {
+        Some(v) if !v.is_empty() => !v.split(':').filter(|e| !e.is_empty()).any(entry_exists),
+        _ => false,
+    }
+}
+
+/// AppImage-only environment fixups. Runs under the same "first statement of `run()`" contract
+/// as `apply`, and is deliberately independent of the NVIDIA + Wayland gate and the GPU opt-out.
+#[cfg(target_os = "linux")]
+fn apply_appimage_fixups() {
+    use std::path::Path;
+
+    let in_appimage = is_appimage(
+        env::var("APPIMAGE").ok().as_deref(),
+        env::var("APPDIR").ok().as_deref(),
+    );
+    let gst = env::var(GST_PATH_VAR).ok();
+    if should_unset_gst_path(in_appimage, gst.as_deref(), |p| Path::new(p).exists()) {
+        // SAFETY: same as `apply` — called before any thread or webview exists.
+        unsafe {
+            env::remove_var(GST_PATH_VAR);
+        }
+        eprintln!(
+            "[resty] AppImage: unset {GST_PATH_VAR} (pointed at a directory that doesn't exist)."
+        );
+    }
+}
+
 /// Applies the workaround on Linux when NVIDIA + Wayland are both detected and the user
 /// hasn't opted out. Never overwrites a variable the user already set themselves.
 #[cfg(target_os = "linux")]
 pub(crate) fn apply() {
     use std::path::Path;
+
+    apply_appimage_fixups();
 
     let nvidia_present = Path::new("/sys/module/nvidia").exists();
     let wayland_display = env::var("WAYLAND_DISPLAY").ok();
@@ -181,6 +242,52 @@ mod tests {
     #[test]
     fn wayland_display_empty_but_xdg_wayland_is_wayland() {
         assert!(is_wayland(Some(""), Some("wayland")));
+    }
+
+    #[test]
+    fn appimage_detected_by_either_var_alone() {
+        assert!(is_appimage(Some("/x/Resty.AppImage"), None));
+        assert!(is_appimage(None, Some("/tmp/.mount_abc")));
+        assert!(is_appimage(Some("/x/Resty.AppImage"), Some("/tmp/.mount_abc")));
+    }
+
+    #[test]
+    fn appimage_not_detected_when_unset_or_empty() {
+        assert!(!is_appimage(None, None));
+        assert!(!is_appimage(Some(""), Some("")));
+    }
+
+    #[test]
+    fn gst_path_unset_only_in_appimage_when_dangling() {
+        let missing = |_: &str| false;
+        assert!(should_unset_gst_path(true, Some("/tmp/.mount_x/usr/lib/gstreamer-1.0"), missing));
+    }
+
+    #[test]
+    fn gst_path_kept_outside_appimage() {
+        assert!(!should_unset_gst_path(false, Some("/nope"), |_| false));
+    }
+
+    #[test]
+    fn gst_path_kept_when_directory_exists() {
+        assert!(!should_unset_gst_path(true, Some("/real"), |_| true));
+    }
+
+    #[test]
+    fn gst_path_kept_when_any_entry_exists() {
+        let exists = |p: &str| p == "/real";
+        assert!(!should_unset_gst_path(true, Some("/nope:/real"), exists));
+    }
+
+    #[test]
+    fn gst_path_ignored_when_unset_or_empty() {
+        assert!(!should_unset_gst_path(true, None, |_| false));
+        assert!(!should_unset_gst_path(true, Some(""), |_| false));
+    }
+
+    #[test]
+    fn gst_path_with_no_real_entries_counts_as_dangling() {
+        assert!(should_unset_gst_path(true, Some(":"), |_| true));
     }
 
     #[test]

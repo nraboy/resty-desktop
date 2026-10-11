@@ -89,6 +89,7 @@ src-tauri/
       auth.rs               # Setup/unlock/lock master password; auto-unlock — see docs/data.md
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
+      portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
       notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
@@ -314,11 +315,15 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
 - `gpu_compat::apply()`'s NVIDIA+Wayland workaround is gated, not applied unconditionally
 - Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature, not the default `gtk3` one — `rfd` silently reverts to GTK if `gtk3` is enabled anywhere in the dependency graph, so don't add it back
-- `bundle.targets` in `tauri.conf.json` is an explicit list (`deb`/`rpm`/`dmg`/`nsis`/`msi`) with
-  **no `"appimage"`** — deliberate, due to an open upstream Tauri AppImage bundler bug
-  (tauri#15665) that black-windows on Mesa 25+ hosts; `.deb`/`.rpm` link the host WebKitGTK and
-  are unaffected. `"deb"` must stay listed (the AppImage bundler, if ever re-added, builds from
-  the deb output tree). Don't re-propose `"appimage"` without reading docs/decisions.md
+- `bundle.targets` in `tauri.conf.json` is an explicit list (`deb`/`appimage`/`rpm`/`dmg`/`nsis`/`msi`).
+  AppImage was dropped in v0.0.8 for Mesa 25+ black windows and re-added (issue #28) once
+  tauri#15665/#15781 were verified fixed in tauri-bundler 2.10.0 / `@tauri-apps/cli` ≥ 2.12.0 —
+  that CLI version is a floor, don't pin lower. `"deb"` must stay listed (the AppImage bundler
+  builds from the deb output tree). App-side, AppImage-only: `gpu_compat::apply_appimage_fixups`
+  unsets the dangling `GST_PLUGIN_SYSTEM_PATH_1_0`, and `commands/portal.rs` + an `App.tsx` banner
+  warn when the file-chooser portal is missing (an AppImage has no `depends`). A
+  `WEBKIT_DISABLE_DMABUF_RENDERER` AppImage gate was deliberately not added. Read docs/decisions.md
+  ("AppImage — re-enabled") before touching any of it, and re-test on a Mesa 25+ host before a release
 - Windows and Linux install no native menu bar — the menu is built and `MenuState` managed on
   every platform, but `setup()` drops it on Windows/Linux; only macOS installs it (replaces the
   old Windows-only "fold the app submenu into File" workaround, whose cfg machinery was deleted).
@@ -461,7 +466,10 @@ to avoid confusion; do not bump it.
 before any GTK/WebKit init, but **only** when both an NVIDIA kernel module and a Wayland session
 are detected — see docs/decisions.md for the full gating rationale (an unconditional fix would
 slow down every other platform combination) and why `WEBKIT_DISABLE_COMPOSITING_MODE` is
-deliberately not included. `RESTY_DISABLE_GPU_WORKAROUND` opts out without a rebuild.
+deliberately not included. `RESTY_DISABLE_GPU_WORKAROUND` opts out without a rebuild. The same
+module also unsets the dangling `GST_PLUGIN_SYSTEM_PATH_1_0` inside an AppImage
+(`apply_appimage_fixups`, independent of that gate and opt-out) — see the AppImage entry in
+docs/decisions.md.
 
 ## Releases
 
