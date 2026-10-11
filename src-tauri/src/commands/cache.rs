@@ -1995,6 +1995,64 @@ impl AppDb {
         Ok(hits)
     }
 
+    /// Lists the direct children of `parent_path` across all fully-indexed snapshots of a
+    /// repo, as the Explore page's unified tree. Same four-table join and newest-wins rule
+    /// as `search_repo_files` above — `GROUP BY path` collapses a path held by several
+    /// snapshots and `MAX(sc.time)` + SQLite's bare-column behavior carries the winning
+    /// row's type/size/mtime/snapshot alongside it — but matching `parent_path` by
+    /// equality rather than a `LIKE` pattern, and with no `LIMIT`.
+    ///
+    /// The equality match is what makes `parent_path` the useful column here: it rides
+    /// `idx_browse_files (snap, parent_path)` directly, the same access path `AppDb::get`
+    /// already uses, so no new index is needed. It also means the caller must normalize
+    /// `parent_path` first (see `commands::explore::normalize_parent`) — top-level entries
+    /// are stored with `parent_path = ""`, so a bare "/" arriving from the address bar
+    /// would otherwise match nothing and silently present as an empty repository.
+    ///
+    /// A path only an *older* snapshot still holds is returned too: that union property is
+    /// the point of the view, since a file deleted by a later backup must stay visible.
+    pub fn list_repo_children(
+        &self,
+        repo_id: &str,
+        parent_path: &str,
+    ) -> Result<Vec<super::browse::RepoFileHit>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT bcf.path, bcf.entry_type, bcf.size, bcf.mtime, bcf.mode,
+                        isn.snapshot_id, sc.short_id, MAX(sc.time)
+                 FROM browse_cache_files bcf
+                 JOIN indexed_snapshots isn
+                   ON isn.id = bcf.snap
+                 JOIN snapshots_cache sc
+                   ON sc.snapshot_id = isn.snapshot_id AND sc.repo_id = ?1
+                 JOIN browse_cache_status bcs
+                   ON bcs.snapshot_id = isn.snapshot_id AND bcs.repo_id = ?1 AND bcs.status = 'complete'
+                 WHERE bcf.parent_path = ?2
+                 GROUP BY bcf.path
+                 ORDER BY bcf.path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![repo_id, parent_path], |row| {
+                let path: String = row.get(0)?;
+                Ok(super::browse::RepoFileHit {
+                    name: name_of(&path),
+                    path,
+                    entry_type: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    mode: row.get(4)?,
+                    snapshot_id: row.get(5)?,
+                    snapshot_short_id: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
     /// Bulk-insert file entries for a snapshot (used by the cache warmer and manual indexing).
     /// Inserts in chunks of 500 to avoid holding the mutex for excessive time. Returns the
     /// interned `snap` id every chunk was written against, so the caller's terminal write can
@@ -3836,6 +3894,317 @@ mod tests {
 
         let pending_hits = db.search_repo_files(repo_id, "secret", 200).unwrap();
         assert!(pending_hits.is_empty(), "files from a non-complete snapshot must be excluded");
+    }
+
+    #[test]
+    fn list_repo_children_dedups_to_the_newest_snapshot_holding_the_path() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        let json = r#"[
+            {"id":"snap-old00000000","short_id":"snapold0","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-new00000000","short_id":"snapnew0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-old00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-new00000000", "complete").unwrap();
+
+        db.insert_browse_files("snap-old00000000", &[file_entry("/home/notes.txt", "file", Some(10))])
+            .unwrap();
+        db.insert_browse_files("snap-new00000000", &[file_entry("/home/notes.txt", "file", Some(99))])
+            .unwrap();
+
+        let rows = db.list_repo_children(repo_id, "/home").unwrap();
+        assert_eq!(rows.len(), 1, "a path held by two snapshots must appear once");
+        assert_eq!(rows[0].path, "/home/notes.txt");
+        assert_eq!(rows[0].name, "notes.txt");
+        assert_eq!(rows[0].snapshot_id, "snap-new00000000", "must resolve to the newest snapshot");
+        assert_eq!(rows[0].snapshot_short_id, "snapnew0");
+        assert_eq!(rows[0].size, Some(99), "size must come from the winning snapshot's row");
+    }
+
+    #[test]
+    fn list_repo_children_still_returns_a_path_only_an_older_snapshot_holds() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        let json = r#"[
+            {"id":"snap-old00000000","short_id":"snapold0","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-new00000000","short_id":"snapnew0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-old00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-new00000000", "complete").unwrap();
+
+        // `deleted.txt` was backed up once and gone by the newest snapshot; `kept.txt` is in both.
+        db.insert_browse_files(
+            "snap-old00000000",
+            &[
+                file_entry("/home/kept.txt", "file", Some(1)),
+                file_entry("/home/deleted.txt", "file", Some(2)),
+            ],
+        )
+        .unwrap();
+        db.insert_browse_files("snap-new00000000", &[file_entry("/home/kept.txt", "file", Some(1))])
+            .unwrap();
+
+        let rows = db.list_repo_children(repo_id, "/home").unwrap();
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/home/deleted.txt", "/home/kept.txt"],
+            "a file deleted by a later backup must stay visible, attributed to the last snapshot holding it"
+        );
+        let deleted = rows.iter().find(|r| r.name == "deleted.txt").unwrap();
+        assert_eq!(deleted.snapshot_id, "snap-old00000000");
+    }
+
+    #[test]
+    fn list_repo_children_takes_the_entry_type_from_the_winning_snapshot() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        // `/home/thing` was a file, and by the newest backup it is a directory. The row
+        // must present as whatever it most recently was, not as an arbitrary one of the two.
+        let json = r#"[
+            {"id":"snap-old00000000","short_id":"snapold0","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-new00000000","short_id":"snapnew0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-old00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-new00000000", "complete").unwrap();
+
+        db.insert_browse_files("snap-old00000000", &[file_entry("/home/thing", "file", Some(7))])
+            .unwrap();
+        db.insert_browse_files("snap-new00000000", &[file_entry("/home/thing", "dir", None)])
+            .unwrap();
+
+        let rows = db.list_repo_children(repo_id, "/home").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry_type, "dir", "type must come from the newest snapshot");
+        assert_eq!(rows[0].size, None, "and so must the rest of the winning row");
+        assert_eq!(rows[0].snapshot_id, "snap-new00000000");
+    }
+
+    #[test]
+    fn list_repo_children_returns_direct_children_only_at_every_level() {
+        let db = test_db();
+        let repo_id = "repoA";
+        seed_snapshot(&db, repo_id, "aaaa111100000000");
+        db.set_browse_status(repo_id, "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files(
+            "aaaa111100000000",
+            &[
+                file_entry("/home", "dir", None),
+                file_entry("/home/docs", "dir", None),
+                file_entry("/home/docs/a.txt", "file", Some(1)),
+                file_entry("/home/docs/deep", "dir", None),
+                file_entry("/home/docs/deep/b.txt", "file", Some(2)),
+            ],
+        )
+        .unwrap();
+
+        let top: Vec<String> = db
+            .list_repo_children(repo_id, "")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(top, vec!["/home"], "the top level lists backed-up roots, not their contents");
+
+        let nested: Vec<String> = db
+            .list_repo_children(repo_id, "/home/docs")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(
+            nested,
+            vec!["/home/docs/a.txt", "/home/docs/deep"],
+            "a nested folder lists its own children and never a grandchild"
+        );
+    }
+
+    #[test]
+    fn list_repo_children_at_the_top_level_unions_disjoint_backup_roots() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        // Two snapshots of entirely different roots — the case that exercises the union
+        // at depth 0, where neither snapshot alone can produce the full listing.
+        let json = r#"[
+            {"id":"snap-home00000000","short_id":"snaphome","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-var000000000","short_id":"snapvar0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/var"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-home00000000", "complete").unwrap();
+        db.set_browse_status(repo_id, "snap-var000000000", "complete").unwrap();
+        db.insert_browse_files("snap-home00000000", &[file_entry("/home", "dir", None)])
+            .unwrap();
+        db.insert_browse_files("snap-var000000000", &[file_entry("/var", "dir", None)])
+            .unwrap();
+
+        let rows = db.list_repo_children(repo_id, "").unwrap();
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["/home", "/var"]);
+        assert_eq!(rows[0].snapshot_id, "snap-home00000000");
+        assert_eq!(rows[1].snapshot_id, "snap-var000000000");
+    }
+
+    #[test]
+    fn list_repo_children_excludes_snapshots_that_are_not_fully_indexed() {
+        let db = test_db();
+        let repo_id = "repoA";
+
+        // A partial listing merged into the union would present a folder silently
+        // missing most of its contents, so anything short of 'complete' contributes nothing.
+        let json = r#"[
+            {"id":"snap-pending0000","short_id":"snappend","time":"2024-01-01T00:00:00Z","hostname":"host","paths":["/home"]},
+            {"id":"snap-running0000","short_id":"snaprun0","time":"2024-06-01T00:00:00Z","hostname":"host","paths":["/home"]}
+        ]"#;
+        db.set_snapshots(repo_id, json).unwrap();
+        db.set_browse_status(repo_id, "snap-pending0000", "pending").unwrap();
+        db.set_browse_status(repo_id, "snap-running0000", "in_progress").unwrap();
+        db.insert_browse_files("snap-pending0000", &[file_entry("/home/a.txt", "file", Some(1))])
+            .unwrap();
+        db.insert_browse_files("snap-running0000", &[file_entry("/home/b.txt", "file", Some(2))])
+            .unwrap();
+
+        assert!(db.list_repo_children(repo_id, "/home").unwrap().is_empty());
+        assert!(db.list_repo_children(repo_id, "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_repo_children_does_not_leak_a_snapshot_held_only_by_another_repo() {
+        let db = test_db();
+
+        // browse_cache_files rows are keyed by interned snapshot, not by repo, so they are
+        // shared between repos holding the same snapshot id. Scoping by snapshot alone
+        // would show repoB's contents inside repoA's tree.
+        seed_snapshot(&db, "repoB", "bbbb222200000000");
+        db.set_browse_status("repoB", "bbbb222200000000", "complete").unwrap();
+        db.insert_browse_files("bbbb222200000000", &[file_entry("/home/theirs.txt", "file", Some(1))])
+            .unwrap();
+
+        seed_snapshot(&db, "repoA", "aaaa111100000000");
+        db.set_browse_status("repoA", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[file_entry("/home/mine.txt", "file", Some(1))])
+            .unwrap();
+
+        let paths: Vec<String> = db
+            .list_repo_children("repoA", "/home")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(paths, vec!["/home/mine.txt"]);
+    }
+
+    /// Exclusion here is structural — `list_repo_children` has no `orphaned_at` predicate,
+    /// it just can't join a snapshot that left `snapshots_cache` (and, once marked, has no
+    /// `browse_cache_status` row either). Retention is the orphan source that exercises
+    /// that: `set_snapshots` drops the forgotten id and touches nothing else, so the repo,
+    /// its sibling snapshots, the dropped snapshot's 'complete' status row and its file
+    /// rows all survive the drop. Keeping a sibling in the fixture is what makes the
+    /// assertions falsifiable: without one, an empty listing would prove nothing.
+    #[test]
+    fn list_repo_children_excludes_a_retention_dropped_snapshot_but_keeps_its_siblings() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        db.set_snapshots(
+            "repo1",
+            &format!(
+                "[{},{}]",
+                snapshot_json("aaaa111100000000", None),
+                snapshot_json("bbbb222200000000", None)
+            ),
+        )
+        .unwrap();
+        for snap in ["aaaa111100000000", "bbbb222200000000"] {
+            db.set_browse_status("repo1", snap, "complete").unwrap();
+        }
+        db.insert_browse_files(
+            "aaaa111100000000",
+            &[file_entry("/home/dropped.txt", "file", Some(1))],
+        )
+        .unwrap();
+        db.insert_browse_files(
+            "bbbb222200000000",
+            &[file_entry("/home/kept.txt", "file", Some(1))],
+        )
+        .unwrap();
+
+        let paths = |db: &AppDb| -> Vec<String> {
+            db.list_repo_children("repo1", "/home")
+                .unwrap()
+                .into_iter()
+                .map(|r| r.path)
+                .collect()
+        };
+        assert_eq!(paths(&db), vec!["/home/dropped.txt", "/home/kept.txt"]);
+
+        // Retention forgets the older snapshot. The `sc` join stops matching at once, so
+        // the exclusion holds before any cleanup has run.
+        db.set_snapshots("repo1", &format!("[{}]", snapshot_json("bbbb222200000000", None)))
+            .unwrap();
+        assert_eq!(
+            paths(&db),
+            vec!["/home/kept.txt"],
+            "a forgotten snapshot's paths must drop out at once, while its sibling's remain"
+        );
+        assert_eq!(
+            count_rows(&db, "browse_cache_files"),
+            2,
+            "the dropped snapshot's rows are still undrained — exclusion is not a delete"
+        );
+
+        // ...and still after mark_orphans stamps it and deletes its status row.
+        db.mark_orphans().unwrap();
+        assert!(orphaned_at_of(&db, "aaaa111100000000").is_some());
+        assert_eq!(
+            paths(&db),
+            vec!["/home/kept.txt"],
+            "a marked orphan must stay out, and must not take its sibling with it"
+        );
+        assert_eq!(count_rows(&db, "browse_cache_files"), 2);
+    }
+
+    /// The repo-removal route to the same exclusion: `remove_repo` drops the repo's
+    /// `snapshots_cache` rows, so the join fails even before `mark_orphans` runs.
+    #[test]
+    fn list_repo_children_excludes_orphaned_snapshots() {
+        let db = test_db();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.set_browse_status("repo1", "aaaa111100000000", "complete").unwrap();
+        db.insert_browse_files("aaaa111100000000", &[file_entry("/home/gone.txt", "file", Some(1))])
+            .unwrap();
+        assert_eq!(db.list_repo_children("repo1", "/home").unwrap().len(), 1);
+
+        // Retention or cache cleanup drops the snapshot; its file rows survive until a
+        // drain, so the listing must stop returning them the moment it is marked.
+        db.remove_repo("repo1").unwrap();
+        db.mark_orphans().unwrap();
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "cccc333300000000");
+
+        assert!(
+            db.list_repo_children("repo1", "/home").unwrap().is_empty(),
+            "an orphaned snapshot's undrained file rows must not appear in the tree"
+        );
+    }
+
+    /// Shared fixture for the Explore listing tests: a cache row at `path`, since those
+    /// tests care about path/type/size and never about mtime or mode.
+    fn file_entry(path: &str, entry_type: &str, size: Option<u64>) -> FileEntry {
+        FileEntry {
+            name: name_of(path),
+            path: path.to_string(),
+            entry_type: entry_type.to_string(),
+            size,
+            mtime: None,
+            mode: None,
+        }
     }
 
     fn seed_snapshot(db: &AppDb, repo_id: &str, snapshot_id: &str) {

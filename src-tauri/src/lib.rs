@@ -5,7 +5,8 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, repo, repo_locks, schedule, snapshot, transfer, webhook,
+    auth, backup_plan, browse, cache, explore, notify, repo, repo_locks, schedule, snapshot,
+    transfer, webhook,
 };
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -578,6 +579,8 @@ pub fn run() {
             browse::get_snapshot_index_status,
             browse::clear_snapshot_index,
             browse::get_index_progress,
+            // explore (unified folder tree)
+            explore::list_repo_children,
             // backup plans
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,

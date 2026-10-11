@@ -20,6 +20,7 @@ import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 import SearchPage from "./pages/SearchPage";
 import RepoSearchPage from "./pages/RepoSearchPage";
+import ExplorePage from "./pages/ExplorePage";
 import AuthPage from "./pages/AuthPage";
 import { isAppSetup, setupMasterPassword, unlockApp, lockApp, tryAutoUnlock, autoUnlockNeedsPromptWarning, setMenuAuthState, activateTray, deactivateTray, showMainWindow, getTrayEnabled, getResticVersion } from "./lib/invoke";
 import { MIN_RESTIC_MAJOR, MIN_RESTIC_MINOR } from "./lib/config";
@@ -316,6 +317,7 @@ export default function App() {
                       <Route path="/" element={<RepositoriesPage />} />
                       <Route path="/snapshots/:repoId" element={<SnapshotsPage />} />
                       <Route path="/snapshots/:repoId/search" element={<RepoSearchPage />} />
+                      <Route path="/snapshots/:repoId/explore" element={<ExplorePage />} />
                       <Route path="/snapshots/:repoId/:snapshotId/browse" element={<BrowsePage />} />
                       <Route path="/snapshots/:repoId/:snapshotId/search" element={<SearchPage />} />
                       <Route path="/snapshots/:repoId/diff/:snapshotA/:snapshotB" element={<DiffPage />} />

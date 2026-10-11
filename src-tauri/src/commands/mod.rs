@@ -4,6 +4,7 @@ pub mod backup_plan;
 pub mod browse;
 pub mod cache;
 pub mod crypto;
+pub mod explore;
 pub mod keychain;
 pub mod notify;
 pub mod repo;

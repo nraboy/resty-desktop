@@ -71,6 +71,7 @@ src/
     BrowsePage.tsx        # File tree inside a snapshot; restore, tag management, search entry point — see docs/frontend.md
     SearchPage.tsx        # Full-text file search within one snapshot; index state machine — see docs/frontend.md
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
+    ExplorePage.tsx       # The repo as one folder tree, no snapshot dimension; each path once, at its newest indexed version; folder in `?path=` — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
     BackupPlanEditPage.tsx # Create/edit plan: sources (Paths | List files tabs, `--files-from`), tags, excludes (Simple | Expert) + exclude pattern files (`--(i)exclude-file`), retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
@@ -94,6 +95,7 @@ src-tauri/
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
       snapshot.rs           # List/delete/tag snapshots; execute_backup; copy/mirror; retention — see docs/restic.md and docs/concurrency.md
       browse.rs             # File listing, restore, indexing (single + batch) — see docs/concurrency.md and docs/decisions.md
+      explore.rs            # Explore's unified folder tree: `list_repo_children` + the pure `normalize_parent`; pure-DB read, no lock, nothing on the task bus — see docs/backend.md
       backup_plan.rs        # List/save/remove backup plans; `validate_plan_sources` (paths-or-list-files, list-file plans need a tag) — see docs/restic.md
       schedule.rs           # List/save/remove/toggle schedules; cron helpers reused by scheduler.rs
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
@@ -110,6 +112,7 @@ src-tauri/
 | `/` | RepositoriesPage |
 | `/snapshots/:repoId` | SnapshotsPage |
 | `/snapshots/:repoId/search` | RepoSearchPage |
+| `/snapshots/:repoId/explore` | ExplorePage (current folder in `?path=`) |
 | `/snapshots/:repoId/:snapshotId/browse` | BrowsePage |
 | `/snapshots/:repoId/:snapshotId/search` | SearchPage |
 | `/snapshots/:repoId/diff/:snapshotA/:snapshotB` | DiffPage |
@@ -174,7 +177,7 @@ never instead of, existing detailed feeds (`backup:progress`, etc.). Envelope: `
 concurrent operations), `kind`, `phase` (`started`|`progress`|`cancelling`|`cancelled`|
 `finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at`. Every
 restic-shelling operation is wired via `OperationCtx`, except pure-DB reads (`list_snapshots`,
-`get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
+`get_repo_stats`, `list_repo_children`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
 (`clean_cache`, the "Clean Orphaned Data" button) is the one kind that emits `repoId: ""` — it
 never shells out to restic and isn't scoped to a single repo; every other kind carries a real one.
 
@@ -224,7 +227,8 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
 - `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
-- `list_snapshots`, `get_snapshot_index_status`, `get_repo_stats` don't emit on the `task` bus
+- `list_snapshots`, `get_snapshot_index_status`, `get_repo_stats`, `list_repo_children` don't emit
+  on the `task` bus, and take no `RepoLocks` guard — all are pure-DB reads that never shell out
 - `get_repo_stats` is cache-only and must never fall through to a live `restic stats` call
 - `browse_cache_files.parent_path` duplicates a prefix of `path` on purpose (index speed)
 - `remove_repo` deliberately does **not** cascade into `browse_cache_files`/`indexed_snapshots`
@@ -470,7 +474,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse,explore}.rs`.
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash

@@ -301,6 +301,11 @@ export const searchSnapshotFiles = (repoId: string, snapshotId: string, query: s
 export const searchRepoFiles = (repoId: string, query: string): Promise<RepoFileHit[]> =>
   invoke("search_repo_files", { repoId, query });
 
+/** One folder of Explore's unified tree: the direct children of `path` (omit for the top
+ *  level), each path once, resolved to the newest indexed snapshot holding it. */
+export const listRepoChildren = (repoId: string, path?: string): Promise<RepoFileHit[]> =>
+  invoke("list_repo_children", { repoId, path });
+
 export const getSnapshotIndexStatus = (repoId: string): Promise<Record<string, string>> =>
   invoke("get_snapshot_index_status", { repoId });
 

@@ -114,6 +114,17 @@ export function SearchIcon({ className = "w-4 h-4" }: IconProps) {
   );
 }
 
+/** A bullet list — Explore's unified folder tree. Deliberately a different shape from
+ *  SearchIcon's magnifier, since the two sit next to each other on every repository row. */
+export function FileListIcon({ className = "w-4 h-4" }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+        d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.008v.008H3.75V6.75Zm0 5.25h.008v.008H3.75V12Zm0 5.25h.008v.008H3.75v-.008Z" />
+    </svg>
+  );
+}
+
 export function RestoreIcon({ className = "w-4 h-4" }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getRestorePath, listFiles, listRepos, listSnapshots, restorePath, tagSnapshot } from "../lib/invoke";
-import type { Snapshot } from "../lib/types";
+import type { BrowseNavState } from "../lib/types";
 import type { FileEntry, Repository } from "../lib/types";
 import { formatSize, formatDateOnly } from "../lib/format";
 import Button from "../components/Button";
@@ -34,9 +34,12 @@ export default function BrowsePage() {
   const { repoId, snapshotId } = useParams<{ repoId: string; snapshotId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const locationState = location.state as { snapshot?: Snapshot; initialPath?: string; initialPathStack?: string[]; fromSearch?: boolean } | null;
+  const locationState = location.state as BrowseNavState | null;
   const snapshot = locationState?.snapshot;
-  const fromSearch = locationState?.fromSearch ?? false;
+  const fromList = locationState?.fromList ?? false;
+  // Names where navigate(-1) actually goes. Search is the original (and default) caller;
+  // ExplorePage passes its own so the button doesn't claim to return to a search.
+  const backLabel = locationState?.backLabel ?? "Search";
   const [repo, setRepo] = useState<Repository | null>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string | undefined>(locationState?.initialPath);
@@ -241,9 +244,9 @@ export default function BrowsePage() {
     <div className="p-6">
       <div className="mb-6">
         <div className="flex items-center gap-3">
-          {fromSearch ? (
+          {fromList ? (
             <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
-              ← Search
+              ← {backLabel}
             </Button>
           ) : (
             <Button variant="ghost" size="sm" onClick={() => navigate(`/snapshots/${repoId}`)}>

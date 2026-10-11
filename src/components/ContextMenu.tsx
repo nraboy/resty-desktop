@@ -1,6 +1,12 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
+// Items are deliberately label-only: no menu item in the app carries an icon. The
+// iconed surface is the row-level `ActionButton`, where the glyph does real work
+// (its label only reveals as text at the `wide` breakpoint, so below that the icon
+// is the whole affordance). In a menu the text is always present, so a glyph would
+// be decoration — and one iconed item among many also indents its own label past
+// every other, which reads as a layout bug. See docs/frontend.md.
 export type ContextMenuItemDef =
   | {
       label: string;

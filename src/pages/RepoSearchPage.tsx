@@ -339,7 +339,7 @@ export default function RepoSearchPage() {
       ''
     );
     navigate(`/snapshots/${repoId}/${entry.snapshotId}/browse`, {
-      state: { snapshot: snapshotById.get(entry.snapshotId), initialPath: path, initialPathStack: stack, fromSearch: true },
+      state: { snapshot: snapshotById.get(entry.snapshotId), initialPath: path, initialPathStack: stack, fromList: true },
     });
   };
 

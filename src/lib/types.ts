@@ -72,6 +72,20 @@ export interface RepoFileHit {
   snapshotShortId: string;
 }
 
+// Router state for a jump into BrowsePage from a list view (SearchPage,
+// RepoSearchPage, ExplorePage). `fromList` selects the back button's behavior —
+// navigate(-1), restoring whatever state the caller wrote into its history
+// entry — and `backLabel` names that destination on the button. Arriving with
+// no state at all is normal (LogsPage hash links, deep links, a refresh), so
+// every field is optional and BrowsePage backfills what it can.
+export interface BrowseNavState {
+  snapshot?: Snapshot;
+  initialPath?: string;
+  initialPathStack?: string[];
+  fromList?: boolean;
+  backLabel?: string;
+}
+
 export interface ResticStats {
   total_size: number;
   total_file_count: number;

@@ -192,7 +192,7 @@ export default function SearchPage() {
       ''
     );
     navigate(`/snapshots/${repoId}/${snapshotId}/browse`, {
-      state: { snapshot, initialPath: path, initialPathStack: stack, fromSearch: true },
+      state: { snapshot, initialPath: path, initialPathStack: stack, fromList: true },
     });
   };
 

@@ -47,7 +47,7 @@ import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
-import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
+import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon, FileListIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
 
@@ -1042,6 +1042,16 @@ export default function RepositoriesPage() {
                     icon={<SearchIcon className="w-4 h-4" />}
                   />
                   <ActionButton
+                    label="Explore"
+                    title="Explore as one folder tree"
+                    tone="blue"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/snapshots/${repo.id}/explore`);
+                    }}
+                    icon={<FileListIcon className="w-4 h-4" />}
+                  />
+                  <ActionButton
                     label="Rename"
                     tone="blue"
                     onClick={(e) => {
@@ -1543,6 +1553,10 @@ export default function RepositoriesPage() {
             {
               label: "Search Files…",
               onClick: () => navigate(`/snapshots/${contextMenu.repo.id}/search`),
+            },
+            {
+              label: "Explore Folder Tree",
+              onClick: () => navigate(`/snapshots/${contextMenu.repo.id}/explore`),
             },
             {
               label: "Index All Snapshots",
