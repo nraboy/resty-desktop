@@ -307,6 +307,10 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `cached_at` columns are written but not read yet — kept for a future TTL feature
 - `panic = "abort"` is deliberately not set in the release profile
 - Known, deferred frontend duplication (search/index pattern, FileIcon, index-batch UI, etc.)
+- Displayed times use the web view's `Intl`/ICU zone rules, not the OS's: a stale bundled ICU (the
+  AppImage's, e.g. Morocco in issue #40) shows every time off by the rule difference. Cosmetic and
+  affects very few users — a declined fix, not an oversight; see docs/decisions.md before adding
+  any offset/zone logic
 - Linux/Wayland title-bar buttons freezing after a tray restore was an upstream `tao` 0.35 bug
   (its custom Wayland header's `EventBox` sat above the buttons), fixed by tao ≥ 0.36 / tauri ≥
   2.12. Don't pin tauri below 2.12 and don't add an app-side workaround without re-verifying on

@@ -830,6 +830,37 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   (b) a restic-version check, since a wrong guess turns every backup of the plan into a failure.
   Same principle applies to any future backup flag: gate on what 0.17 supports.
 
+- **Display times follow the web view's ICU time-zone data, not the OS's — a stale-ICU hour
+  offset is a declined, cosmetic fix (issue #40).** Every date the UI shows goes through
+  `Intl.DateTimeFormat` (`formatDate`/`formatDateOnly` in `src/lib/format.ts`, no explicit
+  `timeZone`), so the offset applied is whatever the *web view's* bundled ICU believes for the
+  user's zone; `date` and restic (Go) read the OS's tzdata instead. When the two disagree, every
+  app time is off by the difference. The reporter: Linux Mint 22.3, AppImage, `Africa/Casablanca`
+  — Morocco moved to permanent UTC+0 on 2026-09-20, the OS says +00, the ICU still says +01, so
+  every time was +1h versus `restic snapshots` (reproduced: Node 24's ICU 77.1/tz 2025b gives the
+  same +01; macOS system tzdata 2026c gives +00). **Display-only:** timestamps are stored and
+  passed around raw, so restore, retention, schedules and snapshot comparisons are unaffected.
+  - Who's affected: only zones whose rules changed after the web view's ICU data was built.
+    Mainly the **AppImage**, whose bundled WebKitGTK/ICU is frozen at the build image's version
+    (ubuntu-22.04 → ICU 70); briefly anyone on Linux right after a brand-new tz change (Morocco).
+    macOS (system WebKit) and Windows (WebView2) get tz updates with the OS/Edge. Examples of
+    zones that changed since 2021: Mexico, Jordan/Syria, Egypt, Paraguay, eastern Kazakhstan.
+  - Rejected fixes: (1) **JS date libraries** — date-fns-tz/Luxon/Day.js/Temporal all use the
+    same ICU; moment-timezone or a `tzdata` package only moves the staleness into `package.json`.
+    (2) **Rust-formatted display strings** — needs locale formatting in Rust (chrono locales +
+    locale detection), a raw+display pair on every date payload (comparisons, sorting and
+    `formatRelative` still need the raw value), and visibly changes the date format for everyone.
+    (3) **Startup-offset fallback** (a sync command returning the OS's current UTC offset via
+    `chrono::Local`; `format.ts` rebuilds its formatters with a fixed `Etc/GMT±N` zone when it
+    disagrees with `getTimezoneOffset()`) — small, but permanent logic for a handful of users, and
+    in fallback mode past dates use today's offset. (4) **ubuntu-24.04 build image** — its ICU 74
+    is still older than the 2024+ rule changes, and it raises the AppImage's glibc floor.
+  - Workaround for an affected user whose zone currently equals UTC: launch with `TZ=UTC`
+    (`Exec=env TZ=UTC /path/to/Resty-Desktop.AppImage` in the `.desktop` file). Untested against
+    the AppImage; the autostart entry the app writes won't carry it, and it's zone-specific.
+  - Revisit if more reports come in; the startup-offset fallback (3) is the preferred fix then.
+    Don't add per-zone special cases.
+
 
 ## Linux GPU Compatibility
 
