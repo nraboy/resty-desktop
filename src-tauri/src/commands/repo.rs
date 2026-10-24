@@ -340,10 +340,19 @@ const CONNECTION_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// stdout/stderr pipes open, in which case reading to EOF would block forever.
 const READER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Like `run_restic_with_path`, but kills restic and fails with
-/// `backends::CONNECTION_TIMEOUT_MARKER` if it hasn't finished within `timeout`. The
-/// error carries the last few lines restic printed (its "retrying after … connection
-/// refused" lines name the real problem) plus the usual `rest:` hint.
+/// What restic prints, per failed attempt, while it backs off and retries a backend error.
+const RESTIC_RETRY_MARKER: &str = "retrying after";
+
+/// Like `run_restic_with_path`, for a *connection test*: it stops at the first sign of
+/// trouble instead of letting restic back off for minutes.
+///
+/// - **Fail fast.** restic treats many failures of its first request (`Stat <config/>`) — a
+///   certificate it can't verify, a refused connection, a wrong scheme — as retryable, and
+///   announces each with a `… retrying after Ns` line. The first such line already says what is
+///   wrong, so restic is killed there and that error (plus the usual `rest:` hint) is returned;
+///   waiting only repeats the same failing handshake against the server.
+/// - **Deadline.** Anything that neither finishes nor reports a retry within `timeout` is killed
+///   and fails with `backends::CONNECTION_TIMEOUT_MARKER`.
 fn run_restic_with_timeout(
     repo: &FullRepository,
     args: Vec<&str>,
@@ -358,34 +367,51 @@ fn run_restic_with_timeout(
         .spawn()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     let mut stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
-    let mut stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+    let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
     // The readers report over channels rather than being joined: `kill()` only reaches the
     // direct child, so a helper that inherited the pipes would keep them open and a `join()`
     // would never return — defeating the very deadline this function exists to enforce. A
     // reader stuck that way is simply abandoned (it ends when the helper does).
     let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
     let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    let retry_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     std::thread::spawn(move || {
         let mut s = String::new();
         stdout.read_to_string(&mut s).ok();
         let _ = out_tx.send(s);
     });
+    let retry_flag = std::sync::Arc::clone(&retry_seen);
     std::thread::spawn(move || {
+        use std::io::BufRead;
         let mut s = String::new();
-        stderr.read_to_string(&mut s).ok();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            s.push_str(&line);
+            s.push('\n');
+            if line.contains(RESTIC_RETRY_MARKER) {
+                retry_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         let _ = err_tx.send(s);
     });
 
     let deadline = std::time::Instant::now() + timeout;
+    let mut failed_fast = false;
     let status = loop {
         match child.try_wait().map_err(|e| format!("Failed to wait for restic: {e}"))? {
             Some(status) => break Some(status),
+            None if retry_seen.load(std::sync::atomic::Ordering::SeqCst) => {
+                failed_fast = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     };
     let stdout = out_rx.recv_timeout(READER_DRAIN_TIMEOUT).unwrap_or_default();
@@ -394,6 +420,11 @@ fn run_restic_with_timeout(
     match status {
         Some(status) if status.success() => Ok(stdout),
         Some(_) => Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, stderr)),
+        // Killed on the first retry line: restic's own message is the answer.
+        None if failed_fast => {
+            let first: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).take(3).collect();
+            Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, first.join("\n")))
+        }
         None => {
             let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
             let tail = tail[tail.len().saturating_sub(3)..].join("\n");
@@ -1640,15 +1671,56 @@ mod tests {
     fn run_restic_with_timeout_kills_a_hung_restic_and_names_the_problem() {
         let bin = fake_restic(
             "hang",
-            "echo 'Stat(<config/>) returned error, retrying after 2.8s: dial tcp 127.0.0.1:9: connect: connection refused' >&2\nexec sleep 30",
+            "exec sleep 30",
         );
         let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
         let started = std::time::Instant::now();
         let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(3)).unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "should not wait for the 30s sleep");
         assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
-        assert!(err.contains("connection refused"), "keeps restic's last lines: {err}");
         assert!(err.contains("Hint: Couldn't reach the server"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_fails_fast_on_the_first_retry_line_with_the_real_cause() {
+        // restic announces each retryable failure and then sleeps through the backoff; the
+        // connection test must report the first one, not wait out the deadline.
+        let bin = fake_restic(
+            "x509",
+            "echo 'Stat(<config/>) returned error, retrying after 2.8s: Head \"https://:***@127.0.0.1:8443/repo/config\": tls: failed to verify certificate: x509: certificate signed by unknown authority' >&2\nexec sleep 30",
+        );
+        let repo = tls_repo("rest:https://127.0.0.1:8443/repo", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited out the backoff: {err}");
+        assert!(!err.contains(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+        assert!(err.contains("x509: certificate signed by unknown authority"), "{err}");
+        assert!(err.contains("Hint: Couldn't verify the server's TLS certificate"), "{err}");
+
+        // The same failure with certificate verification already off has no TLS hint to give.
+        let insecure = tls_repo("rest:https://127.0.0.1:8443/repo", true);
+        let err = run_restic_with_timeout(&insecure, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
+        assert!(!err.contains("Hint: Couldn't verify"), "{err}");
+    }
+
+    /// Manual check against a real server: `RESTY_TEST_URL=rest:https://127.0.0.1:8443/repo
+    /// [RESTY_TEST_INSECURE=1] cargo test live_connection_test -- --ignored --nocapture`
+    /// (restic on PATH, repository password `pw`).
+    #[test]
+    #[ignore]
+    fn live_connection_test_reports_the_real_cause_quickly() {
+        let url = std::env::var("RESTY_TEST_URL").expect("set RESTY_TEST_URL");
+        let repo = FullRepository {
+            path: url,
+            password: "pw".into(),
+            read_only: false,
+            insecure_tls: std::env::var("RESTY_TEST_INSECURE").is_ok(),
+            credentials: vec![],
+        };
+        let started = std::time::Instant::now();
+        let result = run_restic_with_timeout(&repo, vec!["snapshots", "--json"], "restic", std::time::Duration::from_secs(45));
+        println!("LIVE after {:?}: {:?}", started.elapsed(), result.map(|s| s.len()));
     }
 
     #[cfg(unix)]

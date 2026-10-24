@@ -39,9 +39,12 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   mismatch — indistinguishable server-side) and 404; **403 comes only from writes** (deleting/modifying
   under `--append-only`, re-creating existing config/blobs), so the hint for 403 names append-only and
   the connection test never claims a path problem for it. Hints are appended after restic's text, never
-  replacing it (callers substring-match for "already locked"), and never change state. The deadline
-  exists because restic retries a refused/misdirected connection for ~15 minutes with no flag to cap it;
-  don't "simplify" `test_repo_connection` back to `run_restic_blocking` for remote repos.
+  replacing it (callers substring-match for "already locked"), and never change state. The connection test
+  **fails fast** (kills restic at its first "retrying after" line) and also has a 45s deadline, because
+  restic retries a refused/misdirected/untrusted-certificate first request for ~15 minutes with no flag
+  to cap it — verified: `restic init` fails at once on an untrusted certificate but `restic snapshots`
+  (what the test runs) backs off and re-handshakes repeatedly. Don't "simplify" `test_repo_connection`
+  back to `run_restic_blocking` for `rest:` repos.
 - **Restic exit 3 = completed with warnings; retention skips only on a missing source path
   (issue #36).** Restic exits 3 after *saving* the snapshot when some source data was unreadable;
   `execute_backup` used to treat every non-zero exit as a failure, so such runs logged a failure
