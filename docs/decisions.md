@@ -34,7 +34,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
     PEM with cert + key, stored as a path only) and a per-repo `--cacert` path. Don't add a global
     "ignore TLS errors" toggle.
 - **`rest:` failure hints are appended, advisory, and keyed off restic's own HTTP status text; a remote
-  connection test has a 30s deadline.** What each status means was read from rest-server's source and
+  connection test of a `rest:` repo has a 45s deadline.** What each status means was read from rest-server's source and
   checked against a live instance: reads only ever see 401 (credentials *or* a `--private-repos` path
   mismatch — indistinguishable server-side) and 404; **403 comes only from writes** (deleting/modifying
   under `--append-only`, re-creating existing config/blobs), so the hint for 403 names append-only and

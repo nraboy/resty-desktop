@@ -333,7 +333,12 @@ pub fn run_restic_with_path(
 /// unreachable backend with exponential backoff for many minutes (it has no flag to
 /// bound that), so without a deadline "Test Connection" against a wrong host or scheme
 /// would appear to hang.
-const CONNECTION_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONNECTION_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How long to wait for the output readers after restic has exited or been killed. A
+/// wrapper backend (e.g. `rclone:`) can leave a helper process holding the inherited
+/// stdout/stderr pipes open, in which case reading to EOF would block forever.
+const READER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Like `run_restic_with_path`, but kills restic and fails with
 /// `backends::CONNECTION_TIMEOUT_MARKER` if it hasn't finished within `timeout`. The
@@ -354,15 +359,21 @@ fn run_restic_with_timeout(
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     let mut stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
     let mut stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
-    let out_thread = std::thread::spawn(move || {
+    // The readers report over channels rather than being joined: `kill()` only reaches the
+    // direct child, so a helper that inherited the pipes would keep them open and a `join()`
+    // would never return — defeating the very deadline this function exists to enforce. A
+    // reader stuck that way is simply abandoned (it ends when the helper does).
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
         let mut s = String::new();
         stdout.read_to_string(&mut s).ok();
-        s
+        let _ = out_tx.send(s);
     });
-    let err_thread = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut s = String::new();
         stderr.read_to_string(&mut s).ok();
-        s
+        let _ = err_tx.send(s);
     });
 
     let deadline = std::time::Instant::now() + timeout;
@@ -377,8 +388,8 @@ fn run_restic_with_timeout(
             None => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     };
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
+    let stdout = out_rx.recv_timeout(READER_DRAIN_TIMEOUT).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(READER_DRAIN_TIMEOUT).unwrap_or_default();
 
     match status {
         Some(status) if status.success() => Ok(stdout),
@@ -606,9 +617,10 @@ pub async fn test_repo_connection(
     let credentials: Vec<Credential> =
         credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
     let dummy = FullRepository { path, password, read_only, insecure_tls, credentials };
-    // A remote backend gets a deadline: restic would otherwise retry an unreachable host
-    // for many minutes. Local paths fail fast and keep the plain call.
-    let timeout = (kind != backends::BackendKind::Local).then_some(CONNECTION_TEST_TIMEOUT);
+    // A `rest:` repo gets a deadline: restic would otherwise retry an unreachable host for
+    // many minutes. Other backends (S3/B2/sftp/…) can be legitimately slow to open and have
+    // no hint logic to explain a timeout, so they keep the plain call, as do local paths.
+    let timeout = (kind == backends::BackendKind::Rest).then_some(CONNECTION_TEST_TIMEOUT);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let args = vec!["snapshots", "--json"];
         match timeout {
@@ -1637,6 +1649,19 @@ mod tests {
         assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
         assert!(err.contains("connection refused"), "keeps restic's last lines: {err}");
         assert!(err.contains("Hint: Couldn't reach the server"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_returns_even_if_a_helper_keeps_the_pipes_open() {
+        // The fake restic backgrounds a grandchild that inherits stdout/stderr and outlives
+        // it; killing restic must not leave the call waiting on those pipes.
+        let bin = fake_restic("grandchild", "sleep 30 &\nexec sleep 30");
+        let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(2)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "hung on the inherited pipes: {err}");
+        assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
     }
 
     #[cfg(unix)]
