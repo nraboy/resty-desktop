@@ -181,12 +181,16 @@ pub(crate) fn apply_tls_flags(cmd: &mut std::process::Command, repo: &FullReposi
 /// would change its security: `rest:https://` and the HTTPS object stores. Local paths,
 /// `sftp:`, `rclone:` and plain `rest:http://` are unaffected by the flag.
 fn verifies_tls(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
-    p.starts_with("rest:https://")
-        || p.starts_with("s3:")
-        || p.starts_with("b2:")
-        || p.starts_with("azure:")
-        || p.starts_with("gs:")
+    // The backend prefix is case-sensitive (restic rejects `REST:`; `detect_kind` agrees);
+    // the URL scheme after `rest:` is not.
+    let https_rest = path
+        .strip_prefix("rest:")
+        .is_some_and(|rest| rest.to_ascii_lowercase().starts_with("https://"));
+    https_rest
+        || path.starts_with("s3:")
+        || path.starts_with("b2:")
+        || path.starts_with("azure:")
+        || path.starts_with("gs:")
 }
 
 pub(crate) const MIXED_INSECURE_TLS_ERROR: &str =
@@ -1499,9 +1503,10 @@ mod tests {
         let verified = tls_repo("rest:https://other/b", false);
         assert_eq!(check_tls_compat(&insecure, &verified).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
         assert_eq!(check_tls_compat(&verified, &insecure).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
-        // Case-insensitive scheme, like the frontend's check.
-        let upper = tls_repo("REST:HTTPS://other/b", false);
-        assert!(check_tls_compat(&insecure, &upper).is_err());
+        // The URL scheme is case-insensitive; the `rest:` backend prefix is not.
+        let mixed = tls_repo("rest:HTTPS://other/b", false);
+        assert!(check_tls_compat(&insecure, &mixed).is_err());
+        assert!(check_tls_compat(&insecure, &tls_repo("REST:https://other/b", false)).is_ok());
         assert!(check_tls_compat(&insecure, &tls_repo("s3:s3.amazonaws.com/b", false)).is_err());
     }
 

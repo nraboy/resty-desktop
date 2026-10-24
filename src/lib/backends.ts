@@ -86,14 +86,17 @@ export function hasInlineRestUserinfo(path: string): boolean {
 /** True when `--insecure-tls` means something for this path: a `rest:https://` URL.
  * (restic ignores the flag for plain http, and the app only offers it for REST.) */
 export function supportsInsecureTls(path: string): boolean {
-  return /^rest:https:\/\//i.test(path.trim());
+  // The `rest:` prefix is case-sensitive (restic rejects `REST:` as an invalid backend, and
+  // detect_kind treats it as a local path); the URL scheme after it is not.
+  const p = path.trim();
+  return p.startsWith("rest:") && /^https:\/\//i.test(p.slice("rest:".length));
 }
 
 /** Mirrors repo.rs's `verifies_tls`: transports where `--insecure-tls` would change the
  * security of a repo that doesn't have it set. */
 function verifiesTls(path: string): boolean {
-  const p = path.trim().toLowerCase();
-  return ["rest:https://", "s3:", "b2:", "azure:", "gs:"].some((prefix) => p.startsWith(prefix));
+  const p = path.trim();
+  return supportsInsecureTls(p) || ["s3:", "b2:", "azure:", "gs:"].some((prefix) => p.startsWith(prefix));
 }
 
 /** Mirrors repo.rs's `check_tls_compat`. restic's `--insecure-tls` is process-wide, so a

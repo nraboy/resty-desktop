@@ -95,7 +95,9 @@ describe("REST userinfo detectors", () => {
 describe("supportsInsecureTls", () => {
   it("is true only for rest:https:// URLs", () => {
     expect(supportsInsecureTls("rest:https://nas:8000/repo")).toBe(true);
-    expect(supportsInsecureTls("  REST:HTTPS://nas/")).toBe(true);
+    expect(supportsInsecureTls("  rest:HTTPS://nas/")).toBe(true);
+    // restic rejects an upper-case backend prefix ("invalid backend"), so it isn't a REST repo.
+    expect(supportsInsecureTls("REST:https://nas/")).toBe(false);
     expect(supportsInsecureTls("rest:http://nas:8000/repo")).toBe(false);
     expect(supportsInsecureTls("s3:s3.amazonaws.com/bucket")).toBe(false);
     expect(supportsInsecureTls("/home/user/repo")).toBe(false);
