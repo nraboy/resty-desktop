@@ -53,7 +53,9 @@ as-is. Don't re-flag or "fix" them without understanding why first:
     undetermined answer can always be overridden by hand. It is not re-run on a schedule.
   - The probe is a `DELETE /data/<64 zeros>`: a 403 can only mean append-only once auth and path are known
     good (reads never 403; wrong path/credentials are 401, a missing repo 404), and the all-zero id can't
-    match any real object. Don't "improve" it to a random id (no safer, harder to recognise in server
+    match any real object. That precondition is also what lets a probe
+    **404 count as "deletes allowed"**: rest-server 0.10/0.11 answer 404 for a missing blob, but only after
+    the append-only 403 check. Don't "improve" it to a random id (no safer, harder to recognise in server
     logs) or to a real blob/lock (`locks` are deletable even under `--append-only`, so that would
     report the wrong thing).
   - `tag_snapshot` is refused (`ensure_can_delete`) because restic's tag edit is save-new-then-delete-old:

@@ -115,7 +115,9 @@ export function insecureTlsConflict(
 /** True when append-only means something for this path: a `rest:http(s)://` URL (it is a
  * rest-server option; no other backend has it). */
 export function supportsAppendOnly(path: string): boolean {
-  return /^rest:https?:\/\//i.test(path.trim());
+  // `rest:` itself is case-sensitive (restic rejects `REST:`); the scheme after it is not.
+  const p = path.trim();
+  return p.startsWith("rest:") && /^https?:\/\//i.test(p.slice("rest:".length));
 }
 
 /** Tooltip / title for controls disabled because the repo is on an append-only server. */

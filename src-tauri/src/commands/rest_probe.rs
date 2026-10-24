@@ -5,15 +5,20 @@
 //! `AppendOnly` in `deleteBlob` **before** it looks at the file (`repo/repo.go`), so
 //! `DELETE <repo>/data/<64 hex>` answers:
 //!
-//! - **403** under `--append-only`, even for an id that doesn't exist;
-//! - **200** on a normal server, where deleting a missing file is an idempotent no-op.
+//! - **403** under `--append-only`, even for an id that doesn't exist (the check comes first,
+//!   in every release);
+//! - **200** on a normal server, where deleting a missing file is an idempotent no-op
+//!   (rest-server ≥ 0.12 — confirmed in `deleteBlob` and against a live server) or, in the
+//!   0.10/0.11 releases, **404**, since they report the missing file instead.
 //!
 //! The probe id is 64 zeros. restic names objects by the SHA-256 of their content, so no real
 //! blob can carry that name, and the request can never delete anything.
 //!
-//! Auth, a `--private-repos` path mismatch and a missing repo answer 401/404 instead, so the
-//! probe is only meaningful **after** a successful connection test (the UI runs it in that
-//! order); any other answer is reported as undetermined rather than guessed at.
+//! Auth and a `--private-repos` path mismatch answer 401, and a missing repo or path 404 —
+//! which is why the probe is only meaningful **after** a successful connection test (the UI
+//! runs it in that order): once the repo is known to be reachable, a 404 here can only be the
+//! old "no such blob" answer of a server that allows deletes. Any other answer is reported
+//! as undetermined rather than guessed at.
 //!
 //! The request goes out over `ureq` + rustls with the platform's root certificates
 //! (`native-certs`), matching restic, which also trusts the OS store. A repo flagged
@@ -52,7 +57,9 @@ impl AppendOnlyProbe {
     }
 }
 
-/// Maps the HTTP status of the probe `DELETE` to a verdict. Pure.
+/// Maps the HTTP status of the probe `DELETE` to a verdict. Pure. Assumes the repository was
+/// already reached by a successful connection test (see the module docs): 404 is read as
+/// "this server lets a delete get as far as the missing file", i.e. not append-only.
 pub(crate) fn interpret_status(code: u16) -> AppendOnlyProbe {
     match code {
         403 => AppendOnlyProbe::new(
@@ -63,11 +70,15 @@ pub(crate) fn interpret_status(code: u16) -> AppendOnlyProbe {
             ProbeStatus::NotAppendOnly,
             "The server allows deletes: it is not running in append-only mode.",
         ),
+        // rest-server 0.10/0.11 answer 404 for a delete of a blob that doesn't exist — but only
+        // after the append-only check, which answers 403 first, so reaching 404 means deletes
+        // are allowed.
+        404 => AppendOnlyProbe::new(
+            ProbeStatus::NotAppendOnly,
+            "The server allows deletes: it is not running in append-only mode.",
+        ),
         401 => AppendOnlyProbe::undetermined(
             "The server rejected the credentials (401), so append-only mode couldn't be checked.",
-        ),
-        404 => AppendOnlyProbe::undetermined(
-            "The repository path wasn't found (404), so append-only mode couldn't be checked.",
         ),
         other => AppendOnlyProbe::undetermined(format!(
             "The server answered HTTP {other}, so append-only mode couldn't be checked."
@@ -270,7 +281,9 @@ mod tests {
         assert_eq!(interpret_status(403).status, ProbeStatus::AppendOnly);
         assert_eq!(interpret_status(200).status, ProbeStatus::NotAppendOnly);
         assert_eq!(interpret_status(204).status, ProbeStatus::NotAppendOnly);
-        for code in [401, 404, 400, 500, 507] {
+        // rest-server 0.10/0.11 report a missing blob as 404, after the append-only check.
+        assert_eq!(interpret_status(404).status, ProbeStatus::NotAppendOnly);
+        for code in [401, 400, 500, 507] {
             assert_eq!(interpret_status(code).status, ProbeStatus::Undetermined, "{code}");
         }
     }
@@ -361,6 +374,10 @@ mod tests {
     #[test]
     fn probe_reports_not_append_only_on_200_and_undetermined_otherwise() {
         let (addr, server) = serve_once("200 OK");
+        assert_eq!(probe(&format!("rest:http://{addr}/r"), false, &[]).status, ProbeStatus::NotAppendOnly);
+        server.join().unwrap();
+
+        let (addr, server) = serve_once("404 Not Found");
         assert_eq!(probe(&format!("rest:http://{addr}/r"), false, &[]).status, ProbeStatus::NotAppendOnly);
         server.join().unwrap();
 

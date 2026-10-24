@@ -129,6 +129,8 @@ describe("supportsAppendOnly", () => {
   it("is true for rest:http and rest:https URLs only", () => {
     expect(supportsAppendOnly("rest:http://nas:8000/r")).toBe(true);
     expect(supportsAppendOnly("rest:https://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("rest:HTTPS://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("REST:https://nas:8000/r")).toBe(false);
     expect(supportsAppendOnly("s3:s3.amazonaws.com/b")).toBe(false);
     expect(supportsAppendOnly("/home/u/repo")).toBe(false);
   });

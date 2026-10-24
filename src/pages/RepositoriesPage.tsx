@@ -1866,11 +1866,15 @@ export default function RepositoriesPage() {
             checked={insecureTls}
             onChange={(v) => { setInsecureTls(v); setTestResult(null); }}
           />
-          <AppendOnlyField
-            path={form.path}
-            checked={appendOnly}
-            onChange={(v) => { setAppendOnly(v); setTestResult(null); }}
-          />
+          {/* Not offered when creating a repository (init): a brand-new repo can't be known to be
+              append-only yet — set it later from Edit, or let Test Connection detect it. */}
+          {modalMode === "add" && (
+            <AppendOnlyField
+              path={form.path}
+              checked={appendOnly}
+              onChange={(v) => { setAppendOnly(v); setTestResult(null); }}
+            />
+          )}
           {testResult && (
             <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}

@@ -658,7 +658,11 @@ pub async fn init_repo(
         &ciphertext,
         false,
         input.insecure_tls,
-        input.append_only,
+        // `restic init` creates a repository whose server can't be known to be append-only
+        // yet: the flag is only ever set later, from the edit dialog (manually or via
+        // detection). `NewRepoInput::append_only` applies to `add_repo` (opening an existing
+        // repo) only.
+        false,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
