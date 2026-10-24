@@ -93,6 +93,7 @@ export default function RepositoriesPage() {
   const [noPassword, setNoPassword] = useState(false);
   // Which required fields the last Open/Create/Test attempt found empty — each is marked on its
   // field, and cleared as soon as the user edits it.
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [fieldErrors, setFieldErrors] = useState<{ name?: string; path?: string; password?: string }>({});
   const [readOnly, setReadOnly] = useState(false);
   const [insecureTls, setInsecureTls] = useState(false);
@@ -543,12 +544,24 @@ export default function RepositoriesPage() {
     return errs;
   };
 
+  // The same missing fields, named in one line beside the buttons: the fields themselves are
+  // marked too, but Name sits at the top of the dialog and is out of view when the user has
+  // scrolled down to click Open.
+  const missingFieldLabels = [
+    fieldErrors.name && "Name",
+    fieldErrors.path && (pathMode === "local" ? "Folder" : "Repository URL"),
+    fieldErrors.password && "Repository password",
+  ].filter((l): l is string => !!l);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (duplicateSecretsLoading || duplicateSecretsError) return;
     const missing = requiredFieldErrors(true);
     if (Object.keys(missing).length > 0) {
       setFieldErrors(missing);
+      // Name is the first field and scrolls out of view in a short window; bring it back so the
+      // marker on it is actually seen. (The summary beside the buttons names every missing field.)
+      if (missing.name) nameInputRef.current?.focus();
       return;
     }
     setLoading(true);
@@ -1745,6 +1758,7 @@ export default function RepositoriesPage() {
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
+            ref={nameInputRef}
             label="Name"
             placeholder="e.g. Home Backup"
             value={form.name}
@@ -1915,6 +1929,11 @@ export default function RepositoriesPage() {
             <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}
             </div>
+          )}
+          {missingFieldLabels.length > 0 && (
+            <p className="text-sm text-red-300">
+              Missing required {missingFieldLabels.length === 1 ? "field" : "fields"}: {missingFieldLabels.join(", ")}.
+            </p>
           )}
           {error && <p className="text-sm text-red-300">{error}</p>}
           <div className="flex items-center justify-between pt-2">
