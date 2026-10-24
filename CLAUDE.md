@@ -49,6 +49,7 @@ src/
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
+    PlanTreePreview.tsx   # Backup-plan editor's read-only file-tree preview: included / partly included / excluded, with the reason per row — see docs/backup-plan-tree.md
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
@@ -65,6 +66,7 @@ src/
     theme.tsx             # ThemeProvider + useTheme(); persists to localStorage
     cron.ts               # parseCronToSimple/buildCronExpr — pure cron helpers, unit-tested
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
+    planTree.ts           # Row states, reason text and row flattening for PlanTreePreview — pure, unit-tested
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx  # Add/open/duplicate/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
@@ -90,6 +92,8 @@ src-tauri/
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
+      plan_rules.rs         # Verified port of restic's exclude matching: decides what a plan includes — see docs/backup-plan-tree.md
+      plan_tree.rs          # Commands behind the plan editor's tree preview: list folders, classify paths, streamed subtree scans — see docs/backup-plan-tree.md
       notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md

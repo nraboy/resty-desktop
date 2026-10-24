@@ -5,8 +5,8 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, portal, repo, repo_locks, schedule, snapshot, transfer,
-    webhook,
+    auth, backup_plan, browse, cache, notify, plan_tree, portal, repo, repo_locks, schedule, snapshot,
+    transfer, webhook,
 };
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -402,6 +402,7 @@ pub fn run() {
             app.manage(cache::CleanupHandle::new());
             app.manage(cache::RestoreHandle::new());
             app.manage(cache::IndexHandle::new());
+            app.manage(plan_tree::TreeScanState::default());
             app.manage(repo_locks::RepoLocks::new());
 
             app.manage(TrayState(Mutex::new(Tray::default())));
@@ -515,6 +516,13 @@ pub fn run() {
             repo::rename_repo,
             repo::update_repo_path,
             repo::update_repo_read_only,
+            // plan tree preview
+            plan_tree::tree_supported,
+            plan_tree::tree_kinds,
+            plan_tree::tree_list_dir,
+            plan_tree::tree_classify,
+            plan_tree::tree_scan_start,
+            plan_tree::tree_scan_cancel,
             repo::get_repo_password,
             repo::get_repo_credentials,
             repo::update_repo_secrets,

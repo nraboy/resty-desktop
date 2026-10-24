@@ -891,6 +891,12 @@ impl Engine {
         &self.sources
     }
 
+    /// Are there any patterns or markers at all? With none, every node under a source is
+    /// included and no scan needs to touch the disk.
+    pub fn has_rules(&self) -> bool {
+        !self.cs.is_empty() || !self.ci.is_empty() || !self.markers.is_empty()
+    }
+
     /// Would restic reject *this node by itself* — by pattern or marker — ignoring its
     /// ancestors? `None` means it passes. (The source root is exempt: callers skip it.)
     pub fn judge_node(&self, path: &str, probe: &dyn Probe) -> Option<Reason> {
@@ -991,7 +997,7 @@ fn parent_of(path: &str) -> &str {
 }
 
 /// `path` relative to `src` when it is `src` or below it (`""` for `src` itself).
-fn strip_source<'a>(path: &'a str, src: &str) -> Option<&'a str> {
+pub(crate) fn strip_source<'a>(path: &'a str, src: &str) -> Option<&'a str> {
     if path == src {
         return Some("");
     }

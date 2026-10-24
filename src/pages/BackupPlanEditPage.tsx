@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -19,6 +19,8 @@ import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import Tooltip from "../components/Tooltip";
+import PlanTreePreview from "../components/PlanTreePreview";
+import type { TreeRulesInput } from "../lib/planTree";
 import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
 
 type ExcludeMode = "simple" | "expert";
@@ -507,6 +509,18 @@ export default function BackupPlanEditPage() {
 
   // Sources are either/or: only the active tab's entries are saved and shown to the FDA check.
   const activePaths = sourceMode === "paths" ? paths : [];
+  // What the preview tree needs to decide what's included: the sources and every exclusion
+  // the plan will pass to restic, exactly as they'd be saved.
+  const treeRules = useMemo<TreeRulesInput>(
+    () => ({
+      sources: paths,
+      excludes: excludeMode === "expert" ? excludeText.split("\n") : excludeItems,
+      excludeIfPresent,
+      excludeCaches,
+      excludeFiles,
+    }),
+    [paths, excludeMode, excludeText, excludeItems, excludeIfPresent, excludeCaches, excludeFiles],
+  );
   const activeFilesFrom = sourceMode === "files" ? filesFrom : [];
 
   // A tag typed but not yet added still counts on save (state is left untouched, so a
@@ -1080,6 +1094,16 @@ export default function BackupPlanEditPage() {
           </span>
         </label>
       </div>
+
+      {/* Preview: what the sources and exclusions above add up to */}
+      <PlanTreePreview
+        rules={treeRules}
+        unavailableReason={
+          sourceMode === "files"
+            ? "The preview isn't available for plans that use path-list files yet."
+            : undefined
+        }
+      />
 
       {/* Retention policy */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">

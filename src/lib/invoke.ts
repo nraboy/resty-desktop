@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { Classification, TreeListing, TreeRulesInput } from "./planTree";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -400,3 +401,29 @@ export const previewBackrestImport = (filePath: string): Promise<ImportPreview> 
 
 export const importBackrestConfig = (filePath: string): Promise<ExportSummary> =>
   invoke("import_backrest_config", { filePath });
+
+// ── plan tree preview (plan_tree.rs) ───────────────────────────────────────
+
+export const treeSupported = (): Promise<boolean> =>
+  invoke("tree_supported");
+
+/** `dir` / `file` / `symlink` / `other` / `missing` for each path (`follow`: a symlink reports its target). */
+export const treeKinds = (paths: string[], follow = false): Promise<string[]> =>
+  invoke("tree_kinds", { paths, follow });
+
+export const treeListDir = (path: string, limit?: number): Promise<TreeListing> =>
+  invoke("tree_list_dir", { path, limit });
+
+export const treeClassify = (rules: TreeRulesInput, paths: string[]): Promise<Classification> =>
+  invoke("tree_classify", { rules, paths });
+
+/** Starts scanning folders (each assumed included) for excluded items; results arrive as `tree:scan` events. */
+export const treeScanStart = (
+  rules: TreeRulesInput,
+  dirs: string[],
+  budgetMs?: number,
+  maxEntries?: number,
+): Promise<number> => invoke("tree_scan_start", { rules, dirs, budgetMs, maxEntries });
+
+export const treeScanCancel = (): Promise<void> =>
+  invoke("tree_scan_cancel");

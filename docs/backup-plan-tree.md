@@ -78,12 +78,50 @@ the tree should use `judge_node` incrementally). `cargo test engine_speed --rele
 < 100 ms, expanding a 10k-entry folder < 200 ms, virtualised rows, scans that never enter excluded
 folders, a per-folder time budget with a "not fully checked" state.
 
+## The tree preview (phase 2, read-only)
+
+`components/PlanTreePreview.tsx` is a collapsible "Preview" card in the plan editor (after the
+exclude sections). It is **additive**: the existing source/exclude editors are unchanged, and the
+card is hidden where `tree_supported` is false (Windows, until the engine handles Windows paths)
+and shows a message for plans that use path-list files.
+
+- **Roots:** *Sources* (each source not nested in another; nested ones appear inside their parent)
+  or *Whole filesystem* (`/`, auto-expanded down to each source). Rows are marked **included**
+  (filled box), **partly included** (dash: backed up, but something inside is excluded),
+  **excluded** (empty box, greyed), plus *contains backed-up items* for a folder that sits above a
+  source (shown as partly), and *not fully checked* for a huge included folder the scan couldn't
+  finish within its budget. Hover a name for the reason in plain language ("Excluded because its
+  folder X is excluded by `node_modules`", "…by line 12 of ~/.ignore", "Re-included by `!…`").
+- **Backend (`commands/plan_tree.rs`):** `tree_list_dir` (names + entry types only, folders first,
+  capped at 3000 with a "…and N more" note), `tree_kinds` (is a source a folder, file or gone),
+  `tree_classify` (verdicts for a batch of paths, plus each rule's origin: plan pattern, or file
+  and line), `tree_scan_start`/`tree_scan_cancel`. `build_rules` assembles the engine's input
+  exactly as restic receives it — `--exclude` flags, then exclude-file lines (trimmed, `#` and blanks
+  skipped, environment variables expanded like Go's `os.Expand`), markers, `--exclude-caches` — and
+  reports invalid patterns and unreadable files instead of failing.
+- **Scans** answer "is anything inside excluded?" for an included folder: breadth-first (shallow
+  `node_modules`/`.git` found fast), stopping at the first exclusion, never entering a rejected
+  directory or a symlink, with a time and entry budget (then *not fully checked*). Up to three
+  worker threads; starting a scan supersedes the previous one, so the UI re-sends whatever is still
+  unresolved. Results stream back as `tree:scan` events (`tree:scan-done` at the end), folded into
+  the view every 100 ms. With no rules at all nothing is read.
+- **Nothing persists:** listings, verdicts and scan results live in the component's refs until the
+  editor closes; there is no table and nothing for Clear Cache to clean. Rule edits are debounced
+  (350 ms), invalidate verdicts and scans (listings are kept), and re-check the visible rows first.
+- **Rendering:** fixed-height rows, windowed (only the viewport plus overscan is in the DOM — a
+  1,500-entry folder renders ~25 rows), data in refs with a counter to re-render. Checked in a
+  browser harness against a mocked backend (layout, virtualisation, live rule edits, tooltips);
+  the Rust commands are covered by unit tests, but the event path between them is only exercised in
+  the real app.
+
 ## Status / roadmap
 
-1. **Engine + tests (this file's module)** — done. Windows path semantics (`C:` components, `\`
+1. **Engine + tests (`plan_rules.rs`)** — done. Windows path semantics (`C:` components, `\`
    separators) are not handled yet.
-2. Read-only tree: whole-filesystem browser, three states, rule provenance, streaming scans.
+2. **Read-only tree** — done (this section); keyboard navigation (arrow keys) and a filter box for
+   huge folders are not yet.
 3. Editing: SourceTree-style include/exclude dialog (exact path / name anywhere / scoped pattern),
    rules list, copy-on-import of exclude files, include patterns resolved to an explicit
-   `--files-from-verbatim` list at backup time (restic has no include patterns).
+   `--files-from-verbatim` list at backup time (restic has no include patterns), and replacing the
+   Paths/Exclude editors with the tree.
 4. Polish: size estimates, Windows, keyboard/accessibility.
