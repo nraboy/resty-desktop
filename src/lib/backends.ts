@@ -111,3 +111,38 @@ export function insecureTlsConflict(
     flagged.insecureTls && !other.insecureTls && verifiesTls(other.path);
   return weakens(a, b) || weakens(b, a);
 }
+
+/** True when append-only means something for this path: a `rest:http(s)://` URL (it is a
+ * rest-server option; no other backend has it). */
+export function supportsAppendOnly(path: string): boolean {
+  return /^rest:https?:\/\//i.test(path.trim());
+}
+
+/** Tooltip / title for controls disabled because the repo is on an append-only server. */
+export const APPEND_ONLY_TITLE =
+  "This repository is on an append-only server — existing snapshots can't be deleted or modified";
+
+/** Folds a detection result into the form: the new value for the append-only checkbox and a
+ * line to append to the connection-test message ("" = nothing to add). An undetermined
+ * probe leaves the checkbox alone and says why, so the user can still set it by hand. */
+export function applyAppendOnlyProbe(
+  probe: { status: "appendOnly" | "notAppendOnly" | "undetermined"; detail: string },
+  current: boolean,
+): { appendOnly: boolean; note: string } {
+  switch (probe.status) {
+    case "appendOnly":
+      return {
+        appendOnly: true,
+        note: current
+          ? ""
+          : "Append-only server detected: deleting or modifying snapshots (forget, prune, tag, retention) will be disabled for this repository.",
+      };
+    case "notAppendOnly":
+      return {
+        appendOnly: false,
+        note: current ? "The server is no longer append-only, so the append-only setting was cleared." : "",
+      };
+    default:
+      return { appendOnly: current, note: `Append-only check skipped: ${probe.detail}` };
+  }
+}

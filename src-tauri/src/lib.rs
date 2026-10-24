@@ -5,7 +5,7 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, portal, repo, repo_locks, schedule, snapshot, transfer,
+    auth, backup_plan, browse, cache, notify, portal, repo, repo_locks, rest_probe, schedule, snapshot, transfer,
     webhook,
 };
 use rusqlite::Connection;
@@ -516,6 +516,8 @@ pub fn run() {
             repo::update_repo_path,
             repo::update_repo_read_only,
             repo::update_repo_insecure_tls,
+            repo::update_repo_append_only,
+            rest_probe::detect_append_only,
             repo::get_repo_password,
             repo::get_repo_credentials,
             repo::update_repo_secrets,

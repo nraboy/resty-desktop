@@ -62,6 +62,10 @@ struct ExportRepo {
     /// bundles loading.
     #[serde(default)]
     insecure_tls: bool,
+    /// `rest-server --append-only` (forget/prune/tag blocked). Added after bundle v1 —
+    /// defaults to `false` so older exports import as deletable.
+    #[serde(default)]
+    append_only: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
     /// encrypted under the export passphrase exactly like `password`. Added after
     /// bundle v1 shipped — `#[serde(default)]` means an older export (which predates
@@ -264,6 +268,7 @@ pub fn export_data(
                 password,
                 read_only: r.read_only,
                 insecure_tls: r.insecure_tls,
+                append_only: r.append_only,
                 credentials,
             });
         }
@@ -458,6 +463,7 @@ pub fn import_data(
             read_only: r.read_only,
             // Deliberately not carried over — see ExportRepo::insecure_tls.
             insecure_tls: false,
+            append_only: r.append_only,
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
         });
@@ -718,6 +724,7 @@ pub fn import_backrest_config(
             // Backrest has no read-only concept — every imported repo starts writable.
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             // Backrest's `env`/`flags` (which could carry e.g. AWS_ACCESS_KEY_ID) are
             // silently dropped, same as every other lossy field — see the doc comment
             // above this fn. Salvaging backend credentials the way
@@ -927,6 +934,7 @@ mod tests {
             password: EncSecret { nonce: "n".to_string(), ciphertext: "c".to_string() },
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             credentials: vec![ExportCredential {
                 key: "B2_ACCOUNT_ID".to_string(),
                 value: EncSecret { nonce: "cn".to_string(), ciphertext: "cc".to_string() },
@@ -963,6 +971,25 @@ mod tests {
             "readOnly": false
         }"#;
         assert!(!serde_json::from_str::<ExportRepo>(old).unwrap().insecure_tls);
+    }
+
+    #[test]
+    fn export_repo_append_only_round_trips_and_defaults_off() {
+        let json = r#"{
+            "id": "r1", "name": "Repo", "path": "rest:https://nas/r",
+            "password": {"nonce": "n", "ciphertext": "c"},
+            "readOnly": false, "appendOnly": true
+        }"#;
+        let repo: ExportRepo = serde_json::from_str(json).unwrap();
+        assert!(repo.append_only);
+        let back: ExportRepo = serde_json::from_str(&serde_json::to_string(&repo).unwrap()).unwrap();
+        assert!(back.append_only);
+
+        let old = r#"{
+            "id": "r1", "name": "Repo", "path": "/backups",
+            "password": {"nonce": "n", "ciphertext": "c"}, "readOnly": false
+        }"#;
+        assert!(!serde_json::from_str::<ExportRepo>(old).unwrap().append_only);
     }
 
     #[test]

@@ -29,6 +29,8 @@ import {
   updateRepoPath,
   updateRepoReadOnly,
   updateRepoInsecureTls,
+  updateRepoAppendOnly,
+  detectAppendOnly,
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
@@ -37,8 +39,10 @@ import {
   commonCredentialKeys,
   detectBackend,
   hasBrokenRestUserinfo,
+  applyAppendOnlyProbe,
   hasInlineRestUserinfo,
   insecureTlsConflict,
+  supportsAppendOnly,
   supportsInsecureTls,
 } from "../lib/backends";
 import { formatRelative, formatRepoSize, formatTimestamp } from "../lib/format";
@@ -51,6 +55,7 @@ import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
 import InsecureTlsField from "../components/InsecureTlsField";
+import AppendOnlyField from "../components/AppendOnlyField";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -86,6 +91,7 @@ export default function RepositoriesPage() {
   const [noPassword, setNoPassword] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
   const [insecureTls, setInsecureTls] = useState(false);
+  const [appendOnly, setAppendOnly] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   // Optional backend credentials for the add/open modal — a flat key/value list
   // (e.g. ["B2_ACCOUNT_ID", "..."]) shown under the Remote URL field for any
@@ -111,6 +117,7 @@ export default function RepositoriesPage() {
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
   const [editInsecureTls, setEditInsecureTls] = useState(false);
+  const [editAppendOnly, setEditAppendOnly] = useState(false);
   // Populated with stored credential values when the edit modal opens (see
   // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
   // Save sends whatever rows are present (blank-key rows are dropped); "Clear stored
@@ -511,6 +518,7 @@ export default function RepositoriesPage() {
     setNoPassword(false);
     setReadOnly(false);
     setInsecureTls(false);
+    setAppendOnly(false);
     setPathMode("local");
     setCredentialRows([]);
     setTestResult(null);
@@ -541,7 +549,7 @@ export default function RepositoriesPage() {
       if (modalMode === "init") {
         await initRepo({ id, name: form.name, path, password: form.password, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
       } else {
-        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
+        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, insecureTls: supportsInsecureTls(path) && insecureTls, appendOnly: supportsAppendOnly(path) && appendOnly, credentials });
       }
       await load();
       setModalMode(null);
@@ -635,6 +643,10 @@ export default function RepositoriesPage() {
       if (newInsecureTls !== editTarget.insecureTls) {
         await updateRepoInsecureTls(editTarget.id, newInsecureTls);
       }
+      const newAppendOnly = supportsAppendOnly(trimmedPath) && editAppendOnly;
+      if (newAppendOnly !== editTarget.appendOnly) {
+        await updateRepoAppendOnly(editTarget.id, newAppendOnly);
+      }
       await load();
       setEditTarget(null);
     } catch (err: any) {
@@ -670,6 +682,7 @@ export default function RepositoriesPage() {
     setEditNoPassword(false);
     setEditReadOnly(repo.readOnly);
     setEditInsecureTls(repo.insecureTls);
+    setEditAppendOnly(repo.appendOnly);
     setEditTestResult(null);
     setEditCredentialRows([]);
     setEditLoadedCredentials([]);
@@ -721,6 +734,7 @@ export default function RepositoriesPage() {
     setPathMode(remote ? "remote" : "local");
     setReadOnly(repo.readOnly);
     setInsecureTls(repo.insecureTls);
+    setAppendOnly(repo.appendOnly);
     setModalMode("add");
     setDuplicateSecretsError(false);
     setDuplicateSecretsLoading(true);
@@ -756,8 +770,22 @@ export default function RepositoriesPage() {
     // (folder-picker sourced) must not be trimmed.
     const testPath = pathMode === "remote" ? form.path.trim() : form.path;
     try {
-      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, supportsInsecureTls(testPath) && insecureTls, buildAddCredentials());
-      setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
+      const useInsecureTls = supportsInsecureTls(testPath) && insecureTls;
+      const credentials = buildAddCredentials();
+      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, useInsecureTls, credentials);
+      let message = "Connection successful — repository is accessible.";
+      // Only now that the connection works is a 403 to the probe unambiguous (auth and path
+      // problems would have failed above) — see rest_probe.rs. A probe failure never fails
+      // the test.
+      if (supportsAppendOnly(testPath)) {
+        const probe = await detectAppendOnly(testPath, useInsecureTls, credentials).catch(() => null);
+        if (probe) {
+          const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, appendOnly);
+          setAppendOnly(detected);
+          if (note) message += "\n" + note;
+        }
+      }
+      setTestResult({ ok: true, message });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
     } finally {
@@ -977,6 +1005,14 @@ export default function RepositoriesPage() {
                         title="Every restic call uses --no-lock; writing operations are disabled."
                       >
                         Read-only
+                      </span>
+                    )}
+                    {repo.appendOnly && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                        title="The server is append-only: deleting or modifying existing snapshots (forget, prune, tag, retention) is disabled."
+                      >
+                        Append-only
                       </span>
                     )}
                     {repo.insecureTls && (
@@ -1339,6 +1375,11 @@ export default function RepositoriesPage() {
             checked={editInsecureTls}
             onChange={(v) => { setEditInsecureTls(v); setEditTestResult(null); }}
           />
+          <AppendOnlyField
+            path={editPath}
+            checked={editAppendOnly}
+            onChange={(v) => { setEditAppendOnly(v); setEditTestResult(null); }}
+          />
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
@@ -1364,8 +1405,18 @@ export default function RepositoriesPage() {
                   const credentials = editCredentialRows
                     .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
                     .filter(([k]) => k !== "");
-                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, supportsInsecureTls(editPath) && editInsecureTls, credentials);
-                  setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
+                  const useInsecureTls = supportsInsecureTls(editPath) && editInsecureTls;
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, useInsecureTls, credentials);
+                  let message = "Connection successful — repository is accessible.";
+                  if (supportsAppendOnly(editPath)) {
+                    const probe = await detectAppendOnly(editPath.trim(), useInsecureTls, credentials).catch(() => null);
+                    if (probe) {
+                      const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, editAppendOnly);
+                      setEditAppendOnly(detected);
+                      if (note) message += "\n" + note;
+                    }
+                  }
+                  setEditTestResult({ ok: true, message });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
                 } finally {
@@ -1636,7 +1687,7 @@ export default function RepositoriesPage() {
               // repo except the one currently pruning, so a click on a *different* repo can't
               // silently reopen the modal onto the wrong repo's live progress (the
               // reset-on-open logic below only skips resetting pruneTarget for that same repo).
-              disabled: contextMenu.repo.readOnly || (pruning && pruneTarget?.id !== contextMenu.repo.id),
+              disabled: contextMenu.repo.readOnly || contextMenu.repo.appendOnly || (pruning && pruneTarget?.id !== contextMenu.repo.id),
               onClick: () => {
                 // Only reset to a fresh confirm screen when nothing is running — a
                 // still-running prune (survived a prior Hide) should reopen into its live
@@ -1814,6 +1865,11 @@ export default function RepositoriesPage() {
             path={form.path}
             checked={insecureTls}
             onChange={(v) => { setInsecureTls(v); setTestResult(null); }}
+          />
+          <AppendOnlyField
+            path={form.path}
+            checked={appendOnly}
+            onChange={(v) => { setAppendOnly(v); setTestResult(null); }}
           />
           {testResult && (
             <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>

@@ -25,6 +25,8 @@ pub struct NewRepoInput {
     #[serde(default)]
     pub insecure_tls: bool,
     #[serde(default)]
+    pub append_only: bool,
+    #[serde(default)]
     pub credentials: Vec<(String, String)>,
 }
 
@@ -297,6 +299,27 @@ pub(crate) fn ensure_writable(repo: &FullRepository) -> Result<(), String> {
     Ok(())
 }
 
+/// Error returned by every command that deletes or rewrites existing repository data when
+/// the repo sits behind `rest-server --append-only`.
+pub(crate) const APPEND_ONLY_REPO_ERROR: &str =
+    "This repository is on an append-only server: deleting or modifying existing snapshots \
+     (forget, prune, tag) is not allowed. Backups, restores and copying into it still work.";
+
+/// `ensure_writable` plus the append-only rule, for the commands that remove or rewrite
+/// existing data: `delete_snapshot`, `apply_retention`, `prune_repo`/`prune_all_repos`, and
+/// `tag_snapshot` — a tag change rewrites the snapshot (saves a new one, then deletes the
+/// old), so on an append-only server the delete fails and leaves a **duplicate snapshot**
+/// behind; it must be refused up front, not allowed to fail halfway. Backup, restore,
+/// check, unlock (locks are always deletable) and being a copy/mirror destination (they only
+/// add) deliberately stay on plain `ensure_writable`.
+pub(crate) fn ensure_can_delete(repo: &FullRepository) -> Result<(), String> {
+    ensure_writable(repo)?;
+    if repo.append_only {
+        return Err(APPEND_ONLY_REPO_ERROR.to_string());
+    }
+    Ok(())
+}
+
 /// The fully-configured one-shot `Command` shared by `run_restic_with_path` and
 /// `run_restic_with_timeout` (repository env, password, credentials, TLS/lock flags, null
 /// stdin, no console window).
@@ -482,6 +505,7 @@ pub async fn add_repo(
         &ciphertext,
         input.read_only,
         input.insecure_tls,
+        input.append_only,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -531,6 +555,15 @@ pub async fn update_repo_insecure_tls(
     insecure_tls: bool,
 ) -> Result<(), String> {
     db.set_repo_insecure_tls(&repo_id, insecure_tls)
+}
+
+#[tauri::command]
+pub async fn update_repo_append_only(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    append_only: bool,
+) -> Result<(), String> {
+    db.set_repo_append_only(&repo_id, append_only)
 }
 
 #[tauri::command]
@@ -608,6 +641,8 @@ pub async fn init_repo(
         password: input.password.clone(),
         read_only: false,
         insecure_tls: input.insecure_tls,
+        // A repository being created is, by definition, not append-only yet.
+        append_only: false,
         credentials: credentials.clone(),
     };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
@@ -623,6 +658,7 @@ pub async fn init_repo(
         &ciphertext,
         false,
         input.insecure_tls,
+        input.append_only,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -647,7 +683,7 @@ pub async fn test_repo_connection(
     let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
     let credentials: Vec<Credential> =
         credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
-    let dummy = FullRepository { path, password, read_only, insecure_tls, credentials };
+    let dummy = FullRepository { path, password, read_only, insecure_tls, append_only: false, credentials };
     // A `rest:` repo gets a deadline: restic would otherwise retry an unreachable host for
     // many minutes. Other backends (S3/B2/sftp/…) can be legitimately slow to open and have
     // no hint logic to explain a timeout, so they keep the plain call, as do local paths.
@@ -1108,10 +1144,11 @@ pub async fn prune_all_repos(
             Ok(k) => k,
             Err(e) => break 'body Err(e),
         };
-        // Read-only repos are skipped rather than failing the whole batch — prune is a
-        // write, so there's nothing to prune on a repo that can't be written to.
+        // Read-only and append-only repos are skipped rather than failing the whole batch —
+        // prune is a write that deletes, so there's nothing to prune on a repo that can't be
+        // written to or whose server refuses deletes.
         let repos: Vec<Repository> = match db.list_repos() {
-            Ok(r) => r.into_iter().filter(|r| !r.read_only).collect(),
+            Ok(r) => r.into_iter().filter(|r| !r.read_only && !r.append_only).collect(),
             Err(e) => break 'body Err(e),
         };
         let total = repos.len();
@@ -1246,7 +1283,7 @@ pub async fn prune_repo(
             Ok(r) => r,
             Err(e) => break 'body Err(e),
         };
-        if let Err(e) = ensure_writable(&full) {
+        if let Err(e) = ensure_can_delete(&full) {
             break 'body Err(e);
         }
         let restic_path = super::get_restic_path(&db);
@@ -1459,7 +1496,8 @@ mod tests {
         apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
         parse_raw_data_size, parse_stats_json, validate_init_password, validate_restic_path,
         READ_ONLY_REPO_ERROR,
-        apply_tls_flags, check_tls_compat, run_restic_with_timeout, MIXED_INSECURE_TLS_ERROR,
+        apply_tls_flags, check_tls_compat, ensure_can_delete, run_restic_with_timeout, APPEND_ONLY_REPO_ERROR,
+        MIXED_INSECURE_TLS_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
 
@@ -1519,7 +1557,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_omits_no_lock_for_writable_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, insecure_tls: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(!cmd.get_args().any(|a| a == "--no-lock"));
     }
@@ -1527,7 +1565,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_adds_no_lock_for_read_only_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, insecure_tls: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         // Password handling is unaffected by read_only.
@@ -1538,7 +1576,7 @@ mod tests {
     #[test]
     fn apply_from_repo_flags_adds_no_lock_for_read_only_source() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_from_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
@@ -1546,20 +1584,52 @@ mod tests {
 
     #[test]
     fn ensure_writable_ok_for_writable_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, insecure_tls: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, insecure_tls: false, append_only: false, credentials: vec![] };
         assert!(ensure_writable(&repo).is_ok());
     }
 
     #[test]
     fn ensure_writable_rejects_read_only_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         assert_eq!(ensure_writable(&repo).unwrap_err(), READ_ONLY_REPO_ERROR);
+    }
+
+    // ── ensure_can_delete (append-only) ─────────────────────────────────────
+
+    fn flagged(read_only: bool, append_only: bool) -> FullRepository {
+        FullRepository {
+            path: "rest:https://nas/r".into(),
+            password: "pw".into(),
+            read_only,
+            insecure_tls: false,
+            append_only,
+            credentials: vec![],
+        }
+    }
+
+    #[test]
+    fn ensure_can_delete_allows_a_normal_writable_repo() {
+        assert!(ensure_can_delete(&flagged(false, false)).is_ok());
+    }
+
+    #[test]
+    fn ensure_can_delete_refuses_append_only_but_ensure_writable_does_not() {
+        let repo = flagged(false, true);
+        assert_eq!(ensure_can_delete(&repo).unwrap_err(), APPEND_ONLY_REPO_ERROR);
+        // Backups, unlock and copy/mirror destinations only add data (locks are deletable on
+        // an append-only server), so they stay on plain ensure_writable.
+        assert!(ensure_writable(&repo).is_ok());
+    }
+
+    #[test]
+    fn ensure_can_delete_reports_read_only_first() {
+        assert_eq!(ensure_can_delete(&flagged(true, true)).unwrap_err(), READ_ONLY_REPO_ERROR);
     }
 
     // ── --insecure-tls ──────────────────────────────────────────────────────
 
     fn tls_repo(path: &str, insecure_tls: bool) -> FullRepository {
-        FullRepository { path: path.into(), password: "pw".into(), read_only: false, insecure_tls, credentials: vec![] }
+        FullRepository { path: path.into(), password: "pw".into(), read_only: false, insecure_tls, append_only: false, credentials: vec![] }
     }
 
     #[test]
@@ -1840,6 +1910,7 @@ mod tests {
             password: "hunter2".into(),
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             credentials: vec![cred("RESTIC_REPOSITORY", "/attacker/repo")],
         };
         apply_repo_flags(&mut cmd, &repo);
@@ -1875,6 +1946,7 @@ mod tests {
             password: "hunter2".into(),
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             credentials: vec![
                 cred("RESTIC_REST_PASSWORD", "pass/word"),
                 cred("RESTIC_REPOSITORY", "rest:https://attacker/"),
@@ -1895,6 +1967,7 @@ mod tests {
             password: "hunter2".into(),
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             credentials: vec![cred("B2_ACCOUNT_ID", "id")],
         };
         apply_repo_flags(&mut cmd, &repo);

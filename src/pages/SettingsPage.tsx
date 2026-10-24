@@ -914,7 +914,7 @@ export default function SettingsPage() {
             // progress, not a blank confirm screen.
             if (!pruning) resetPruneDisplay();
             listRepos()
-              .then((repos) => setReadOnlyRepoCount(repos.filter((r) => r.readOnly).length))
+              .then((repos) => setReadOnlyRepoCount(repos.filter((r) => r.readOnly || r.appendOnly).length))
               .catch(() => setReadOnlyRepoCount(0));
             setPruneModalOpen(true);
           }}
@@ -932,7 +932,7 @@ export default function SettingsPage() {
             </p>
             {readOnlyRepoCount > 0 && (
               <p className="text-sm text-amber-400">
-                {readOnlyRepoCount} read-only {readOnlyRepoCount === 1 ? "repository is" : "repositories are"} excluded and will not be pruned.
+                {readOnlyRepoCount} read-only or append-only {readOnlyRepoCount === 1 ? "repository is" : "repositories are"} excluded and will not be pruned.
               </p>
             )}
             <div className="flex justify-end gap-2">
@@ -947,7 +947,7 @@ export default function SettingsPage() {
             </p>
             {readOnlyRepoCount > 0 && (
               <p className="text-xs text-gray-500">
-                {readOnlyRepoCount} read-only {readOnlyRepoCount === 1 ? "repository was" : "repositories were"} skipped.
+                {readOnlyRepoCount} read-only or append-only {readOnlyRepoCount === 1 ? "repository was" : "repositories were"} skipped.
               </p>
             )}
             <div className="flex items-center justify-between">

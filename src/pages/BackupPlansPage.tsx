@@ -807,7 +807,7 @@ export default function BackupPlansPage() {
                     warnings={backupOutcome.warnings}
                     warningCount={backupOutcome.warningCount}
                     missingSourceCount={backupOutcome.missingSourceCount}
-                    retentionSkipped={backupOutcome.retentionSkipped && !!backupPlan?.retention && hasRetentionRules(backupPlan)}
+                    retentionSkippedReason={!!backupPlan?.retention && hasRetentionRules(backupPlan) ? backupOutcome.retentionSkippedReason : null}
                     fdaHint={!!fdaStatus?.supported && !fdaStatus.granted && backupOutcome.warnings.some((w) => isPermissionWarning(w.message))}
                   />
                 </div>
@@ -815,6 +815,12 @@ export default function BackupPlansPage() {
               {backupDone && !(backupOutcome && backupOutcome.warningCount > 0) && (
                 <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
                   Backup completed successfully.
+                  {backupOutcome?.retentionSkippedReason === "appendOnly" && !!backupPlan?.retention && hasRetentionRules(backupPlan) && (
+                    <span className="block text-amber-300 mt-1">
+                      Retention was not applied: this repository is on an append-only server, which
+                      refuses to delete snapshots.
+                    </span>
+                  )}
                 </div>
               )}
             </div>

@@ -90,6 +90,9 @@ pub struct Repository {
     /// the user's explicit acknowledgement, e.g. for a NAS with a self-signed cert.
     /// See `repo::apply_tls_flags`.
     pub insecure_tls: bool,
+    /// The `rest:` server runs `rest-server --append-only`: it refuses deleting or
+    /// modifying existing data, so forget/prune/tag are blocked. See `repo::ensure_can_delete`.
+    pub append_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,6 +412,9 @@ pub struct FullRepository {
     /// `repo::apply_tls_flags` at every restic call site.
     #[zeroize(skip)]
     pub insecure_tls: bool,
+    /// Mirrors `Repository::append_only` — checked by `repo::ensure_can_delete`.
+    #[zeroize(skip)]
+    pub append_only: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), decrypted
     /// under the master key alongside `password`. Empty means "use restic's own
     /// credential chain" (env inherited from the app process, ~/.aws/credentials, IAM
@@ -867,6 +873,7 @@ impl AppDb {
                 password_ciphertext    BLOB NOT NULL,
                 read_only              INTEGER NOT NULL DEFAULT 0,
                 insecure_tls           INTEGER NOT NULL DEFAULT 0,
+                append_only            INTEGER NOT NULL DEFAULT 0,
                 credentials_nonce      BLOB,
                 credentials_ciphertext BLOB
             );
@@ -999,6 +1006,11 @@ impl AppDb {
         add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN insecure_tls INTEGER NOT NULL DEFAULT 0;",
         )?;
+        // Additive — the rest-server behind this repo runs --append-only. Existing rows
+        // read back as 0 (deletes allowed, as before).
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE repositories ADD COLUMN append_only INTEGER NOT NULL DEFAULT 0;",
+        )?;
         // Additive, nullable — an existing row's password_nonce/password_ciphertext are
         // never touched, and NULL here means "no stored credentials" (the ambient mode:
         // use restic's own credential chain). See CLAUDE.md's "Backend credentials".
@@ -1101,7 +1113,7 @@ impl AppDb {
     pub fn list_repos(&self) -> Result<Vec<Repository>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, path, read_only, insecure_tls FROM repositories ORDER BY rowid")
+            .prepare("SELECT id, name, path, read_only, insecure_tls, append_only FROM repositories ORDER BY rowid")
             .map_err(|e| e.to_string())?;
         let repos = stmt
             .query_map([], |row| {
@@ -1111,6 +1123,7 @@ impl AppDb {
                     path: row.get(2)?,
                     read_only: row.get::<_, i64>(3)? != 0,
                     insecure_tls: row.get::<_, i64>(4)? != 0,
+                    append_only: row.get::<_, i64>(5)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1133,10 +1146,10 @@ impl AppDb {
     }
 
     pub fn get_full_repo(&self, repo_id: &str, key: &[u8; 32]) -> Result<FullRepository, String> {
-        let (path, nonce, ciphertext, read_only, insecure_tls, cred_nonce, cred_ciphertext) = {
+        let (path, nonce, ciphertext, read_only, insecure_tls, append_only, cred_nonce, cred_ciphertext) = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT path, password_nonce, password_ciphertext, read_only, insecure_tls,
+                "SELECT path, password_nonce, password_ciphertext, read_only, insecure_tls, append_only,
                         credentials_nonce, credentials_ciphertext
                  FROM repositories WHERE id = ?1",
                 params![repo_id],
@@ -1147,8 +1160,9 @@ impl AppDb {
                         row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, i64>(3)? != 0,
                         row.get::<_, i64>(4)? != 0,
-                        row.get::<_, Option<Vec<u8>>>(5)?,
+                        row.get::<_, i64>(5)? != 0,
                         row.get::<_, Option<Vec<u8>>>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
                     ))
                 },
             )
@@ -1161,7 +1175,7 @@ impl AppDb {
             cred_nonce.as_deref(),
             cred_ciphertext.as_deref(),
         )?;
-        Ok(FullRepository { path, password, read_only, insecure_tls, credentials })
+        Ok(FullRepository { path, password, read_only, insecure_tls, append_only, credentials })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1174,6 +1188,7 @@ impl AppDb {
         ciphertext: &[u8],
         read_only: bool,
         insecure_tls: bool,
+        append_only: bool,
         cred_nonce: Option<&[u8]>,
         cred_ciphertext: Option<&[u8]>,
     ) -> Result<(), String> {
@@ -1181,9 +1196,9 @@ impl AppDb {
         conn.execute(
             "INSERT INTO repositories
              (id, name, path, password_nonce, password_ciphertext, read_only, insecure_tls,
-              credentials_nonce, credentials_ciphertext)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, name, path, nonce, ciphertext, read_only, insecure_tls, cred_nonce, cred_ciphertext],
+              append_only, credentials_nonce, credentials_ciphertext)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, name, path, nonce, ciphertext, read_only, insecure_tls, append_only, cred_nonce, cred_ciphertext],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1265,6 +1280,16 @@ impl AppDb {
         conn.execute(
             "UPDATE repositories SET insecure_tls = ?1 WHERE id = ?2",
             params![insecure_tls, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_repo_append_only(&self, repo_id: &str, append_only: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET append_only = ?1 WHERE id = ?2",
+            params![append_only, repo_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3108,8 +3133,8 @@ impl AppDb {
             tx.execute(
                 "INSERT INTO repositories
                  (id, name, path, password_nonce, password_ciphertext, read_only, insecure_tls,
-                  credentials_nonce, credentials_ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  append_only, credentials_nonce, credentials_ciphertext)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     r.id,
                     r.name,
@@ -3118,6 +3143,7 @@ impl AppDb {
                     r.password_ciphertext,
                     r.read_only,
                     r.insecure_tls,
+                    r.append_only,
                     r.credentials_nonce,
                     r.credentials_ciphertext,
                 ],
@@ -3158,6 +3184,7 @@ pub struct ImportRepo {
     pub password_ciphertext: Vec<u8>,
     pub read_only: bool,
     pub insecure_tls: bool,
+    pub append_only: bool,
     pub credentials_nonce: Option<Vec<u8>>,
     pub credentials_ciphertext: Option<Vec<u8>>,
 }
@@ -3635,6 +3662,7 @@ mod tests {
             password_ciphertext: vec![],
             read_only: false,
             insecure_tls: false,
+            append_only: false,
             credentials_nonce: None,
             credentials_ciphertext: None,
         };
@@ -4277,6 +4305,7 @@ mod tests {
             &pw_ct,
             false,
             false,
+            false,
             cred_nonce.as_deref(),
             cred_ct.as_deref(),
         )
@@ -4422,9 +4451,42 @@ mod tests {
         let db = test_db();
         let key = [7u8; 32];
         let (nonce, ct) = super::crypto::encrypt(&key, b"pw").unwrap();
-        db.add_repo("r1", "Rest", "rest:https://nas:8000/", &nonce, &ct, false, true, None, None)
+        db.add_repo("r1", "Rest", "rest:https://nas:8000/", &nonce, &ct, false, true, false, None, None)
             .unwrap();
         assert!(db.get_full_repo("r1", &key).unwrap().insecure_tls);
+    }
+
+    // ── append_only ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn append_only_defaults_off_and_round_trips() {
+        let db = test_db();
+        let key = [7u8; 32];
+        add_repo_encrypted(&db, "r1", "Rest", "rest:https://nas:8000/repo", "pw", &key);
+        assert!(!db.get_full_repo("r1", &key).unwrap().append_only);
+        assert!(!db.list_repos().unwrap()[0].append_only);
+
+        db.set_repo_append_only("r1", true).unwrap();
+        assert!(db.get_full_repo("r1", &key).unwrap().append_only);
+        assert!(db.list_repos().unwrap()[0].append_only);
+        // Independent of the other per-repo flags.
+        assert!(!db.get_full_repo("r1", &key).unwrap().insecure_tls);
+        assert!(!db.get_full_repo("r1", &key).unwrap().read_only);
+
+        db.set_repo_append_only("r1", false).unwrap();
+        assert!(!db.get_full_repo("r1", &key).unwrap().append_only);
+    }
+
+    #[test]
+    fn add_repo_persists_append_only() {
+        let db = test_db();
+        let key = [7u8; 32];
+        let (nonce, ct) = super::crypto::encrypt(&key, b"pw").unwrap();
+        db.add_repo("r1", "Rest", "rest:https://nas:8000/", &nonce, &ct, false, false, true, None, None)
+            .unwrap();
+        let full = db.get_full_repo("r1", &key).unwrap();
+        assert!(full.append_only);
+        assert!(!full.insecure_tls);
     }
 
     // ── rotate_master_key ───────────────────────────────────────────────────
@@ -4435,7 +4497,7 @@ mod tests {
 
     fn add_repo_encrypted(db: &AppDb, id: &str, name: &str, path: &str, password: &str, key: &[u8; 32]) {
         let (nonce, ct) = super::crypto::encrypt(key, password.as_bytes()).unwrap();
-        db.add_repo(id, name, path, &nonce, &ct, false, false, None, None).unwrap();
+        db.add_repo(id, name, path, &nonce, &ct, false, false, false, None, None).unwrap();
     }
 
     fn add_repo_with_credentials(
@@ -4458,6 +4520,7 @@ mod tests {
             path,
             &nonce,
             &ct,
+            false,
             false,
             false,
             cred_nonce.as_deref(),

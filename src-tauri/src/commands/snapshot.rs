@@ -164,7 +164,7 @@ pub async fn delete_snapshot(
     );
     // Created before this check so a read-only rejection is still reported through the
     // task bus (matches apply_retention's/execute_backup's identical treatment).
-    if let Err(e) = super::repo::ensure_writable(&repo) {
+    if let Err(e) = super::repo::ensure_can_delete(&repo) {
         task_ctx.failed(e.clone());
         return Err(e);
     }
@@ -214,7 +214,7 @@ pub async fn tag_snapshot(
     );
     // Created before this check so a read-only rejection is still reported through the
     // task bus (matches apply_retention's/execute_backup's identical treatment).
-    if let Err(e) = super::repo::ensure_writable(&repo) {
+    if let Err(e) = super::repo::ensure_can_delete(&repo) {
         task_ctx.failed(e.clone());
         return Err(e);
     }
@@ -604,6 +604,26 @@ pub struct BackupWarning {
     pub missing_source: bool,
 }
 
+/// Why retention won't follow a completed backup. `AppendOnly` wins over `MissingSource`: it
+/// is permanent, while a missing source is transient ("runs after the next complete
+/// backup"), so the transient explanation would be wrong for an append-only repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RetentionSkipReason {
+    MissingSource,
+    AppendOnly,
+}
+
+pub(crate) fn retention_skip_reason(missing_source_count: u64, append_only: bool) -> Option<RetentionSkipReason> {
+    if append_only {
+        Some(RetentionSkipReason::AppendOnly)
+    } else if missing_source_count > 0 {
+        Some(RetentionSkipReason::MissingSource)
+    } else {
+        None
+    }
+}
+
 /// What a *completed* backup (restic exit 0 or 3) returns. `Err` is reserved for runs that
 /// produced no usable snapshot.
 #[derive(Debug, Clone, Serialize)]
@@ -619,7 +639,11 @@ pub struct BackupOutcome {
     /// path (its snapshot is missing data the older ones have, so `keep-*` would prune the
     /// complete ones). Unreadable *files* alone do not set this. The scheduler, the manual
     /// backup modal and the Activity panel all read this flag rather than re-deriving it.
+    /// Also true, permanently, for an append-only repo (`retention_skip_reason`): the server
+    /// would refuse the `forget`, so retention never runs there.
     pub retention_skipped: bool,
+    /// Why `retention_skipped` is set, for the one place that explains it to the user.
+    pub retention_skipped_reason: Option<RetentionSkipReason>,
     #[serde(skip)]
     pub summary_line: String,
 }
@@ -1088,12 +1112,14 @@ pub async fn execute_backup(
         // summary_line).
         match exit {
             BackupExit::Success => {
+                let reason = retention_skip_reason(0, repo_for_spawn.append_only);
                 return Ok(BackupOutcome {
                     snapshot_id,
                     warning_count: 0,
                     missing_source_count: 0,
                     warnings: Vec::new(),
-                    retention_skipped: false,
+                    retention_skipped: reason.is_some(),
+                    retention_skipped_reason: reason,
                     summary_line: summary_line.unwrap_or_default(),
                 });
             }
@@ -1106,12 +1132,14 @@ pub async fn execute_backup(
                 let missing = find_missing_sources(&paths_inner, &files_from_inner);
                 let (warnings, warning_count, missing_source_count) =
                     assemble_warnings(&missing, restic_warns, cfg!(target_os = "windows"));
+                let reason = retention_skip_reason(missing_source_count, repo_for_spawn.append_only);
                 return Ok(BackupOutcome {
                     snapshot_id,
                     warning_count,
                     missing_source_count,
                     warnings,
-                    retention_skipped: missing_source_count > 0,
+                    retention_skipped: reason.is_some(),
+                    retention_skipped_reason: reason,
                     summary_line: summary_line.unwrap_or_default(),
                 });
             }
@@ -1955,7 +1983,7 @@ pub fn apply_retention(
     // Defense-in-depth: a read-only repo never reaches here in practice (retention only
     // ever runs after a successful backup, and execute_backup already refuses one), but
     // guard explicitly so this fn is safe to call from any future call site too.
-    if let Err(e) = super::repo::ensure_writable(&repo) {
+    if let Err(e) = super::repo::ensure_can_delete(&repo) {
         task_ctx.failed(e.clone());
         return Err(e);
     }
@@ -2848,5 +2876,17 @@ mod tests {
         assert_eq!(missing, 0);
         assert_eq!(count as usize, WARNING_CAP + 5);
         assert_eq!(list.len(), WARNING_CAP);
+    }
+
+    #[test]
+    fn retention_skip_reason_prefers_append_only_over_a_missing_source() {
+        use super::{retention_skip_reason, RetentionSkipReason};
+        assert_eq!(retention_skip_reason(0, false), None);
+        assert_eq!(retention_skip_reason(2, false), Some(RetentionSkipReason::MissingSource));
+        assert_eq!(retention_skip_reason(0, true), Some(RetentionSkipReason::AppendOnly));
+        // Permanent beats transient: "runs after the next complete backup" would be false here.
+        assert_eq!(retention_skip_reason(2, true), Some(RetentionSkipReason::AppendOnly));
+        let json = serde_json::to_string(&RetentionSkipReason::AppendOnly).unwrap();
+        assert_eq!(json, "\"appendOnly\"");
     }
 }

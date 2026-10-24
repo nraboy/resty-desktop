@@ -45,6 +45,27 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   to cap it — verified: `restic init` fails at once on an untrusted certificate but `restic snapshots`
   (what the test runs) backs off and re-handshakes repeatedly. Don't "simplify" `test_repo_connection`
   back to `run_restic_blocking` for `rest:` repos.
+- **Append-only is a user-visible, stored flag (`append_only`) with advisory auto-detection; `tag` is
+  blocked along with forget/prune/retention; retention on such a repo is "not applicable".** Decisions,
+  each with its reason:
+  - The server's mode can't be read from restic, so the flag is stored per repo and editable — the
+    probe (`rest_probe.rs`) only *suggests* it after a successful connection test, and a wrong or
+    undetermined answer can always be overridden by hand. It is not re-run on a schedule.
+  - The probe is a `DELETE /data/<64 zeros>`: a 403 can only mean append-only once auth and path are known
+    good (reads never 403; wrong path/credentials are 401, a missing repo 404), and the all-zero id can't
+    match any real object. Don't "improve" it to a random id (no safer, harder to recognise in server
+    logs) or to a real blob/lock (`locks` are deletable even under `--append-only`, so that would
+    report the wrong thing).
+  - `tag_snapshot` is refused (`ensure_can_delete`) because restic's tag edit is save-new-then-delete-old:
+    on an append-only server it fails halfway and leaves a duplicate snapshot — confirmed live. `unlock`
+    stays enabled (locks are deletable) and copying *into* the repo stays enabled (it only adds).
+  - Retention folds into `BackupOutcome::retention_skipped` (+ `retention_skipped_reason`) instead of
+    running and failing: the scheduler, manual modal and Activity panel already key off that flag, and a
+    plan with retention on an append-only repo would otherwise log a retention failure after every
+    backup. `AppendOnly` outranks `MissingSource` because it is permanent while a missing source is not.
+  - Direct HTTP via `ureq` + `native-certs` (not shelling out to `curl`): no extra binary, no password on
+    a command line, and the OS trust store matches restic's. Its TLS is webpki-strict, so some
+    hand-made self-signed certs trusted by Go are rejected — detection then reports undetermined.
 - **Restic exit 3 = completed with warnings; retention skips only on a missing source path
   (issue #36).** Restic exits 3 after *saving* the snapshot when some source data was unreadable;
   `execute_backup` used to treat every non-zero exit as a failure, so such runs logged a failure

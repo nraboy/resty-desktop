@@ -3,8 +3,10 @@ import {
   commonCredentialKeys,
   detectBackend,
   hasBrokenRestUserinfo,
+  applyAppendOnlyProbe,
   hasInlineRestUserinfo,
   insecureTlsConflict,
+  supportsAppendOnly,
   supportsInsecureTls,
 } from "./backends";
 
@@ -120,5 +122,43 @@ describe("insecureTlsConflict", () => {
     expect(insecureTlsConflict(insecureRest, local)).toBe(false);
     expect(insecureTlsConflict(insecureRest, { path: "sftp:u@h:/r", insecureTls: false })).toBe(false);
     expect(insecureTlsConflict(insecureRest, { path: "rest:http://nas/r", insecureTls: false })).toBe(false);
+  });
+});
+
+describe("supportsAppendOnly", () => {
+  it("is true for rest:http and rest:https URLs only", () => {
+    expect(supportsAppendOnly("rest:http://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("rest:https://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("s3:s3.amazonaws.com/b")).toBe(false);
+    expect(supportsAppendOnly("/home/u/repo")).toBe(false);
+  });
+});
+
+describe("applyAppendOnlyProbe", () => {
+  const probe = (status: "appendOnly" | "notAppendOnly" | "undetermined", detail = "d") => ({ status, detail });
+
+  it("turns the flag on when detected, with a note only if it was off", () => {
+    expect(applyAppendOnlyProbe(probe("appendOnly"), false)).toEqual({
+      appendOnly: true,
+      note: expect.stringContaining("Append-only server detected"),
+    });
+    expect(applyAppendOnlyProbe(probe("appendOnly"), true)).toEqual({ appendOnly: true, note: "" });
+  });
+
+  it("clears the flag when the server allows deletes, saying so only if it was on", () => {
+    expect(applyAppendOnlyProbe(probe("notAppendOnly"), false)).toEqual({ appendOnly: false, note: "" });
+    expect(applyAppendOnlyProbe(probe("notAppendOnly"), true)).toEqual({
+      appendOnly: false,
+      note: expect.stringContaining("no longer append-only"),
+    });
+  });
+
+  it("leaves the flag alone and explains when undetermined", () => {
+    for (const current of [true, false]) {
+      expect(applyAppendOnlyProbe(probe("undetermined", "rejected (401)"), current)).toEqual({
+        appendOnly: current,
+        note: "Append-only check skipped: rejected (401)",
+      });
+    }
   });
 });

@@ -9,6 +9,7 @@ pub mod notify;
 pub mod portal;
 pub mod repo;
 pub mod repo_locks;
+pub mod rest_probe;
 pub mod schedule;
 pub mod snapshot;
 pub mod transfer;

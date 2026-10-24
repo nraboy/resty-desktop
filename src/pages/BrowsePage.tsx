@@ -13,6 +13,7 @@ import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import { SearchIcon, RestoreIcon } from "../components/icons";
+import { APPEND_ONLY_TITLE } from "../lib/backends";
 
 const FileIcon = ({ type }: { type: string }) => {
   if (type === "dir") {
@@ -263,15 +264,23 @@ export default function BrowsePage() {
                 Read-only
               </span>
             )}
+            {repo.appendOnly && (
+              <span
+                className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                title={APPEND_ONLY_TITLE}
+              >
+                Append-only
+              </span>
+            )}
             <div className="flex items-center gap-1 flex-wrap">
               {tags.map((tag) => (
                 <span key={tag} className="flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 text-xs rounded bg-gray-800 text-gray-400 border border-gray-700">
                   {tag}
                   <button
                     onClick={() => handleRemoveTag(tag)}
-                    disabled={repo.readOnly}
+                    disabled={repo.readOnly || repo.appendOnly}
                     className="text-gray-400 hover:text-red-300 transition-colors leading-none disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400"
-                    title={repo.readOnly ? "This repository is read-only" : "Remove tag"}
+                    title={repo.readOnly ? "This repository is read-only" : repo.appendOnly ? APPEND_ONLY_TITLE : "Remove tag"}
                   >
                     ×
                   </button>
@@ -279,9 +288,9 @@ export default function BrowsePage() {
               ))}
               <button
                 onClick={() => { setNewTag(""); setShowTagModal(true); }}
-                disabled={repo.readOnly}
+                disabled={repo.readOnly || repo.appendOnly}
                 className="px-1.5 py-0.5 text-xs rounded border border-dashed border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:border-gray-700"
-                title={repo.readOnly ? "This repository is read-only" : "Add tag"}
+                title={repo.readOnly ? "This repository is read-only" : repo.appendOnly ? APPEND_ONLY_TITLE : "Add tag"}
               >
                 + tag
               </button>
