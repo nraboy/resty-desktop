@@ -42,6 +42,7 @@ import {
   applyAppendOnlyProbe,
   hasInlineRestUserinfo,
   insecureTlsConflict,
+  isRestLoginKey,
   supportsAppendOnly,
   supportsInsecureTls,
 } from "../lib/backends";
@@ -56,6 +57,7 @@ import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
 import InsecureTlsField from "../components/InsecureTlsField";
 import AppendOnlyField from "../components/AppendOnlyField";
+import RestServerLogin from "../components/RestServerLogin";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -89,6 +91,9 @@ export default function RepositoriesPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", path: "", password: "" });
   const [noPassword, setNoPassword] = useState(false);
+  // Which required fields the last Open/Create/Test attempt found empty — each is marked on its
+  // field, and cleared as soon as the user edits it.
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; path?: string; password?: string }>({});
   const [readOnly, setReadOnly] = useState(false);
   const [insecureTls, setInsecureTls] = useState(false);
   const [appendOnly, setAppendOnly] = useState(false);
@@ -515,6 +520,7 @@ export default function RepositoriesPage() {
 
   const resetAddForm = () => {
     setForm({ name: "", path: "", password: "" });
+    setFieldErrors({});
     setNoPassword(false);
     setReadOnly(false);
     setInsecureTls(false);
@@ -527,11 +533,22 @@ export default function RepositoriesPage() {
     setDuplicateSecretsError(false);
   };
 
+  // The required fields of the add/open/create dialog that are still empty, with the message
+  // to show on each. `needName` is false for Test Connection, which doesn't need a name.
+  const requiredFieldErrors = (needName: boolean) => {
+    const errs: { name?: string; path?: string; password?: string } = {};
+    if (needName && !form.name.trim()) errs.name = "Enter a name for this repository.";
+    if (!form.path) errs.path = pathMode === "local" ? "Choose a folder." : "Enter the repository URL.";
+    if (!noPassword && !form.password) errs.password = "Enter the repository password.";
+    return errs;
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (duplicateSecretsLoading || duplicateSecretsError) return;
-    if (!form.name || !form.path || (!noPassword && !form.password)) {
-      setError("All fields are required.");
+    const missing = requiredFieldErrors(true);
+    if (Object.keys(missing).length > 0) {
+      setFieldErrors(missing);
       return;
     }
     setLoading(true);
@@ -760,8 +777,9 @@ export default function RepositoriesPage() {
   };
 
   const handleTest = async () => {
-    if (!form.path || (!noPassword && !form.password)) {
-      setTestResult({ ok: false, message: "Path and password are required to test." });
+    const missing = requiredFieldErrors(false);
+    if (Object.keys(missing).length > 0) {
+      setFieldErrors(missing);
       return;
     }
     setTesting(true);
@@ -795,7 +813,10 @@ export default function RepositoriesPage() {
 
   const pickFolder = async () => {
     const selected = await open({ directory: true, multiple: false });
-    if (selected) setForm((f) => ({ ...f, path: selected as string }));
+    if (selected) {
+      setForm((f) => ({ ...f, path: selected as string }));
+      setFieldErrors((f) => ({ ...f, path: undefined }));
+    }
   };
 
   useEffect(() => {
@@ -1253,8 +1274,8 @@ export default function RepositoriesPage() {
                 {hasBrokenRestUserinfo(editPath.trim() || editTarget.path) ? (
                   <p className="text-xs text-amber-400">
                     A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
-                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
-                    Credentials below instead (or percent-encode them — / → %2F).
+                    Remove them from the URL and enter them as Server username / Server password
+                    below instead (or percent-encode them — / → %2F).
                   </p>
                 ) : hasInlineRestUserinfo(editPath.trim() || editTarget.path) &&
                   editCredentialRows.some(([k]) => k.trim() !== "") ? (
@@ -1282,12 +1303,19 @@ export default function RepositoriesPage() {
                       </button>
                     )}
                   </div>
-                  {commonCredentialKeys(editPath.trim() || editTarget.path) && (
-                    <p className="text-xs text-gray-500">
-                      {commonCredentialKeys(editPath.trim() || editTarget.path)}
-                    </p>
+                  {detectBackend(editPath.trim() || editTarget.path) === "rest" ? (
+                    <RestServerLogin
+                      rows={editCredentialRows}
+                      onChange={(rows) => { setEditCredentialRows(rows); setEditTestResult(null); }}
+                    />
+                  ) : (
+                    commonCredentialKeys(editPath.trim() || editTarget.path) && (
+                      <p className="text-xs text-gray-500">
+                        {commonCredentialKeys(editPath.trim() || editTarget.path)}
+                      </p>
+                    )
                   )}
-                  {editCredentialRows.map(([k, v], i) => (
+                  {editCredentialRows.map(([k, v], i) => detectBackend(editPath.trim() || editTarget.path) === "rest" && isRestLoginKey(k) ? null : (
                     <div key={i} className="flex items-center gap-2">
                       <input
                         type="text"
@@ -1348,16 +1376,15 @@ export default function RepositoriesPage() {
             // re-init (not supported), and flipping a password repo to
             // passwordless would just store "" and brick it.
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-400 font-medium">Password</label>
+              <label className="text-sm text-gray-400 font-medium">Repository password</label>
               <div className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm italic text-gray-500">
                 No Password (--insecure-no-password)
               </div>
             </div>
           ) : (
             <Input
-              label="Password"
+              label="Repository password"
               type="password"
-              placeholder="Repository password"
               value={editPassword}
               onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
             />
@@ -1721,7 +1748,8 @@ export default function RepositoriesPage() {
             label="Name"
             placeholder="e.g. Home Backup"
             value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            error={fieldErrors.name}
+            onChange={(e) => { setForm({ ...form, name: e.target.value }); setFieldErrors((f) => ({ ...f, name: undefined })); }}
             onClear={() => setForm({ ...form, name: "" })}
           />
           <div>
@@ -1746,7 +1774,7 @@ export default function RepositoriesPage() {
             </div>
             {pathMode === "local" ? (
               <div className="flex items-center gap-2">
-                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-500"}`}>
+                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border ${fieldErrors.path ? "border-red-700" : "border-gray-700"} text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-500"}`}>
                   {form.path || "No folder selected"}
                 </span>
                 <Button type="button" variant="secondary" size="sm" onClick={pickFolder}>
@@ -1757,9 +1785,9 @@ export default function RepositoriesPage() {
               <div className="space-y-3">
                 <input
                   type="text"
-                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500"
+                  className={`w-full px-3 py-2 rounded-lg bg-gray-800 border ${fieldErrors.path ? "border-red-700" : "border-gray-700"} text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500`}
                   value={form.path}
-                  onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
+                  onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); setFieldErrors((f) => ({ ...f, path: undefined })); }}
                   placeholder="s3:s3.amazonaws.com/bucket, sftp:user@host:/path or rest:https://host:8000/repo"
                   spellCheck={false}
                   autoCapitalize="off"
@@ -1770,8 +1798,8 @@ export default function RepositoriesPage() {
                 {hasBrokenRestUserinfo(form.path) ? (
                   <p className="text-xs text-amber-400">
                     A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
-                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
-                    Credentials below instead (or percent-encode them — / → %2F).
+                    Remove them from the URL and enter them as Server username / Server password
+                    below instead (or percent-encode them — / → %2F).
                   </p>
                 ) : hasInlineRestUserinfo(form.path) && credentialRows.some(([k]) => k.trim() !== "") ? (
                   <p className="text-xs text-gray-500">
@@ -1783,12 +1811,19 @@ export default function RepositoriesPage() {
                   <label className="block text-xs font-medium text-gray-400">
                     Credentials (optional)
                   </label>
-                  {commonCredentialKeys(form.path) && (
-                    <p className="text-xs text-gray-500">
-                      {commonCredentialKeys(form.path)}
-                    </p>
+                  {detectBackend(form.path) === "rest" ? (
+                    <RestServerLogin
+                      rows={credentialRows}
+                      onChange={(rows) => { setCredentialRows(rows); setTestResult(null); }}
+                    />
+                  ) : (
+                    commonCredentialKeys(form.path) && (
+                      <p className="text-xs text-gray-500">
+                        {commonCredentialKeys(form.path)}
+                      </p>
+                    )
                   )}
-                  {credentialRows.map(([k, v], i) => (
+                  {credentialRows.map(([k, v], i) => detectBackend(form.path) === "rest" && isRestLoginKey(k) ? null : (
                     <div key={i} className="flex items-center gap-2">
                       <input
                         type="text"
@@ -1825,13 +1860,14 @@ export default function RepositoriesPage() {
                 </div>
               </div>
             )}
+            {fieldErrors.path && <p className="text-xs text-red-300 mt-1">{fieldErrors.path}</p>}
           </div>
           <Input
-            label="Password"
+            label="Repository password"
             type="password"
-            placeholder="Repository password"
             value={form.password}
-            onChange={(e) => { setForm({ ...form, password: e.target.value }); setTestResult(null); }}
+            error={fieldErrors.password}
+            onChange={(e) => { setForm({ ...form, password: e.target.value }); setTestResult(null); setFieldErrors((f) => ({ ...f, password: undefined })); }}
             disabled={modalMode === "add" && noPassword}
           />
           {modalMode === "add" && (

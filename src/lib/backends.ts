@@ -148,3 +148,32 @@ export function applyAppendOnlyProbe(
       return { appendOnly: current, note: `Append-only check skipped: ${probe.detail}` };
   }
 }
+
+/** The two env vars restic reads for a `rest:` server's HTTP login. The add/edit dialogs show
+ * them as dedicated "Server username" / "Server password" fields instead of generic rows. */
+export const REST_USERNAME_KEY = "RESTIC_REST_USERNAME";
+export const REST_PASSWORD_KEY = "RESTIC_REST_PASSWORD";
+
+export function isRestLoginKey(key: string): boolean {
+  const k = key.trim();
+  return k === REST_USERNAME_KEY || k === REST_PASSWORD_KEY;
+}
+
+/** Value of the (first) credential row named `key`, or "" when there is none. */
+export function getCredentialValue(rows: [string, string][], key: string): string {
+  return rows.find(([k]) => k.trim() === key)?.[1] ?? "";
+}
+
+/** `rows` with `key` set to `value`: an existing row is updated in place, a missing one is
+ * appended, and an emptied value removes the row (an unset login is the same as no row —
+ * apply_backend_env skips empty values anyway). Other rows are untouched. */
+export function setCredentialValue(
+  rows: [string, string][],
+  key: string,
+  value: string,
+): [string, string][] {
+  const has = rows.some(([k]) => k.trim() === key);
+  if (value === "") return rows.filter(([k]) => k.trim() !== key);
+  if (has) return rows.map(([k, v]): [string, string] => (k.trim() === key ? [k, value] : [k, v]));
+  return [...rows, [key, value]];
+}

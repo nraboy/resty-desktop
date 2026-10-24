@@ -4,6 +4,9 @@ import {
   detectBackend,
   hasBrokenRestUserinfo,
   applyAppendOnlyProbe,
+  getCredentialValue,
+  isRestLoginKey,
+  setCredentialValue,
   hasInlineRestUserinfo,
   insecureTlsConflict,
   supportsAppendOnly,
@@ -162,5 +165,39 @@ describe("applyAppendOnlyProbe", () => {
         note: "Append-only check skipped: rejected (401)",
       });
     }
+  });
+});
+
+describe("rest server login credential helpers", () => {
+  it("recognizes only the two REST login keys", () => {
+    expect(isRestLoginKey("RESTIC_REST_USERNAME")).toBe(true);
+    expect(isRestLoginKey(" RESTIC_REST_PASSWORD ")).toBe(true);
+    expect(isRestLoginKey("AWS_ACCESS_KEY_ID")).toBe(false);
+  });
+
+  it("reads a value, or empty when absent", () => {
+    const rows: [string, string][] = [["A", "1"], ["RESTIC_REST_USERNAME", "bob"]];
+    expect(getCredentialValue(rows, "RESTIC_REST_USERNAME")).toBe("bob");
+    expect(getCredentialValue(rows, "RESTIC_REST_PASSWORD")).toBe("");
+  });
+
+  it("updates in place, appends when missing, and removes when emptied", () => {
+    const rows: [string, string][] = [["HTTPS_PROXY", "p"], ["RESTIC_REST_USERNAME", "bob"]];
+    expect(setCredentialValue(rows, "RESTIC_REST_USERNAME", "alice")).toEqual([
+      ["HTTPS_PROXY", "p"],
+      ["RESTIC_REST_USERNAME", "alice"],
+    ]);
+    expect(setCredentialValue(rows, "RESTIC_REST_PASSWORD", "s3cret")).toEqual([
+      ["HTTPS_PROXY", "p"],
+      ["RESTIC_REST_USERNAME", "bob"],
+      ["RESTIC_REST_PASSWORD", "s3cret"],
+    ]);
+    expect(setCredentialValue(rows, "RESTIC_REST_USERNAME", "")).toEqual([["HTTPS_PROXY", "p"]]);
+    // Never mutates its input.
+    expect(rows).toHaveLength(2);
+  });
+
+  it("keeps whitespace in a password exactly as typed", () => {
+    expect(setCredentialValue([], "RESTIC_REST_PASSWORD", " pad ")).toEqual([["RESTIC_REST_PASSWORD", " pad "]]);
   });
 });
