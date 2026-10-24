@@ -7,6 +7,10 @@ export interface Repository {
    * being a mirror/copy destination) is refused — see CLAUDE.md's Restic
    * Integration section. A read-only repo may still be a mirror/copy *source*. */
   readOnly: boolean;
+  /** `--insecure-tls`: restic skips TLS certificate verification for this repo (a
+   * `rest:https://` server with a self-signed certificate, say). The user's explicit
+   * acknowledgement — see InsecureTlsField and docs/restic.md. */
+  insecureTls: boolean;
 }
 
 // Result of an auto-unlock attempt at startup (try_auto_unlock, auth.rs). `reason` is a
@@ -33,6 +37,7 @@ export interface NewRepoInput {
   path: string;
   password: string;
   readOnly?: boolean;
+  insecureTls?: boolean;
   credentials?: [string, string][];
 }
 

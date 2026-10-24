@@ -6,6 +6,7 @@ import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot,
 import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
+import { insecureTlsConflict } from "../lib/backends";
 import { capList, formatBytes, formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
@@ -930,9 +931,16 @@ export default function SnapshotsPage() {
                   disabled={multiCopying}
                 >
                   <option value="">Select a repository…</option>
-                  {otherRepos.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                  ))}
+                  {otherRepos.map((r) => {
+                    // --insecure-tls is process-wide in restic; the backend refuses a pair where
+                    // it would weaken the other repo (repo.rs's check_tls_compat).
+                    const tlsConflict = !!repo && insecureTlsConflict(repo, r);
+                    return (
+                      <option key={r.id} value={r.id} disabled={tlsConflict}>
+                        {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
@@ -1182,9 +1190,16 @@ export default function SnapshotsPage() {
                   disabled={copying}
                 >
                   <option value="">Select a repository…</option>
-                  {otherRepos.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                  ))}
+                  {otherRepos.map((r) => {
+                    // --insecure-tls is process-wide in restic; the backend refuses a pair where
+                    // it would weaken the other repo (repo.rs's check_tls_compat).
+                    const tlsConflict = !!repo && insecureTlsConflict(repo, r);
+                    return (
+                      <option key={r.id} value={r.id} disabled={tlsConflict}>
+                        {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>

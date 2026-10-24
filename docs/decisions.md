@@ -9,6 +9,25 @@ to this file specifically so these aren't re-litigated from scratch.
 These have come up as apparent inefficiencies during codebase audits and were deliberately kept
 as-is. Don't re-flag or "fix" them without understanding why first:
 
+- **`--insecure-tls` is a per-repo, user-acknowledged flag; the recommended fix is trusting the CA in
+  the OS store; mixed copy/mirror pairs are refused.** Self-signed `rest-server --tls` endpoints (the
+  usual NAS setup) fail restic's verification with no built-in override, so `rest:https://` repos get an
+  explicit "Skip TLS certificate verification" checkbox whose tooltip steers users to the secure
+  alternative (add the cert/CA to Keychain / the Windows root store / `update-ca-certificates` — restic
+  uses the system store when `--cacert` is unset). Decisions, each with its reason:
+  - It is a stored per-repo boolean, not a global setting, so one self-signed NAS never weakens any
+    other repo, and it is only offered (and only saved) for `rest:https://` paths.
+  - Restic has no env var for it, so it is appended as a flag at **every** Command site —
+    `apply_repo_flags`/`apply_from_repo_flags` cover the helpers, and the inline sites (backup, prune,
+    copy/mirror destination) call `apply_tls_flags` explicitly. A new inline `Command` must do the same,
+    or that operation will fail on a self-signed server even though Test Connection passed.
+  - `--insecure-tls` is process-wide (no `--from-` form), so `check_tls_compat` **refuses** a
+    copy/mirror pair where it would silently disable verification for the other, unflagged TLS-verifying
+    repo, rather than applying it to both with a warning. Both-flagged and non-TLS counterparts
+    (local, `sftp:`, `rclone:`, `rest:http://`) are allowed. The pickers grey the same targets out.
+  - Not done on purpose (deferred, not forgotten): TLS client certificates (`RESTIC_TLS_CLIENT_CERT`,
+    PEM with cert + key, stored as a path only) and a per-repo `--cacert` path. Don't add a global
+    "ignore TLS errors" toggle.
 - **Restic exit 3 = completed with warnings; retention skips only on a missing source path
   (issue #36).** Restic exits 3 after *saving* the snapshot when some source data was unreadable;
   `execute_backup` used to treat every non-zero exit as a failure, so such runs logged a failure

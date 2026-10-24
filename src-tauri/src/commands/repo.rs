@@ -23,6 +23,8 @@ pub struct NewRepoInput {
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
+    pub insecure_tls: bool,
+    #[serde(default)]
     pub credentials: Vec<(String, String)>,
 }
 
@@ -140,6 +142,7 @@ pub(crate) fn apply_from_repo_password(cmd: &mut std::process::Command, password
 pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
     apply_backend_env(cmd, &repo.credentials);
     apply_repo_password(cmd, &repo.password);
+    apply_tls_flags(cmd, repo);
     if repo.read_only {
         cmd.arg("--no-lock");
     }
@@ -151,9 +154,52 @@ pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepos
 pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
     apply_backend_env(cmd, &repo.credentials);
     apply_from_repo_password(cmd, &repo.password);
+    apply_tls_flags(cmd, repo);
     if repo.read_only {
         cmd.arg("--no-lock");
     }
+}
+
+/// Appends restic's global `--insecure-tls` (skip TLS certificate verification) when the
+/// repo has it set. Restic has no env-var form of this flag, and it is process-wide: there
+/// is no `--from-` counterpart, so on a copy/mirror it covers *both* repositories (see
+/// `check_tls_compat`, which refuses a pair where that would weaken the other side).
+///
+/// `apply_repo_flags`/`apply_from_repo_flags` call this, so every call site going through
+/// them is covered. The sites that build their `Command` inline (backup, prune, and the
+/// copy/mirror destination side) call it explicitly, next to `apply_backend_env`.
+pub(crate) fn apply_tls_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    if repo.insecure_tls {
+        cmd.arg("--insecure-tls");
+    }
+}
+
+/// True when the repo's transport verifies TLS certificates, i.e. `--insecure-tls`
+/// would change its security: `rest:https://` and the HTTPS object stores. Local paths,
+/// `sftp:`, `rclone:` and plain `rest:http://` are unaffected by the flag.
+fn verifies_tls(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.starts_with("rest:https://")
+        || p.starts_with("s3:")
+        || p.starts_with("b2:")
+        || p.starts_with("azure:")
+        || p.starts_with("gs:")
+}
+
+pub(crate) const MIXED_INSECURE_TLS_ERROR: &str =
+    "These repositories can't be used together: certificate verification is turned off      (--insecure-tls) for one of them, and restic applies that flag to the whole copy      operation, which would also disable verification for the other one. Turn it on for      both repositories or neither.";
+
+/// Pre-flight for `copy_snapshot`/`mirror_repo`, run alongside `merge_credentials` before
+/// either repo takes a lock: refuses a pair where `--insecure-tls` on one side would
+/// silently disable certificate verification for the other (a TLS-verifying remote).
+pub(crate) fn check_tls_compat(dest: &FullRepository, src: &FullRepository) -> Result<(), String> {
+    let weakens = |flagged: &FullRepository, other: &FullRepository| {
+        flagged.insecure_tls && !other.insecure_tls && verifies_tls(&other.path)
+    };
+    if weakens(dest, src) || weakens(src, dest) {
+        return Err(MIXED_INSECURE_TLS_ERROR.to_string());
+    }
+    Ok(())
 }
 
 /// Sets each stored backend credential (e.g. `AWS_ACCESS_KEY_ID`, `B2_ACCOUNT_ID`) as
@@ -305,6 +351,7 @@ pub async fn add_repo(
         &nonce,
         &ciphertext,
         input.read_only,
+        input.insecure_tls,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -345,6 +392,15 @@ pub async fn update_repo_read_only(
     read_only: bool,
 ) -> Result<(), String> {
     db.set_repo_read_only(&repo_id, read_only)
+}
+
+#[tauri::command]
+pub async fn update_repo_insecure_tls(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    insecure_tls: bool,
+) -> Result<(), String> {
+    db.set_repo_insecure_tls(&repo_id, insecure_tls)
 }
 
 #[tauri::command]
@@ -421,6 +477,7 @@ pub async fn init_repo(
         path: input.path.clone(),
         password: input.password.clone(),
         read_only: false,
+        insecure_tls: input.insecure_tls,
         credentials: credentials.clone(),
     };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
@@ -435,6 +492,7 @@ pub async fn init_repo(
         &nonce,
         &ciphertext,
         false,
+        input.insecure_tls,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -448,6 +506,7 @@ pub async fn test_repo_connection(
     path: String,
     password: String,
     read_only: bool,
+    insecure_tls: bool,
     credentials: Vec<(String, String)>,
 ) -> Result<(), String> {
     let kind = backends::detect_kind(&path);
@@ -458,7 +517,7 @@ pub async fn test_repo_connection(
     let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
     let credentials: Vec<Credential> =
         credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
-    let dummy = FullRepository { path, password, read_only, credentials };
+    let dummy = FullRepository { path, password, read_only, insecure_tls, credentials };
     let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
         .await
         .map(|_| ());
@@ -756,6 +815,7 @@ async fn run_one_prune_attempt(
     cmd.arg("prune").env("RESTIC_REPOSITORY", &full.path);
     apply_backend_env(&mut cmd, &full.credentials);
     apply_repo_password(&mut cmd, &full.password);
+    apply_tls_flags(&mut cmd, full);
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1257,6 +1317,7 @@ mod tests {
         apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
         parse_raw_data_size, parse_stats_json, validate_init_password, validate_restic_path,
         READ_ONLY_REPO_ERROR,
+        apply_tls_flags, check_tls_compat, MIXED_INSECURE_TLS_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
 
@@ -1316,7 +1377,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_omits_no_lock_for_writable_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, insecure_tls: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(!cmd.get_args().any(|a| a == "--no-lock"));
     }
@@ -1324,7 +1385,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_adds_no_lock_for_read_only_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, insecure_tls: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         // Password handling is unaffected by read_only.
@@ -1335,7 +1396,7 @@ mod tests {
     #[test]
     fn apply_from_repo_flags_adds_no_lock_for_read_only_source() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, credentials: vec![] };
         apply_from_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
@@ -1343,14 +1404,65 @@ mod tests {
 
     #[test]
     fn ensure_writable_ok_for_writable_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, insecure_tls: false, credentials: vec![] };
         assert!(ensure_writable(&repo).is_ok());
     }
 
     #[test]
     fn ensure_writable_rejects_read_only_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, credentials: vec![] };
         assert_eq!(ensure_writable(&repo).unwrap_err(), READ_ONLY_REPO_ERROR);
+    }
+
+    // ── --insecure-tls ──────────────────────────────────────────────────────
+
+    fn tls_repo(path: &str, insecure_tls: bool) -> FullRepository {
+        FullRepository { path: path.into(), password: "pw".into(), read_only: false, insecure_tls, credentials: vec![] }
+    }
+
+    #[test]
+    fn apply_tls_flags_adds_insecure_tls_only_when_set() {
+        let mut off = std::process::Command::new("restic");
+        apply_tls_flags(&mut off, &tls_repo("rest:https://nas/r", false));
+        assert!(!off.get_args().any(|a| a == "--insecure-tls"));
+
+        let mut on = std::process::Command::new("restic");
+        apply_tls_flags(&mut on, &tls_repo("rest:https://nas/r", true));
+        assert!(on.get_args().any(|a| a == "--insecure-tls"));
+    }
+
+    #[test]
+    fn apply_repo_flags_and_from_flags_carry_insecure_tls() {
+        let repo = tls_repo("rest:https://nas/r", true);
+        let mut cmd = std::process::Command::new("restic");
+        apply_repo_flags(&mut cmd, &repo);
+        assert!(cmd.get_args().any(|a| a == "--insecure-tls"));
+
+        let mut from = std::process::Command::new("restic");
+        apply_from_repo_flags(&mut from, &repo);
+        assert!(from.get_args().any(|a| a == "--insecure-tls"));
+    }
+
+    #[test]
+    fn check_tls_compat_refuses_a_pair_where_the_flag_would_weaken_the_other_side() {
+        let insecure = tls_repo("rest:https://nas/a", true);
+        let verified = tls_repo("rest:https://other/b", false);
+        assert_eq!(check_tls_compat(&insecure, &verified).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
+        assert_eq!(check_tls_compat(&verified, &insecure).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
+        // Case-insensitive scheme, like the frontend's check.
+        let upper = tls_repo("REST:HTTPS://other/b", false);
+        assert!(check_tls_compat(&insecure, &upper).is_err());
+        assert!(check_tls_compat(&insecure, &tls_repo("s3:s3.amazonaws.com/b", false)).is_err());
+    }
+
+    #[test]
+    fn check_tls_compat_allows_pairs_the_flag_cannot_weaken() {
+        let insecure = tls_repo("rest:https://nas/a", true);
+        assert!(check_tls_compat(&insecure, &tls_repo("rest:https://other/b", true)).is_ok());
+        assert!(check_tls_compat(&tls_repo("rest:https://a/", false), &tls_repo("rest:https://b/", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("/backups/local", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("sftp:u@h:/r", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("rest:http://nas/r", false)).is_ok());
     }
 
     // ── apply_backend_env ───────────────────────────────────────────────────
@@ -1424,6 +1536,7 @@ mod tests {
             path: "/real/repo".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
             credentials: vec![cred("RESTIC_REPOSITORY", "/attacker/repo")],
         };
         apply_repo_flags(&mut cmd, &repo);
@@ -1458,6 +1571,7 @@ mod tests {
             path: "rest:https://real/".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
             credentials: vec![
                 cred("RESTIC_REST_PASSWORD", "pass/word"),
                 cred("RESTIC_REPOSITORY", "rest:https://attacker/"),
@@ -1477,6 +1591,7 @@ mod tests {
             path: "b2:bucket:path".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
             credentials: vec![cred("B2_ACCOUNT_ID", "id")],
         };
         apply_repo_flags(&mut cmd, &repo);

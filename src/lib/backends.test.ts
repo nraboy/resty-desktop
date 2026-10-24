@@ -4,6 +4,8 @@ import {
   detectBackend,
   hasBrokenRestUserinfo,
   hasInlineRestUserinfo,
+  insecureTlsConflict,
+  supportsInsecureTls,
 } from "./backends";
 
 describe("detectBackend", () => {
@@ -87,5 +89,34 @@ describe("REST userinfo detectors", () => {
 
   it.each(cases)("hasInlineRestUserinfo(%s) === %s", (path, _broken, inline) => {
     expect(hasInlineRestUserinfo(path)).toBe(inline);
+  });
+});
+
+describe("supportsInsecureTls", () => {
+  it("is true only for rest:https:// URLs", () => {
+    expect(supportsInsecureTls("rest:https://nas:8000/repo")).toBe(true);
+    expect(supportsInsecureTls("  REST:HTTPS://nas/")).toBe(true);
+    expect(supportsInsecureTls("rest:http://nas:8000/repo")).toBe(false);
+    expect(supportsInsecureTls("s3:s3.amazonaws.com/bucket")).toBe(false);
+    expect(supportsInsecureTls("/home/user/repo")).toBe(false);
+  });
+});
+
+describe("insecureTlsConflict", () => {
+  const insecureRest = { path: "rest:https://nas:8000/a", insecureTls: true };
+  const verifiedRest = { path: "rest:https://other:8000/b", insecureTls: false };
+  const local = { path: "/backups/repo", insecureTls: false };
+
+  it("flags a pair where the flag would weaken a TLS-verifying repo, in either order", () => {
+    expect(insecureTlsConflict(insecureRest, verifiedRest)).toBe(true);
+    expect(insecureTlsConflict(verifiedRest, insecureRest)).toBe(true);
+  });
+
+  it("allows both-flagged, neither-flagged and non-TLS counterparts", () => {
+    expect(insecureTlsConflict(insecureRest, { ...verifiedRest, insecureTls: true })).toBe(false);
+    expect(insecureTlsConflict(verifiedRest, { ...verifiedRest })).toBe(false);
+    expect(insecureTlsConflict(insecureRest, local)).toBe(false);
+    expect(insecureTlsConflict(insecureRest, { path: "sftp:u@h:/r", insecureTls: false })).toBe(false);
+    expect(insecureTlsConflict(insecureRest, { path: "rest:http://nas/r", insecureTls: false })).toBe(false);
   });
 });

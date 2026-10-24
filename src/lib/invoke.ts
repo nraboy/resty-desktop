@@ -68,6 +68,9 @@ export const updateRepoPath = (repoId: string, newPath: string): Promise<void> =
 export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<void> =>
   invoke("update_repo_read_only", { repoId, readOnly });
 
+export const updateRepoInsecureTls = (repoId: string, insecureTls: boolean): Promise<void> =>
+  invoke("update_repo_insecure_tls", { repoId, insecureTls });
+
 export const getRepoPassword = (repoId: string): Promise<string> =>
   invoke("get_repo_password", { repoId });
 
@@ -94,9 +97,10 @@ export const testRepoConnection = (
   path: string,
   password: string,
   readOnly: boolean,
+  insecureTls: boolean,
   credentials: [string, string][],
 ): Promise<void> =>
-  invoke("test_repo_connection", { path, password, readOnly, credentials });
+  invoke("test_repo_connection", { path, password, readOnly, insecureTls, credentials });
 
 export const testWebhook = (
   url: string,

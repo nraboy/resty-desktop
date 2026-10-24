@@ -978,6 +978,7 @@ pub async fn execute_backup(
         // ever built, so plain apply_repo_password (no --no-lock) is correct here.
         super::repo::apply_backend_env(&mut cmd, &repo_for_spawn.credentials);
         super::repo::apply_repo_password(&mut cmd, &repo_for_spawn.password);
+        super::repo::apply_tls_flags(&mut cmd, &repo_for_spawn);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1373,7 +1374,9 @@ pub async fn copy_snapshot(
     // for them (unlike the password) — so a conflicting value for the same key between
     // src and dest can't be represented in one restic process. Checked before spawning,
     // and before either repo takes a RepoLocks guard, so a doomed copy never holds one.
-    if let Err(e) = super::repo::merge_credentials(&dest_repo.credentials, &src_repo.credentials) {
+    if let Err(e) = super::repo::merge_credentials(&dest_repo.credentials, &src_repo.credentials)
+        .and_then(|_| super::repo::check_tls_compat(&dest_repo, &src_repo))
+    {
         task_ctx.failed(e.clone());
         return Err(e);
     }
@@ -1413,6 +1416,7 @@ pub async fn copy_snapshot(
         // conflict on a shared key, so applying both independently here is safe.
         super::repo::apply_backend_env(&mut cmd, &dest_repo.credentials);
         super::repo::apply_repo_password(&mut cmd, &dest_repo.password);
+        super::repo::apply_tls_flags(&mut cmd, &dest_repo);
         super::repo::apply_from_repo_flags(&mut cmd, &src_repo);
         let mut child = cmd
             .stdin(Stdio::null())
@@ -1554,6 +1558,7 @@ pub async fn mirror_repo(
     // MirrorHandle::turn's FIFO lane or leave a `mirrors` entry that later needs
     // deregistering.
     super::repo::merge_credentials(&dest_repo.credentials, &src_repo.credentials)?;
+    super::repo::check_tls_compat(&dest_repo, &src_repo)?;
     let restic_path = super::get_restic_path(&db);
 
     let operation_id = new_operation_id();
@@ -1653,6 +1658,7 @@ pub async fn mirror_repo(
             // don't conflict on a shared key, so applying both independently is safe.
             super::repo::apply_backend_env(&mut cmd, &dest_repo_inner.credentials);
             super::repo::apply_repo_password(&mut cmd, &dest_repo_inner.password);
+            super::repo::apply_tls_flags(&mut cmd, &dest_repo_inner);
             super::repo::apply_from_repo_flags(&mut cmd, &src_repo_inner);
             let mut child = cmd
                 .stdin(Stdio::null())

@@ -55,6 +55,10 @@ struct ExportRepo {
     /// predate the read-only feature) still import cleanly as writable repos.
     #[serde(default)]
     read_only: bool,
+    /// `--insecure-tls` (skip certificate verification). Added after bundle v1 shipped —
+    /// defaults to `false` so older exports import with verification on.
+    #[serde(default)]
+    insecure_tls: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
     /// encrypted under the export passphrase exactly like `password`. Added after
     /// bundle v1 shipped — `#[serde(default)]` means an older export (which predates
@@ -256,6 +260,7 @@ pub fn export_data(
                 path: r.path.clone(),
                 password,
                 read_only: r.read_only,
+                insecure_tls: r.insecure_tls,
                 credentials,
             });
         }
@@ -448,6 +453,7 @@ pub fn import_data(
             password_nonce: nonce,
             password_ciphertext: ciphertext,
             read_only: r.read_only,
+            insecure_tls: r.insecure_tls,
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
         });
@@ -707,6 +713,7 @@ pub fn import_backrest_config(
             password_ciphertext: ciphertext,
             // Backrest has no read-only concept — every imported repo starts writable.
             read_only: false,
+            insecure_tls: false,
             // Backrest's `env`/`flags` (which could carry e.g. AWS_ACCESS_KEY_ID) are
             // silently dropped, same as every other lossy field — see the doc comment
             // above this fn. Salvaging backend credentials the way
@@ -915,6 +922,7 @@ mod tests {
             path: "b2:bucket:path".to_string(),
             password: EncSecret { nonce: "n".to_string(), ciphertext: "c".to_string() },
             read_only: false,
+            insecure_tls: false,
             credentials: vec![ExportCredential {
                 key: "B2_ACCOUNT_ID".to_string(),
                 value: EncSecret { nonce: "cn".to_string(), ciphertext: "cc".to_string() },
@@ -925,6 +933,32 @@ mod tests {
         assert_eq!(back.credentials.len(), 1);
         assert_eq!(back.credentials[0].key, "B2_ACCOUNT_ID");
         assert_eq!(back.credentials[0].value.nonce, "cn");
+    }
+
+    #[test]
+    fn export_repo_insecure_tls_round_trips_and_defaults_off() {
+        let json = r#"{
+            "id": "r1",
+            "name": "Repo",
+            "path": "rest:https://nas/r",
+            "password": {"nonce": "n", "ciphertext": "c"},
+            "readOnly": false,
+            "insecureTls": true
+        }"#;
+        let repo: ExportRepo = serde_json::from_str(json).unwrap();
+        assert!(repo.insecure_tls);
+        let back: ExportRepo = serde_json::from_str(&serde_json::to_string(&repo).unwrap()).unwrap();
+        assert!(back.insecure_tls);
+
+        // A bundle exported before the field existed imports with verification on.
+        let old = r#"{
+            "id": "r1",
+            "name": "Repo",
+            "path": "/backups",
+            "password": {"nonce": "n", "ciphertext": "c"},
+            "readOnly": false
+        }"#;
+        assert!(!serde_json::from_str::<ExportRepo>(old).unwrap().insecure_tls);
     }
 
     #[test]

@@ -28,6 +28,7 @@ import {
   updateRepoSecrets,
   updateRepoPath,
   updateRepoReadOnly,
+  updateRepoInsecureTls,
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
@@ -37,6 +38,8 @@ import {
   detectBackend,
   hasBrokenRestUserinfo,
   hasInlineRestUserinfo,
+  insecureTlsConflict,
+  supportsInsecureTls,
 } from "../lib/backends";
 import { formatRelative, formatRepoSize, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
@@ -47,6 +50,7 @@ import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
+import InsecureTlsField from "../components/InsecureTlsField";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -81,6 +85,7 @@ export default function RepositoriesPage() {
   const [form, setForm] = useState({ name: "", path: "", password: "" });
   const [noPassword, setNoPassword] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  const [insecureTls, setInsecureTls] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   // Optional backend credentials for the add/open modal — a flat key/value list
   // (e.g. ["B2_ACCOUNT_ID", "..."]) shown under the Remote URL field for any
@@ -105,6 +110,7 @@ export default function RepositoriesPage() {
   const [editPassword, setEditPassword] = useState("");
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
+  const [editInsecureTls, setEditInsecureTls] = useState(false);
   // Populated with stored credential values when the edit modal opens (see
   // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
   // Save sends whatever rows are present (blank-key rows are dropped); "Clear stored
@@ -504,6 +510,7 @@ export default function RepositoriesPage() {
     setForm({ name: "", path: "", password: "" });
     setNoPassword(false);
     setReadOnly(false);
+    setInsecureTls(false);
     setPathMode("local");
     setCredentialRows([]);
     setTestResult(null);
@@ -532,9 +539,9 @@ export default function RepositoriesPage() {
     const credentials = buildAddCredentials();
     try {
       if (modalMode === "init") {
-        await initRepo({ id, name: form.name, path, password: form.password, credentials });
+        await initRepo({ id, name: form.name, path, password: form.password, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
       } else {
-        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, credentials });
+        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
       }
       await load();
       setModalMode(null);
@@ -624,6 +631,10 @@ export default function RepositoriesPage() {
       if (editReadOnly !== editTarget.readOnly) {
         await updateRepoReadOnly(editTarget.id, editReadOnly);
       }
+      const newInsecureTls = supportsInsecureTls(trimmedPath) && editInsecureTls;
+      if (newInsecureTls !== editTarget.insecureTls) {
+        await updateRepoInsecureTls(editTarget.id, newInsecureTls);
+      }
       await load();
       setEditTarget(null);
     } catch (err: any) {
@@ -658,6 +669,7 @@ export default function RepositoriesPage() {
     setEditPassword("");
     setEditNoPassword(false);
     setEditReadOnly(repo.readOnly);
+    setEditInsecureTls(repo.insecureTls);
     setEditTestResult(null);
     setEditCredentialRows([]);
     setEditLoadedCredentials([]);
@@ -708,6 +720,7 @@ export default function RepositoriesPage() {
     setForm({ name: uniqueCopyName(repo.name, repos), path: repo.path, password: "" });
     setPathMode(remote ? "remote" : "local");
     setReadOnly(repo.readOnly);
+    setInsecureTls(repo.insecureTls);
     setModalMode("add");
     setDuplicateSecretsError(false);
     setDuplicateSecretsLoading(true);
@@ -743,7 +756,7 @@ export default function RepositoriesPage() {
     // (folder-picker sourced) must not be trimmed.
     const testPath = pathMode === "remote" ? form.path.trim() : form.path;
     try {
-      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, buildAddCredentials());
+      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, supportsInsecureTls(testPath) && insecureTls, buildAddCredentials());
       setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
@@ -964,6 +977,14 @@ export default function RepositoriesPage() {
                         title="Every restic call uses --no-lock; writing operations are disabled."
                       >
                         Read-only
+                      </span>
+                    )}
+                    {repo.insecureTls && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-amber-500 text-amber-400"
+                        title="TLS certificate verification is turned off for this repository (--insecure-tls)."
+                      >
+                        Insecure TLS
                       </span>
                     )}
                   </div>
@@ -1313,6 +1334,11 @@ export default function RepositoriesPage() {
             />
             Read-only repository (--no-lock)
           </label>
+          <InsecureTlsField
+            path={editPath}
+            checked={editInsecureTls}
+            onChange={(v) => { setEditInsecureTls(v); setEditTestResult(null); }}
+          />
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
@@ -1338,7 +1364,7 @@ export default function RepositoriesPage() {
                   const credentials = editCredentialRows
                     .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
                     .filter(([k]) => k !== "");
-                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, credentials);
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, supportsInsecureTls(editPath) && editInsecureTls, credentials);
                   setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
@@ -1445,9 +1471,17 @@ export default function RepositoriesPage() {
                     // A read-only repo may be a mirror source (already filtered out via
                     // mirrorSource above) but never a destination.
                     .filter((r) => r.id !== mirrorSource?.id && !r.readOnly)
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                    ))}
+                    .map((r) => {
+                      // restic's --insecure-tls is process-wide, so the backend refuses a
+                      // pair where it would silently weaken the other side (repo.rs's
+                      // check_tls_compat) — grey those out rather than fail after the click.
+                      const tlsConflict = !!mirrorSource && insecureTlsConflict(mirrorSource, r);
+                      return (
+                        <option key={r.id} value={r.id} disabled={tlsConflict}>
+                          {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                        </option>
+                      );
+                    })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
@@ -1675,7 +1709,7 @@ export default function RepositoriesPage() {
                   className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500"
                   value={form.path}
                   onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
-                  placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
+                  placeholder="s3:s3.amazonaws.com/bucket, sftp:user@host:/path or rest:https://host:8000/repo"
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
@@ -1776,6 +1810,11 @@ export default function RepositoriesPage() {
               Read-only repository (--no-lock)
             </label>
           )}
+          <InsecureTlsField
+            path={form.path}
+            checked={insecureTls}
+            onChange={(v) => { setInsecureTls(v); setTestResult(null); }}
+          />
           {testResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}

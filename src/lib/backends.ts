@@ -82,3 +82,29 @@ export function hasInlineRestUserinfo(path: string): boolean {
   if (!parts) return false;
   return parts.lastAt > 0;
 }
+
+/** True when `--insecure-tls` means something for this path: a `rest:https://` URL.
+ * (restic ignores the flag for plain http, and the app only offers it for REST.) */
+export function supportsInsecureTls(path: string): boolean {
+  return /^rest:https:\/\//i.test(path.trim());
+}
+
+/** Mirrors repo.rs's `verifies_tls`: transports where `--insecure-tls` would change the
+ * security of a repo that doesn't have it set. */
+function verifiesTls(path: string): boolean {
+  const p = path.trim().toLowerCase();
+  return ["rest:https://", "s3:", "b2:", "azure:", "gs:"].some((prefix) => p.startsWith(prefix));
+}
+
+/** Mirrors repo.rs's `check_tls_compat`. restic's `--insecure-tls` is process-wide, so a
+ * copy/mirror between a flagged repo and a TLS-verifying one that isn't flagged would
+ * silently turn verification off for the second; the backend refuses it, and the pickers
+ * use this to grey such targets out up front. */
+export function insecureTlsConflict(
+  a: { path: string; insecureTls: boolean },
+  b: { path: string; insecureTls: boolean },
+): boolean {
+  const weakens = (flagged: typeof a, other: typeof a) =>
+    flagged.insecureTls && !other.insecureTls && verifiesTls(other.path);
+  return weakens(a, b) || weakens(b, a);
+}

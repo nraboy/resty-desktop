@@ -230,6 +230,11 @@ proposing a change — several are pinned by a named test or reference a confirm
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
+- `--insecure-tls` is a per-repo, user-acknowledged flag for `rest:https://` repos (`apply_tls_flags` at
+  every restic `Command` site, since restic has no env var for it); `check_tls_compat` refuses a
+  copy/mirror pair where it would disable verification on an unflagged TLS-verifying repo; the
+  recommended fix is trusting the CA in the OS store; client certs/`--cacert` are deferred — see
+  docs/decisions.md
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
 - `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
