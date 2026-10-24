@@ -1354,14 +1354,16 @@ export default function RepositoriesPage() {
                       </Button>
                     </div>
                   ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setEditCredentialRows((rows) => [...rows, ["", ""]])}
-                  >
-                    + Add credential
-                  </Button>
+                  {detectBackend(editPath.trim() || editTarget.path) !== "rest" && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setEditCredentialRows((rows) => [...rows, ["", ""]])}
+                    >
+                      + Add credential
+                    </Button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1863,14 +1865,19 @@ export default function RepositoriesPage() {
                       </Button>
                     </div>
                   ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setCredentialRows((rows) => [...rows, ["", ""]])}
-                  >
-                    + Add credential
-                  </Button>
+                  {/* A rest: URL has its two dedicated fields above; the generic "add a variable"
+                      button stays for every other backend. Other rows already stored on a rest:
+                      repo still show in the list (nothing is hidden or lost). */}
+                  {detectBackend(form.path) !== "rest" && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setCredentialRows((rows) => [...rows, ["", ""]])}
+                    >
+                      + Add credential
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
