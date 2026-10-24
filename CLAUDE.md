@@ -132,6 +132,7 @@ src-tauri/
 | Schema/migrations, encryption, caching, import/export | `docs/data.md` |
 | Page/component behavior, theming detail | `docs/frontend.md` |
 | Tauri command internals not covered by the three docs above | `docs/backend.md` |
+| What a backup plan includes/excludes (rule engine, file tree) | `docs/backup-plan-tree.md` |
 | Before "fixing" something that looks like a bug or inefficiency | `docs/decisions.md` (check the index below first) |
 
 ## Restic Integration
@@ -227,6 +228,11 @@ proposing a change — several are pinned by a named test or reference a confirm
   accepted trade-off for the typical 1–3 endpoints per plan; `test_webhook` (Send Test) is
   the only path that surfaces delivery errors. Don't add fire-time retry/logging without
   treating it as a deliberate design change — see webhook.rs in docs/backend.md
+- `commands/plan_rules.rs` is a literal port of restic's exclude-pattern matching (Go's
+  `filepath.Match`, `filter.Match/ChildMatch/List`, `RejectIfPresent`), including quirks such as the
+  `**` expansion bound; it is verified against Go's/restic's own test tables and a differential test
+  against the real restic. Don't "simplify" or "fix" it without re-running that test — see
+  docs/backup-plan-tree.md
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
