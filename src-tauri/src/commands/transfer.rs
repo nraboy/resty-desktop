@@ -55,8 +55,11 @@ struct ExportRepo {
     /// predate the read-only feature) still import cleanly as writable repos.
     #[serde(default)]
     read_only: bool,
-    /// `--insecure-tls` (skip certificate verification). Added after bundle v1 shipped —
-    /// defaults to `false` so older exports import with verification on.
+    /// `--insecure-tls` (skip certificate verification). Written on export so the bundle
+    /// records it, but **ignored on import**: a hand-edited or shared bundle must not be able
+    /// to silently turn certificate verification off, so an imported repo always starts with
+    /// it off and the user re-ticks it in the edit dialog. `#[serde(default)]` keeps older
+    /// bundles loading.
     #[serde(default)]
     insecure_tls: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
@@ -453,7 +456,8 @@ pub fn import_data(
             password_nonce: nonce,
             password_ciphertext: ciphertext,
             read_only: r.read_only,
-            insecure_tls: r.insecure_tls,
+            // Deliberately not carried over — see ExportRepo::insecure_tls.
+            insecure_tls: false,
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
         });

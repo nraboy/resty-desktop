@@ -169,7 +169,10 @@ pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &Full
 /// them is covered. The sites that build their `Command` inline (backup, prune, and the
 /// copy/mirror destination side) call it explicitly, next to `apply_backend_env`.
 pub(crate) fn apply_tls_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
-    if repo.insecure_tls {
+    // Idempotent: copy/mirror apply it for the destination explicitly and again through
+    // `apply_from_repo_flags` for the source, and a flag given twice is just noise in the
+    // arg list.
+    if repo.insecure_tls && !cmd.get_args().any(|a| a == "--insecure-tls") {
         cmd.arg("--insecure-tls");
     }
 }
@@ -187,7 +190,10 @@ fn verifies_tls(path: &str) -> bool {
 }
 
 pub(crate) const MIXED_INSECURE_TLS_ERROR: &str =
-    "These repositories can't be used together: certificate verification is turned off      (--insecure-tls) for one of them, and restic applies that flag to the whole copy      operation, which would also disable verification for the other one. Turn it on for      both repositories or neither.";
+    "These repositories can't be used together: certificate verification is turned off \
+     (--insecure-tls) for one of them, and restic applies that flag to the whole copy \
+     operation, which would also disable verification for the other one. Turn it on for \
+     both repositories or neither.";
 
 /// Pre-flight for `copy_snapshot`/`mirror_repo`, run alongside `merge_credentials` before
 /// either repo takes a lock: refuses a pair where `--insecure-tls` on one side would
@@ -1429,6 +1435,50 @@ mod tests {
         let mut on = std::process::Command::new("restic");
         apply_tls_flags(&mut on, &tls_repo("rest:https://nas/r", true));
         assert!(on.get_args().any(|a| a == "--insecure-tls"));
+    }
+
+    #[test]
+    fn apply_tls_flags_is_idempotent_across_copy_destination_and_source() {
+        let both = tls_repo("rest:https://nas/r", true);
+        let mut cmd = std::process::Command::new("restic");
+        apply_tls_flags(&mut cmd, &both);
+        apply_from_repo_flags(&mut cmd, &both);
+        assert_eq!(cmd.get_args().filter(|a| *a == "--insecure-tls").count(), 1);
+    }
+
+    /// Restic has no env var for `--insecure-tls`, so every `Command` that sets
+    /// `RESTIC_REPOSITORY` must also go through `apply_repo_flags`/`apply_tls_flags` or it
+    /// silently runs with verification on and fails against a self-signed server even though
+    /// Test Connection passed. This pins the call sites: a new inline site fails here until it
+    /// is added (and the count below updated).
+    #[test]
+    fn every_restic_command_site_applies_tls_flags() {
+        let sources = [
+            ("repo.rs", include_str!("repo.rs")),
+            ("snapshot.rs", include_str!("snapshot.rs")),
+            ("browse.rs", include_str!("browse.rs")),
+        ];
+        let mut sites = 0;
+        for (name, src) in sources {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                // Production code only: stop at the test module.
+                if line.contains("#[cfg(test)]") {
+                    break;
+                }
+                if line.contains(".env(\"RESTIC_REPOSITORY\"") {
+                    sites += 1;
+                    let window = lines[i..(i + 15).min(lines.len())].join("\n");
+                    assert!(
+                        window.contains("apply_repo_flags") || window.contains("apply_tls_flags"),
+                        "{name}:{} sets RESTIC_REPOSITORY without applying TLS flags",
+                        i + 1
+                    );
+                }
+            }
+        }
+        // run_restic_with_path, check_repo, prune, backup, copy dest, mirror dest, index/browse.
+        assert_eq!(sites, 7, "a restic Command site was added or removed; update this test");
     }
 
     #[test]

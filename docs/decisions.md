@@ -25,6 +25,11 @@ as-is. Don't re-flag or "fix" them without understanding why first:
     copy/mirror pair where it would silently disable verification for the other, unflagged TLS-verifying
     repo, rather than applying it to both with a warning. Both-flagged and non-TLS counterparts
     (local, `sftp:`, `rclone:`, `rest:http://`) are allowed. The pickers grey the same targets out.
+  - Import never carries `insecure_tls` over (export still writes it): bundles are plaintext and
+    hand-editable, and the flag sends the repo password to an unauthenticated endpoint, so turning it
+    on must be an explicit act in the edit dialog, never a side effect of importing a file.
+  - `apply_tls_flags` is idempotent, and `every_restic_command_site_applies_tls_flags` (repo.rs tests)
+    pins the `RESTIC_REPOSITORY` call sites so a new inline `Command` can't forget the flag.
   - Not done on purpose (deferred, not forgotten): TLS client certificates (`RESTIC_TLS_CLIENT_CERT`,
     PEM with cert + key, stored as a path only) and a per-repo `--cacert` path. Don't add a global
     "ignore TLS errors" toggle.
