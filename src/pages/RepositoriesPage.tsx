@@ -1340,7 +1340,7 @@ export default function RepositoriesPage() {
             onChange={(v) => { setEditInsecureTls(v); setEditTestResult(null); }}
           />
           {editTestResult && (
-            <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
+            <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
             </div>
           )}
@@ -1816,7 +1816,7 @@ export default function RepositoriesPage() {
             onChange={(v) => { setInsecureTls(v); setTestResult(null); }}
           />
           {testResult && (
-            <div className={`text-sm rounded-lg px-3 py-2 ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
+            <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}
             </div>
           )}

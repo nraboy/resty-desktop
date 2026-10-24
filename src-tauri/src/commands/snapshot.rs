@@ -1124,6 +1124,7 @@ pub async fn execute_backup(
 
         let msg = stderr_str.trim();
         let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
+        let base = super::backends::append_rest_hint(&repo_for_spawn.path, repo_for_spawn.insecure_tls, base);
         let base = match exit {
             BackupExit::Failure { prefix: Some(p) } => format!("{p}\n\n{base}"),
             _ => base,

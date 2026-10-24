@@ -297,24 +297,102 @@ pub(crate) fn ensure_writable(repo: &FullRepository) -> Result<(), String> {
     Ok(())
 }
 
+/// The fully-configured one-shot `Command` shared by `run_restic_with_path` and
+/// `run_restic_with_timeout` (repository env, password, credentials, TLS/lock flags, null
+/// stdin, no console window).
+fn one_shot_command(repo: &FullRepository, args: Vec<&str>, restic_path: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(restic_path);
+    cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
+    apply_repo_flags(&mut cmd, repo);
+    cmd.stdin(std::process::Stdio::null()).no_console().augment_path();
+    cmd
+}
+
 pub fn run_restic_with_path(
     repo: &FullRepository,
     args: Vec<&str>,
     restic_path: &str,
 ) -> Result<String, String> {
-    let mut cmd = std::process::Command::new(restic_path);
-    cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
-    apply_repo_flags(&mut cmd, repo);
-    let output = cmd
-        .stdin(std::process::Stdio::null())
-        .no_console()
-        .augment_path()
+    let output = one_shot_command(repo, args, restic_path)
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     if output.status.success() {
         String::from_utf8(output.stdout).map_err(|e| format!("restic output contained invalid UTF-8: {e}"))
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        // A recognized `rest:` failure gets a plain-language hint appended after restic's own
+        // text (never replacing it — callers match on substrings such as "already locked").
+        Err(backends::append_rest_hint(
+            &repo.path,
+            repo.insecure_tls,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+/// How long a remote connection test waits before giving up. restic retries an
+/// unreachable backend with exponential backoff for many minutes (it has no flag to
+/// bound that), so without a deadline "Test Connection" against a wrong host or scheme
+/// would appear to hang.
+const CONNECTION_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Like `run_restic_with_path`, but kills restic and fails with
+/// `backends::CONNECTION_TIMEOUT_MARKER` if it hasn't finished within `timeout`. The
+/// error carries the last few lines restic printed (its "retrying after … connection
+/// refused" lines name the real problem) plus the usual `rest:` hint.
+fn run_restic_with_timeout(
+    repo: &FullRepository,
+    args: Vec<&str>,
+    restic_path: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+
+    let mut child = one_shot_command(repo, args, restic_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run restic: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
+    let mut stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+    let out_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        stdout.read_to_string(&mut s).ok();
+        s
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        stderr.read_to_string(&mut s).ok();
+        s
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("Failed to wait for restic: {e}"))? {
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let stderr = err_thread.join().unwrap_or_default();
+
+    match status {
+        Some(status) if status.success() => Ok(stdout),
+        Some(_) => Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, stderr)),
+        None => {
+            let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = tail[tail.len().saturating_sub(3)..].join("\n");
+            let msg = format!(
+                "{} after {} seconds (restic keeps retrying an unreachable server).\n{tail}",
+                backends::CONNECTION_TIMEOUT_MARKER,
+                timeout.as_secs()
+            );
+            Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, msg))
+        }
     }
 }
 
@@ -528,9 +606,19 @@ pub async fn test_repo_connection(
     let credentials: Vec<Credential> =
         credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
     let dummy = FullRepository { path, password, read_only, insecure_tls, credentials };
-    let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
-        .await
-        .map(|_| ());
+    // A remote backend gets a deadline: restic would otherwise retry an unreachable host
+    // for many minutes. Local paths fail fast and keep the plain call.
+    let timeout = (kind != backends::BackendKind::Local).then_some(CONNECTION_TEST_TIMEOUT);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let args = vec!["snapshots", "--json"];
+        match timeout {
+            Some(t) => run_restic_with_timeout(&dummy, args, &restic_path, t),
+            None => run_restic_with_path(&dummy, args, &restic_path),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|_| ());
     match &result {
         Ok(_) => task_ctx.finished(),
         Err(e) => task_ctx.failed(e.clone()),
@@ -921,7 +1009,8 @@ async fn run_one_prune_attempt(
         Ok(PruneAttempt::Success)
     } else {
         let msg = captured_stderr.trim();
-        Ok(PruneAttempt::Failed(if msg.is_empty() { "Prune failed".to_string() } else { msg.to_string() }))
+        let msg = if msg.is_empty() { "Prune failed".to_string() } else { msg.to_string() };
+        Ok(PruneAttempt::Failed(backends::append_rest_hint(&full.path, full.insecure_tls, msg)))
     }
 }
 
@@ -1327,7 +1416,7 @@ mod tests {
         apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
         parse_raw_data_size, parse_stats_json, validate_init_password, validate_restic_path,
         READ_ONLY_REPO_ERROR,
-        apply_tls_flags, check_tls_compat, MIXED_INSECURE_TLS_ERROR,
+        apply_tls_flags, check_tls_compat, run_restic_with_timeout, MIXED_INSECURE_TLS_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
 
@@ -1518,6 +1607,68 @@ mod tests {
         assert!(check_tls_compat(&insecure, &tls_repo("/backups/local", false)).is_ok());
         assert!(check_tls_compat(&insecure, &tls_repo("sftp:u@h:/r", false)).is_ok());
         assert!(check_tls_compat(&insecure, &tls_repo("rest:http://nas/r", false)).is_ok());
+    }
+
+    // ── run_restic_with_timeout / rest hints (fake restic scripts) ──────────
+
+    /// Writes an executable shell script standing in for the restic binary.
+    #[cfg(unix)]
+    fn fake_restic(name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("resty-fake-restic-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("restic");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_kills_a_hung_restic_and_names_the_problem() {
+        let bin = fake_restic(
+            "hang",
+            "echo 'Stat(<config/>) returned error, retrying after 2.8s: dial tcp 127.0.0.1:9: connect: connection refused' >&2\nexec sleep 30",
+        );
+        let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(3)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "should not wait for the 30s sleep");
+        assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+        assert!(err.contains("connection refused"), "keeps restic's last lines: {err}");
+        assert!(err.contains("Hint: Couldn't reach the server"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_returns_stdout_on_success_and_hinted_stderr_on_failure() {
+        let ok = fake_restic("ok", "echo '[]'");
+        let repo = tls_repo("rest:https://nas:8000/alice/", false);
+        let out = run_restic_with_timeout(&repo, vec!["snapshots"], &ok, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(out.trim(), "[]");
+
+        let bad = fake_restic(
+            "401",
+            "echo 'Fatal: unable to open config file: unexpected HTTP response (401): 401 Unauthorized' >&2\nexit 1",
+        );
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bad, std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(err.contains("401 Unauthorized"));
+        assert!(err.contains("Hint: Authentication failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_path_appends_the_hint_after_restic_text() {
+        let bad = fake_restic(
+            "403",
+            "echo 'Remove(<snapshot/45cea74811>) failed: unexpected HTTP response (403): 403 Forbidden' >&2\nexit 1",
+        );
+        let err = super::run_restic_with_path(&tls_repo("rest:https://nas/r", false), vec!["forget", "x"], &bad).unwrap_err();
+        assert!(err.starts_with("Remove(<snapshot/45cea74811>) failed"));
+        assert!(err.contains("Hint: The server refused the request (403 Forbidden)"));
+        // A non-REST repo's error is untouched.
+        let plain = super::run_restic_with_path(&tls_repo("/local/repo", false), vec!["forget", "x"], &bad).unwrap_err();
+        assert!(!plain.contains("Hint:"));
     }
 
     // ── apply_backend_env ───────────────────────────────────────────────────

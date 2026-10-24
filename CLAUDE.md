@@ -235,6 +235,9 @@ proposing a change — several are pinned by a named test or reference a confirm
   copy/mirror pair where it would disable verification on an unflagged TLS-verifying repo; the
   recommended fix is trusting the CA in the OS store; client certs/`--cacert` are deferred — see
   docs/decisions.md
+- `rest:` failure hints (`backends::rest_error_hint`) are appended after restic's text and advisory
+  only; `test_repo_connection` gives a remote repo a 30s deadline (`run_restic_with_timeout`) because
+  restic retries unreachable backends for minutes — see docs/decisions.md
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
 - `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
