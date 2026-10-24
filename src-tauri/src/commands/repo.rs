@@ -1790,6 +1790,7 @@ mod tests {
             password: "pw".into(),
             read_only: false,
             insecure_tls: std::env::var("RESTY_TEST_INSECURE").is_ok(),
+            append_only: false,
             credentials: vec![],
         };
         let started = std::time::Instant::now();
