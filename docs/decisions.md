@@ -862,6 +862,50 @@ as-is. Don't re-flag or "fix" them without understanding why first:
     Don't add per-zone special cases.
 
 
+## Window size, persistence and the compact tier (issue #39)
+
+- **`tauri-plugin-window-state` saves/restores `SIZE | POSITION | MAXIMIZED` only — never
+  `VISIBLE`.** The plugin's default is `StateFlags::all()`, and restoring `VISIBLE` calls
+  `show()` + `set_focus()`, which would defeat the hidden login launch (`should_start_hidden`)
+  and the `visible: false` startup path. `with_state_flags` also governs what is *saved*, so a
+  visible flag is never written. Don't widen the flags.
+- **Restore is manual** (`.skip_initial_state("main")` + `restore_state` in `setup()`), so
+  `fit_to_monitor` runs immediately after, before the window is first shown. The plugin stores
+  *physical* px and applies them unclamped, so a size saved on a bigger or differently scaled
+  display could open larger than the current one; `fitted_inner_size` (pure, unit-tested)
+  shrinks the inner size so the outer frame fits the monitor's work area, then re-centers.
+  A maximized window is skipped (the OS sizes it). With no monitor to measure (possible on
+  Wayland) the restored size stands. Wayland ignores app-set position, so only size restores there.
+- **No "keep the default size when there is no monitor info" guard — deliberately left out.** Read
+  from tao 0.37.1 (not tested on a real Wayland session): for an unmapped (still-hidden) window,
+  `current_monitor` falls back to `display.primary_monitor()` (`platform_impl/linux/window.rs`), and
+  monitor/window sizes are both scaled by the same factor, so `fit_to_monitor` normally gets a usable
+  monitor even on Wayland; the early return is a safety net. A bad size would need *both* no monitor info
+  and a saved size larger than the current screen, and is recoverable (resize/maximize, or delete
+  `app_config_dir()/.window-state.json`). The guard would also turn off the remembered size for exactly the
+  Wayland users it helps. Known imprecision: on multi-monitor setups the fallback measures the first/primary
+  monitor, not necessarily the one the window opens on, so it can shrink slightly more than needed
+  (harmless; `center()` is a no-op on Wayland). If a user reports a wrong-size window on Wayland, add the
+  guard then (skip the restored size when `current_monitor`/`primary_monitor` both fail) rather than before.
+- **`reset_app` deliberately does not delete the window-state file.** The plugin holds state in
+  memory and rewrites `app_config_dir()/.window-state.json` on `RunEvent::Exit`, so deleting it
+  would be undone at quit; and window geometry isn't user data. Don't "fix" this.
+- A hidden login launch with a saved *maximized* state stays hidden: tao defers maximizing a
+  hidden window (verified for Windows in tao 0.37.1, `window_state.rs`); re-check macOS/Linux
+  manually when touching this.
+- **Compact tier is `max-xl:`-additive only** (below 1280); nothing that applies at ≥1280 is
+  edited, and truncation classes are `max-xl:`-prefixed — see docs/frontend.md for why
+  (`overflow-hidden` tables would clip). The one removed class is `LogsPage`'s `min-w-[800px]`,
+  which never took effect at ≥1280.
+- **Exceptions, added later** (the compact tier started as `max-xl:`-additive only; these apply at every
+  width, including ≥1280, and `LogsPage` also lost `overflow-x-auto`, now `overflow-hidden`): free-text
+  table cells (Logs Plan/Repository, Snapshots Host/Tags,
+  Browse/Diff names) are `truncate` + shrinkable (`max-w-0` + a `w-[N%]`) at *every* width, including
+  ≥1280, so a long user-chosen name ellipsizes with a hover title instead of wrapping or overflowing.
+  A per-tier `ch` cap was tried first and rejected: caps are upper bounds, so two long columns still
+  overflowed (up to 322px at 1280). Tables use `overflow-hidden`, never `overflow-x-auto`. Separate
+  steps from the rest of #39 (revertable alone). See docs/frontend.md for the recipe.
+
 ## Linux GPU Compatibility
 
 `src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.

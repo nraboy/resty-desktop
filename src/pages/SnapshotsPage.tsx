@@ -11,6 +11,7 @@ import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Tooltip from "../components/Tooltip";
+import TruncatedText from "../components/TruncatedText";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
@@ -482,15 +483,15 @@ export default function SnapshotsPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
+        <div className="min-w-0">
           <h1 className="text-xl font-semibold text-gray-100">Snapshots</h1>
           {repo && (
-            <div className="flex items-center gap-2 mt-0.5">
-              <p className="text-sm text-gray-500">{repo.name}</p>
+            <div className="flex items-center gap-2 mt-0.5 min-w-0">
+              <TruncatedText as="p" text={repo.name} className="text-sm text-gray-500 truncate" />
               {repo.readOnly && (
                 <span
-                  className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                  className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0"
                   title="Every restic call uses --no-lock; writing operations are disabled."
                 >
                   Read-only
@@ -499,13 +500,13 @@ export default function SnapshotsPage() {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-shrink-0">
           <Input
             placeholder="Filter snapshots…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onClear={() => setFilter("")}
-            className="w-56"
+            className="w-56 max-xl:w-44"
           />
           {refreshing && <span className="text-xs text-gray-500">Updating…</span>}
           {selectMode ? (
@@ -599,10 +600,10 @@ export default function SnapshotsPage() {
                   )}
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">ID</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
-                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Host</th>
+                  <th className="max-mid:hidden px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[18%]">Host</th>
                   <th className="hidden wide:table-cell px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider text-right">Size</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
-                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[32%]">Tags</th>
                   {!selectMode && (
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20 wide:w-auto text-right">Actions</th>
                   )}
@@ -648,14 +649,16 @@ export default function SnapshotsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
-                    <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
+                    <td className="max-mid:hidden px-4 py-3 text-gray-400 max-w-0 w-[18%]">
+                      <TruncatedText text={snap.hostname} className="truncate" />
+                    </td>
                     <td
                       className="hidden wide:table-cell px-4 py-3 text-gray-400 whitespace-nowrap text-right tabular-nums"
                       title="Bytes restic processed when this snapshot was created. Snapshot Stats reports restore size, which can differ."
                     >
                       {formatSize(snap.size ?? undefined)}
                     </td>
-                    <td className="px-4 py-3 text-gray-400 max-w-xs">
+                    <td className="px-4 py-3 text-gray-400 max-w-xs whitespace-nowrap">
                       <Tooltip
                         title="Backup Paths"
                         content={(() => {
@@ -675,14 +678,14 @@ export default function SnapshotsPage() {
                         </div>
                       </Tooltip>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 max-w-0 w-[32%]">
                       <div className="flex flex-wrap gap-1">
                         {(snap.tags ?? []).map((tag) => (
                           <span
                             key={tag}
-                            className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full"
+                            className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full max-w-full"
                           >
-                            {tag}
+                            <TruncatedText as="span" text={tag} className="truncate min-w-0" />
                             {!selectMode && (
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleRemoveTag(snap, tag); }}

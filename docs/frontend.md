@@ -48,10 +48,52 @@ Why a number close to `1280` and not a round physical-resolution number like `19
 Tauri's `minWidth`/`minHeight` window config) are in *logical* (CSS) px, which OS display scaling
 divides down from physical resolution, so a physical 1920px monitor is very often a
 1280-1536px logical viewport (e.g. a MacBook Pro 14" is 1512 logical regardless of its 3024px
-panel) — a 1920 breakpoint would rarely or never fire on a laptop's built-in display. Also worth
-knowing: because the app's window can never go below `tauri.conf.json`'s `minWidth: 1280`, every
-*stock* Tailwind breakpoint below `2xl:1536` is permanently true and therefore useless here —
-`wide` is the only breakpoint in this codebase that actually toggles.
+panel) — a 1920 breakpoint would rarely or never fire on a laptop's built-in display.
+
+**Window minimum and the compact tier (issue #39).** `tauri.conf.json`'s `minWidth`/`minHeight`
+are `1024`/`640` (default size stays 1366×800), so stock `xl` (1280) now toggles and marks the
+**compact tier**: below 1280 the Sidebar becomes an icon rail and tables shed or stack columns so
+nothing scrolls horizontally. The rule that keeps this safe: compact styles are written **only**
+as `max-xl:` variants (active below 1280) or `xl:hidden` on compact-only elements — purely
+additive, never an edit to a class that applies at ≥1280, so the full-size layout is unchanged.
+That includes truncation: `truncate`/`max-w-0` are `max-xl:`-prefixed because applying them at
+every width would force text that wraps today onto one line, which can widen an
+`overflow-hidden` table (Snapshots, Browse, Diff) past its container and clip it. Verify a change
+to this tier by building the Tailwind CSS before/after and diffing: only new `max-xl`/`xl:hidden`
+rules should appear. `wide` (1536) is still the label-reveal breakpoint; `sm/md/lg/2xl` stay unused.
+Prefer hiding a lower-value column outright over merging its data into another column's cell (a stacked
+Host under Date, Repository under Plan, etc. reads as belonging to that column and confuses). Dates stay on one line in both
+tables (a two-line date/time looked odd). Compact Logs shows every column except Repository; compact Snapshots drops Host.
+
+**Free-text table cells shrink to fit and ellipsize, at every size (the one deliberate exception to
+"additive only").** User-chosen text (Logs Plan/Repository, Snapshots Host and Tags, Browse/Diff file
+names) can be arbitrarily long, and a fixed `ch` cap can't be right at every window width (tried first:
+two 32ch columns overflowed the Logs table by up to 322px at 1280, and no single cap fits both
+1152 and 1600). So those columns are *shrinkable*: the `<td>`/`<th>` carry `max-w-0` plus a
+percentage `w-[N%]` (Logs Plan 30% from `mid` up / Repository 25%, Snapshots Host 18% / Tags 32%; Browse/
+Diff name `w-full` beside fixed-width neighbours) and the content is a `TruncatedText` with `truncate`
+(tag chips: `max-w-full`, inner `truncate min-w-0`). `max-w-0` zeroes the cell's min-content so the
+table never exceeds its container; the percentage is what claims the leftover space; fixed-shape
+columns (dates, IDs, sizes, counts) keep their natural width — **and must be `whitespace-nowrap`** (plus
+a `min-w-[…]` where the header sets a `w-*`, e.g. Browse Size/Modified, Diff Change): the shrinkable columns
+squeeze every other column to its *min-content*, so any cell that can break on a space ("12.3 MB", "12 paths")
+will wrap, even with plenty of room elsewhere. Below `mid` Logs Plan instead keeps a
+`15ch` cap (Repository is hidden there). Tables use `overflow-hidden` — never `overflow-x-auto` —
+since horizontal scrolling is not acceptable; verify any change here by measuring `scrollWidth` vs
+`clientWidth` across 1024-1600px in headless Chrome with very long names, not by eye. Card lists get the same treatment: **a list laid out with `grid` must use `grid-cols-1`** (Repositories),
+because a plain `grid` has an `auto` track that cannot shrink below its widest row, so one long repo path
+stretches every row and the page scrolls horizontally no matter how the row truncates (`space-y-3` block
+lists — Plans, Schedules — don't have this problem); the row's text wrappers need `flex-1 min-w-0` + `truncate`
+and its action group `flex-shrink-0`. Shared components follow the same rule: `Button` is `whitespace-nowrap` (a toolbar squeezed by a long
+page title used to wrap "Select Multiple" onto two lines), and `Modal`'s title is `min-w-0 break-words` with a
+`flex-shrink-0` close button (a long unbroken repo name in a title such as "Prune: …" used to push the close
+button outside the dialog). Any page header holding free text next to a toolbar needs `min-w-0` + `truncate` on
+the text and `flex-shrink-0` on the toolbar. Extend this to any
+new free-text table cell. Added after issue #39 shipped, as separate steps that can be reverted alone.
+
+A second, `mid` (1152) breakpoint splits the compact tier: Snapshots' Host and Logs' Repository use
+`max-mid:hidden`, so they return between 1152 and 1279 (where the icon rail leaves ~1040px of content,
+more than the full layout has at 1280) and hide only below 1152. Same additive `max-` rule.
 
 ### `Button.tsx`
 
@@ -113,7 +155,53 @@ ActivityPanel's Upcoming Tasks plan-name list (one name per line, capped via `ca
 SettingsPage's "Failures" notification label (only the word itself gets the underline/tooltip,
 since the enclosing `<label>` is itself a click target for the checkbox). This split is deliberate, not partial completion — see `docs/decisions.md`.
 
+### Layout tests (`tests/layout/`, `npm run test:layout`)
+
+Unit tests can't see "a long repo name pushed the page wider", so this suite renders the **real
+production build** (`vite build` into a temp dir, served by a small Node server with SPA fallback) in
+headless Chrome. `mock.js` is injected into `index.html` and replaces the Tauri IPC with fixtures built to
+hurt: very long names (some with no spaces), many/long tags, error + warning history rows, a read-only repo,
+a plan with 3 paths and webhooks. Two runners drive it: `pages.html` loads every route at 10 widths
+(1024-1600, including the 1151/1152 and 1279/1280 breakpoint edges) and `modals.html` opens ~24 modals
+(including against the 110-char unbroken repo name) at 1024 and 1366 with a 640px-tall window. Per check it
+fails on: horizontal scroll (reports the overflowing elements), an interactive control clipped by the
+viewport or an `overflow` ancestor, short (<=45 char) text wrapping onto two lines, content clipped by an `overflow:hidden` box (no scrollbar, no ellipsis — the silent failure of the rounded
+tables), a shrinkable `max-w-0` column squeezed under 90px (every name would render as "…"), a crashed page
+(ErrorBoundary), a page that rendered almost nothing, and — modals only — anything outside the dialog or a
+body that clips horizontally. Pages that show only a prompt until acted on (both search pages, the diff
+tree) are driven into their populated state by `ACT` in `pages.html`; a modal scenario whose button can't
+be found *fails* rather than silently skipping.
+
+Mutation-checked: re-adding `grid-cols-1`-less Repositories rows, an unconstrained modal title, or the
+squeezed Snapshots toolbar each fail it. When it flags something, fix the layout (see the free-text-cell
+rules above), don't loosen the check; `ALLOWED_WRAPS` in `run.mjs` is only for prose that is meant to flow.
+Uses Chrome's engine: macOS/Linux webviews (WebKit) can still differ on table layout, and font metrics
+differ per OS, so run it locally on the platform you're touching; it is **deliberately not wired into CI**
+(Linux runner fonts are wider, so it would need a baseline run first; the workflow calls `test:vite` and
+`test:rust` separately, so `test:all` is local-only). New command a page depends on -> add a handler in
+`mock.js` (unhandled commands return `null` and are listed as "unmocked"). Narrow a run with
+`LAYOUT_ROUTES="/logs" LAYOUT_WIDTHS="1024,1280"`.
+
+### `TruncatedText.tsx`
+
+Text with a native `title` that appears only when the text is actually cut off (`scrollWidth >
+clientWidth`, checked on mouseenter). It hard-codes **no** truncation classes — callers pass
+`max-xl:truncate` (compact-only) or `truncate` — so a cell never starts truncating at full width.
+Native `title` rather than `Tooltip` by the split rule above: one short string per cell, and no
+floating-ui instance per table row. Used for free-text fields that can be unbounded: repo
+name/path, snapshot tags, log plan/repo names, plan/schedule names, Browse/Diff
+file names. Never wrap fixed-shape values (dates, short IDs, sizes, counts).
+
 ### `Sidebar.tsx`
+
+`src/lib/breakpoints.test.ts` pins `useIsCompact`'s hardcoded 1280 to Tailwind's stock `xl` (and fails if `tailwind.config.js` overrides it).
+
+Below `xl` (1280) the sidebar is a `w-16` icon rail: labels, the app name, the activity strip's
+text and chevron, and the "VER " prefix are `max-xl:hidden` (the version itself `max-xl:truncate`); nav
+links get `title={label}` only when compact (`useIsCompact`, a `matchMedia` hook — a bare `title` would also
+show a redundant tooltip over the visible label at full width); the
+activity strip shows a compact-only (`xl:hidden`) task-count badge. Full-width behavior below is
+unchanged.
 
 Left nav with app icon + repo indicator; the nav list is routes only (Repositories, Backup Plans, Schedules, Logs, Settings) plus, last, a "Lock" button (same format as the nav items, `onLock` prop — only passed when unlocked, since Sidebar renders solely in App.tsx's unlocked branch) that locks the session via the shared `handleLock` in App.tsx, the same path as the menu bar's and tray's "Lock Now". Below the nav list, separated by the footer border, sits a status strip — a `<button>` carrying `data-activity-toggle`, not a NavLink, deliberately not part of the nav list since it toggles a panel rather than navigating — that toggles the Activity panel via the `activityOpen`/`onToggleActivity` props from App.tsx. While the panel is shown it gets a neutral pressed treatment (`bg-gray-800 text-gray-200` — the hover end-state), deliberately NOT the blue nav-active treatment: "you are here" is route navigation's job, and a blue highlight here would leave two items highlighted at once. The `data-activity-toggle` marker is what ActivityPanel's outside-close handler skips — without it, clicking the toggle while open would close on mousedown and re-open on the subsequent click. The strip renders `activeTaskCount(useActivity())` (lib/activity.tsx's shared counter — the same computation behind the panel's empty-state, so the two can't drift; semantics: queued batches/mirrors count too, statsRefreshAllProgress supersedes statsRefreshing, statsFailed is not activity) as a sentence — "N tasks running" (glyph and text `text-blue-400`/`text-gray-400`, plus a thin indeterminate `ProgressBar`) or "No background activity" (`text-gray-500`) — rather than a separate count chip, so there's only one place activity is reported, not two that could visually drift
 

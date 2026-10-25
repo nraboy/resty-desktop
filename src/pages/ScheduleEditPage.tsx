@@ -7,6 +7,7 @@ import type { BackupPlan, Repository, Schedule, ScheduleFrequency } from "../lib
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import TruncatedText from "../components/TruncatedText";
 import { ChevronDownIcon } from "../components/icons";
 
 const DAYS_OF_WEEK = [
@@ -212,23 +213,21 @@ export default function ScheduleEditPage() {
                     type="checkbox"
                     checked={selectedPlanIds.includes(plan.id)}
                     onChange={() => togglePlan(plan.id)}
-                    className="rounded border-gray-600 bg-gray-800 text-blue-400 focus:ring-blue-500 focus:ring-offset-gray-900"
+                    className="rounded border-gray-600 bg-gray-800 text-blue-400 focus:ring-blue-500 focus:ring-offset-gray-900 flex-shrink-0"
                   />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm text-gray-200">{plan.name}</p>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <TruncatedText as="p" text={plan.name} className="text-sm text-gray-200 truncate" />
                       {repos.find((r) => r.id === plan.repoId)?.readOnly && (
                         <span
-                          className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                          className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0 whitespace-nowrap"
                           title="This plan's repository is read-only — scheduled backups against it will fail."
                         >
                           Read-only repo
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-gray-500">
-                      {formatPlanSources(plan)}
-                    </p>
+                    <TruncatedText as="p" text={formatPlanSources(plan)} className="text-xs text-gray-500 truncate" />
                   </div>
                 </label>
               ))}

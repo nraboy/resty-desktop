@@ -22,6 +22,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Shell plugin | `tauri-plugin-shell` — only `open` is exposed (`shell:allow-open`, used for hardcoded http(s) links in App.tsx/SettingsPage.tsx); `"open": true` applies the plugin's default validator (http(s)/mailto/tel only) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/warnings/failure, each gated by a global setting (`commands/notify.rs`) |
+| Window state | `tauri-plugin-window-state` — `SIZE\|POSITION\|MAXIMIZED` only (never `VISIBLE`), restored by hand in `setup()` then `fit_to_monitor`; min window 1024×640, default 1366×800; see docs/decisions.md |
 | Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 4 (`v1` feature), opt-in, stores the *derived* master key; macOS/Windows guaranteed, Linux (Secret Service) best-effort; see docs/data.md |
@@ -52,7 +53,8 @@ src/
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
-    Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
+    TruncatedText.tsx     # Text with a native `title` shown only when actually cut off; callers supply the truncation classes (bare `truncate` for free-text cells, `max-xl:truncate` for compact-only ones) — see docs/frontend.md
+    Sidebar.tsx           # Icon rail below 1280px (`max-xl:`); left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
     ActivityPanel.tsx     # Right-side overlay drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's status strip, open state owned by App.tsx — see docs/concurrency.md
   lib/
     types.ts              # Shared TS types (Repository, Snapshot, BackupPlan, etc.); isRemoteRepo() helper
@@ -393,6 +395,22 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `set_launch_at_login`'s disable path checks `is_enabled()` first (Windows idempotency)
 - `reset_app` also best-effort clears the OS autostart entry, not just DB tables
 - The Windows `Run` registry value `auto-launch` writes is unquoted — not fixable from app code
+- Window size is persisted by `tauri-plugin-window-state` with **no `VISIBLE` flag** (it would
+  `show()` the window and break the hidden login launch), restored manually then shrunk by
+  `fit_to_monitor` (the plugin restores physical px unclamped), and `reset_app` deliberately does
+  **not** delete the state file (the plugin rewrites it at exit). The sub-1280 compact layout's *structural* changes (icon rail, hidden/stacked columns, header wrap) are
+  `max-xl:`/`max-mid:`-additive only — never edit a class that applies at ≥1280 for them, and keep `truncate`/
+  `max-w-0` `max-xl:`-prefixed there (full-width truncation would clip
+  `overflow-hidden` tables). Deliberate exceptions, all because a long user-chosen name must never wrap,
+  overflow or scroll at any width: free-text table cells (Logs Plan/Repository, Snapshots Host/Tags,
+  Browse/Diff names) are shrinkable (`max-w-0` + `w-[N%]`) + `truncate`; the Repositories list is
+  `grid-cols-1` with truncated rows; page-header titles next to a toolbar truncate; `Button` is
+  `whitespace-nowrap`; `Modal` titles wrap with a `flex-shrink-0` close button; and no-wrap/`min-w` guards
+  (Snapshots Paths, Browse Size/Modified, Diff Change, small badges/labels) apply at every width — they
+  only change a layout that would otherwise wrap. The column *percentages* on Logs/Snapshots do reshape how
+  spare width is shared at full size (name columns get it). Tables use
+  `overflow-hidden`, never `overflow-x-auto` (the Logs `min-w-[800px]` + `overflow-x-auto` were removed).
+  See docs/decisions.md and docs/frontend.md
 - `react-router-dom` stays on 6.x — its two audit advisories are unreachable in this app
 - Dark-mode `--tw-gray-500` (`139 148 163`) and light-mode `--tw-gray-500` (`88 103 126`) are
   deliberately not stock Tailwind values — both tuned so gray-500 text passes WCAG AA (≥4.5:1)
@@ -491,6 +509,11 @@ git push origin v0.0.X
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
 - Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
+  build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
+  controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a
+  local Chrome/Chromium (`CHROME_BIN`); skips without one (fails only with `LAYOUT_REQUIRE_BROWSER`). Deliberately
+  not run by CI (`test.yml` calls `test:vite`/`test:rust` separately).
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash
@@ -500,7 +523,8 @@ npm run lint:rust    # cargo clippy --all-targets -- -D warnings
 npm run lint:all     # both of the above
 npm run test:vite   # frontend tests only
 npm run test:rust   # Rust tests only (cargo test)
-npm run test:all    # both
+npm run test:layout # layout tests: real build in headless Chrome, mocked backend (~15s)
+npm run test:all    # all three
 ```
 
 Linting is deliberately narrow and **is wired into CI** — `.github/workflows/test.yml` runs

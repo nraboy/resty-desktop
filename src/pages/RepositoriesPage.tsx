@@ -47,6 +47,7 @@ import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
+import TruncatedText from "../components/TruncatedText";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -903,7 +904,7 @@ export default function RepositoriesPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Repositories</h1>
           <p className="text-sm text-gray-500 mt-0.5">Manage your Restic backup repositories</p>
@@ -942,11 +943,11 @@ export default function RepositoriesPage() {
           }
         />
       ) : (
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 gap-3">
           {repos.map((repo) => (
             <div
               key={repo.id}
-              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors"
+              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors gap-4"
               onClick={() => navigate(`/snapshots/${repo.id}`)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -954,23 +955,23 @@ export default function RepositoriesPage() {
                 setContextMenu({ repo, x: e.clientX, y: e.clientY });
               }}
             >
-              <div className="flex items-center gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-gray-100">{repo.name}</p>
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <TruncatedText as="p" text={repo.name} className="text-sm font-medium text-gray-100 truncate" />
                     {repo.readOnly && (
                       <span
-                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0"
                         title="Every restic call uses --no-lock; writing operations are disabled."
                       >
                         Read-only
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
+                  <TruncatedText as="p" text={repo.path} className="text-xs text-gray-500 mt-0.5 font-mono truncate" />
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-shrink-0">
                 <div className="flex items-center gap-4">
                   <div className="text-right min-w-[150px]">
                     {repo.id in statsMap ? (

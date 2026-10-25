@@ -15,7 +15,8 @@
     "lint:all": "npm run lint && npm run lint:rust",
     "test:vite": "vitest run",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "test:all": "npm run test:vite && npm run test:rust"
+    "test:layout": "node tests/layout/run.mjs",
+    "test:all": "npm run test:vite && npm run test:rust && npm run test:layout"
   },
   "dependencies": {
     "@floating-ui/react": "^0.27.20",

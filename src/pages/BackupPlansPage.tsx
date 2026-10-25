@@ -12,6 +12,7 @@ import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Spinner from "../components/Spinner";
 import BackupWarningsList from "../components/BackupWarningsList";
@@ -332,7 +333,7 @@ export default function BackupPlansPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Backup Plans</h1>
           <p className="text-sm text-gray-500 mt-0.5">Define and run backup configurations.</p>
@@ -418,7 +419,7 @@ export default function BackupPlansPage() {
                 className="group flex-1 min-w-0"
                 onClick={() => selectMode ? toggleSelectOne(plan.id) : navigate(`/backup-plans/${plan.id}`)}
               >
-                <p className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate">{plan.name}</p>
+                <TruncatedText as="p" text={plan.name} className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate" />
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {repoName(plan.repoId)} &middot;{" "}
                   {formatPlanSources(plan)}
