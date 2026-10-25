@@ -25,6 +25,9 @@ import {
   type TreeRulesInput,
 } from "../lib/planTree";
 import { ChevronDownIcon, ChevronRightIcon, CheckIcon, FileIcon, FolderIcon, LinkIcon, WarningIcon } from "./icons";
+import PlanTreeEditDialog, { type EditTarget } from "./PlanTreeEditDialog";
+import PlanTreeExportDialog from "./PlanTreeExportDialog";
+import type { EditOutcome } from "../lib/planTreeEdit";
 import Spinner from "./Spinner";
 import Tooltip from "./Tooltip";
 
@@ -48,6 +51,11 @@ interface Props {
   rules: TreeRulesInput;
   /** Set when the plan can't be previewed (e.g. it uses path-list files); shown instead of the tree. */
   unavailableReason?: string;
+  /** Called with the plan's new sources and patterns when the user confirms an include/exclude
+   * from the tree. When absent the tree is read-only. */
+  onApplyEdit?: (outcome: EditOutcome) => void;
+  /** The last edit made from the tree, with a way to take it back. */
+  lastEdit?: { summary: string; onUndo: () => void } | null;
 }
 
 const STATE_LABEL: Record<DisplayState, string> = {
@@ -99,13 +107,15 @@ function StateBox({ state }: { state: DisplayState }) {
  * cheap, and subtree scans (is anything inside excluded?) run in the backend only for the
  * included folders you can see.
  */
-export default function PlanTreePreview({ rules, unavailableReason }: Props) {
+export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit, lastEdit }: Props) {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RootMode>("sources");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [scrollTop, setScrollTop] = useState(0);
   const [problems, setProblems] = useState<RuleProblem[]>([]);
+  const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   // The data lives in refs and a counter forces a re-render: scan results stream in at a high
   // rate and each one would otherwise copy these maps.
   const [, bump] = useReducer((n: number) => n + 1, 0);
@@ -346,6 +356,18 @@ export default function PlanTreePreview({ rules, unavailableReason }: Props) {
     if (!expanded.has(path)) listFolder(path);
   };
 
+  const openEdit = (path: string, kind: SourceKind) => {
+    const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+    const isSource = rules.sources.some((s) => norm(s.trim()) === path);
+    setEditTarget({
+      path,
+      name: baseName(path),
+      kind,
+      verdict: verdicts.current.get(path),
+      isSource,
+    });
+  };
+
   const reload = () => {
     nodes.current.clear();
     refresh();
@@ -403,8 +425,20 @@ export default function PlanTreePreview({ rules, unavailableReason }: Props) {
                   <button type="button" onClick={reload} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
                     Refresh
                   </button>
+                  <button type="button" onClick={() => setExportOpen(true)} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
+                    Use with restic CLI…
+                  </button>
                 </div>
               </div>
+
+              {lastEdit && (
+                <p className="mb-3 text-xs text-gray-400" role="status">
+                  Updated your plan: {lastEdit.summary}.{" "}
+                  <button type="button" onClick={lastEdit.onUndo} className="text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline">
+                    Undo
+                  </button>
+                </p>
+              )}
 
               {problems.length > 0 && (
                 <ul className="mb-3 space-y-1">
@@ -482,7 +516,25 @@ export default function PlanTreePreview({ rules, unavailableReason }: Props) {
                           ) : (
                             <span className="w-4 flex-shrink-0" />
                           )}
-                          <StateBox state={state} />
+                          {onApplyEdit && state !== "pending" ? (
+                            <button
+                              type="button"
+                              onClick={() => openEdit(row.path, row.kind)}
+                              className="rounded-[3px] hover:ring-2 hover:ring-blue-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 flex-shrink-0"
+                              title={
+                                verdict?.included
+                                  ? rules.sources.some((src) => src.trim() === row.path)
+                                    ? "Remove this source…"
+                                    : "Exclude…"
+                                  : "Include…"
+                              }
+                              aria-label={`${row.name}: ${verdict?.included ? "exclude…" : "include…"}`}
+                            >
+                              <StateBox state={state} />
+                            </button>
+                          ) : (
+                            <StateBox state={state} />
+                          )}
                           <span className={`flex-shrink-0 ${dim ? "text-gray-500" : "text-gray-400"}`}>
                             {row.kind === "symlink" ? (
                               <LinkIcon className="w-4 h-4" />
@@ -512,12 +564,17 @@ export default function PlanTreePreview({ rules, unavailableReason }: Props) {
                 </div>
               )}
               <p className="text-xs text-gray-500 mt-2">
-                Computed with the same rules restic applies; nothing is changed or stored. Hover a name to see why.
+                Computed with the same rules restic applies. Hover a name to see why{onApplyEdit ? "; click a box to include or exclude it" : ""}.
               </p>
             </>
           )}
         </div>
       )}
+
+      {onApplyEdit && (
+        <PlanTreeEditDialog target={editTarget} rules={rules} onClose={() => setEditTarget(null)} onApply={onApplyEdit} />
+      )}
+      <PlanTreeExportDialog open={exportOpen} rules={rules} onClose={() => setExportOpen(false)} />
     </div>
   );
 }

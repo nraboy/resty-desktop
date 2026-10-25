@@ -114,14 +114,57 @@ and shows a message for plans that use path-list files.
   the Rust commands are covered by unit tests, but the event path between them is only exercised in
   the real app.
 
+## Editing from the tree (phase 3, slice 1)
+
+Clicking a row's box opens a dialog (`PlanTreeEditDialog`); nothing changes until the user confirms,
+and the Preview card shows "Updated your plan: … Undo" afterwards. The existing Paths/Exclude
+editors stay in place and simply show the result (the old Simple list is the rules list; Expert
+text keeps its comments). Include patterns (the `.env`-anywhere idea) are deliberately deferred.
+
+- **Exclude** offers pattern scopes for the clicked path — this exact item, a folder's contents
+  only, the name anywhere, the name under a nearer ancestor (never above the source), a file
+  extension — as an editable pattern, with a live "would leave out N items — e.g. …" from a
+  bounded scan (`tree_count_matches`: items included now that the new pattern would reject, a
+  folder counted once). Paths and names are glob-escaped (`escape_glob`), so a folder called
+  `we[ird]` is excluded literally.
+- **Include** is computed up front (`tree_plan_edit`) and the exact sources/patterns it will add are
+  shown: an item outside every source becomes a source (absorbing sources nested in it); a folder
+  excluded by a pattern gets `!folder`; an item below an excluded folder gets the carve-out chain
+  `!X`, `X/*`, `!X/child`, …, `!target` (or `!X` for "the whole folder"). Excluding a source by its
+  exact path removes the source.
+- **Every edit is verified by the engine** (`plan_edit.rs::apply_edit`) after being applied to a
+  copy of the plan: the clicked item must really end up as asked, otherwise the click is refused
+  with a reason — an ancestor excluded by a marker file, a pattern in an exclude file (applied after
+  the plan's own patterns, so a `!` can't override it; the message names file and line), a
+  case-insensitive rule (a separate list `!` can't cancel), or a source root that patterns don't
+  apply to. New rules are appended last so they take precedence over the plan's earlier ones.
+- **Verification against restic:** `restic_confirms_every_edit_the_engine_offers` (`#[ignore]`,
+  needs restic) applies random clicks to random plans and trees and checks with real dry runs that
+  the clicked item ended up as asked and the engine agrees on every node — last run 360 edits
+  (~240 re-includes, many from deep inside excluded folders), ~5,800 nodes, zero disagreements.
+  Run it after touching plan_edit.rs: `cargo test restic_confirms -- --ignored --nocapture`.
+- **CLI parity (`tree_export`, "Use with restic CLI…"):** everything the GUI generates is a plain
+  restic pattern, so the plan's rules render as the files and command a user would run by hand:
+  one ordered `restic-excludes.txt` (the flag patterns and every exclude file's lines, in the order
+  restic evaluates them — one list, so `!` works across all of it), `restic-iexcludes.txt` for
+  case-insensitive rules (restic keeps those in a separate list), `--exclude-if-present` /
+  `--exclude-caches` as flags, and the sources. In files restic expands `$VAR` on every line, so a
+  literal `$` is written `$$`. The repository and password are never written (they come from
+  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD`), and non-inclusion settings (tags, bandwidth, compression)
+  aren't in the command. `restic_confirms_exported_files_match_the_gui_flags` (`#[ignore]`) checks
+  that `--exclude-file` gives the same included set as the GUI's `--exclude` flags (1,477 reported
+  nodes over 80 random cases). The one feature that would break parity by construction is the
+  deferred include-pattern resolution (a runtime-built file list); don't add it without an export
+  story.
+
 ## Status / roadmap
 
 1. **Engine + tests (`plan_rules.rs`)** — done. Windows path semantics (`C:` components, `\`
    separators) are not handled yet.
 2. **Read-only tree** — done (this section); keyboard navigation (arrow keys) and a filter box for
    huge folders are not yet.
-3. Editing: SourceTree-style include/exclude dialog (exact path / name anywhere / scoped pattern),
-   rules list, copy-on-import of exclude files, include patterns resolved to an explicit
-   `--files-from-verbatim` list at backup time (restic has no include patterns), and replacing the
-   Paths/Exclude editors with the tree.
+3. Editing — slice 1 done (above): click to include/exclude with the pattern dialog, verified edits,
+   undo, CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
+   Paths/Exclude editors, and (deferred) include patterns resolved to an explicit
+   `--files-from-verbatim` list at backup time (restic has no include patterns).
 4. Polish: size estimates, Windows, keyboard/accessibility.

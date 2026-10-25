@@ -6,6 +6,7 @@ pub mod cache;
 pub mod crypto;
 pub mod keychain;
 pub mod notify;
+pub mod plan_edit;
 pub mod plan_rules;
 pub mod plan_tree;
 pub mod portal;

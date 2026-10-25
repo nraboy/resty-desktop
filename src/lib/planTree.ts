@@ -33,6 +33,8 @@ export interface RuleOrigin {
   pattern: string;
   file?: string | null;
   line?: number | null;
+  /** From an `--iexclude-file` (case-insensitive list). */
+  ignoreCase?: boolean;
 }
 
 export interface RuleProblem {

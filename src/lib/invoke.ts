@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 import type { Classification, TreeListing, TreeRulesInput } from "./planTree";
+import type { EditAction, EditOutcome, ExportOut, MatchPreview } from "./planTreeEdit";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -427,3 +428,24 @@ export const treeScanStart = (
 
 export const treeScanCancel = (): Promise<void> =>
   invoke("tree_scan_cancel");
+
+/** Applies a click (include/exclude) to the plan: the new sources and patterns, verified by the rule engine, or an error saying why not. */
+export const treePlanEdit = (rules: TreeRulesInput, action: EditAction): Promise<EditOutcome> =>
+  invoke("tree_plan_edit", { rules, action });
+
+/** How many currently-included items a pattern would leave out. */
+export const treeCountMatches = (rules: TreeRulesInput, pattern: string, budgetMs?: number): Promise<MatchPreview> =>
+  invoke("tree_count_matches", { rules, pattern, budgetMs });
+
+/** The exclude file(s) and restic command line that reproduce this plan's include/exclude behaviour on the CLI. */
+export const treeExport = (rules: TreeRulesInput): Promise<ExportOut> =>
+  invoke("tree_export", { rules });
+
+export const treeExportWrite = (
+  dir: string,
+  excludeFileName: string,
+  excludeFile: string,
+  iexcludeFileName?: string | null,
+  iexcludeFile?: string | null,
+): Promise<string[]> =>
+  invoke("tree_export_write", { dir, excludeFileName, excludeFile, iexcludeFileName, iexcludeFile });

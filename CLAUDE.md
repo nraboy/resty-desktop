@@ -49,6 +49,8 @@ src/
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
+    PlanTreeEditDialog.tsx # Include/exclude dialog behind a click in the plan tree: pattern scopes + live match count, or the exact rules an include will add
+    PlanTreeExportDialog.tsx # "Use with restic CLI": the exclude file(s) and restic command for the plan
     PlanTreePreview.tsx   # Backup-plan editor's read-only file-tree preview: included / partly included / excluded, with the reason per row — see docs/backup-plan-tree.md
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
     Spinner.tsx           # Shared animated loading spinner
@@ -66,6 +68,7 @@ src/
     theme.tsx             # ThemeProvider + useTheme(); persists to localStorage
     cron.ts               # parseCronToSimple/buildCronExpr — pure cron helpers, unit-tested
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
+    planTreeEdit.ts       # Pattern-scope options, glob escaping and edit-summary helpers for the tree's dialogs — pure, unit-tested
     planTree.ts           # Row states, reason text and row flattening for PlanTreePreview — pure, unit-tested
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
@@ -93,6 +96,7 @@ src-tauri/
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
       plan_rules.rs         # Verified port of restic's exclude matching: decides what a plan includes — see docs/backup-plan-tree.md
+      plan_edit.rs          # Turns tree clicks into verified source/pattern edits (carve-out chains, glob escaping) and renders a plan as restic CLI files — see docs/backup-plan-tree.md
       plan_tree.rs          # Commands behind the plan editor's tree preview: list folders, classify paths, streamed subtree scans — see docs/backup-plan-tree.md
       notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md

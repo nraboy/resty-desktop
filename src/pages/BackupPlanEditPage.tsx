@@ -21,6 +21,7 @@ import Modal from "../components/Modal";
 import Tooltip from "../components/Tooltip";
 import PlanTreePreview from "../components/PlanTreePreview";
 import type { TreeRulesInput } from "../lib/planTree";
+import { summarizeEdit, type EditOutcome } from "../lib/planTreeEdit";
 import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
 
 type ExcludeMode = "simple" | "expert";
@@ -325,8 +326,8 @@ export default function BackupPlanEditPage() {
     }
   }, [excludeInput, excludeItems]);
 
-  const removeExclude = useCallback(
-    (p: string) => setExcludeItems((prev) => prev.filter((x) => x !== p)),
+  const removeExcludeAt = useCallback(
+    (index: number) => setExcludeItems((prev) => prev.filter((_, i) => i !== index)),
     [],
   );
 
@@ -509,6 +510,29 @@ export default function BackupPlanEditPage() {
 
   // Sources are either/or: only the active tab's entries are saved and shown to the FDA check.
   const activePaths = sourceMode === "paths" ? paths : [];
+  // Applies an include/exclude confirmed in the preview tree: the verified new sources and
+  // patterns replace the editor's, and the previous state is kept so the change can be undone.
+  const [lastTreeEdit, setLastTreeEdit] = useState<{ summary: string; undo: () => void } | null>(null);
+  const applyTreeEdit = useCallback(
+    (o: EditOutcome) => {
+      const before = { paths, excludeItems, excludeText, excludeMode };
+      setPaths(o.sources);
+      // Expert mode keeps the user's text (comments, blank lines) — the outcome preserves it.
+      if (excludeMode === "expert") setExcludeText(o.excludes.join("\n"));
+      else setExcludeItems(o.excludes);
+      setLastTreeEdit({
+        summary: summarizeEdit(o),
+        undo: () => {
+          setPaths(before.paths);
+          setExcludeItems(before.excludeItems);
+          setExcludeText(before.excludeText);
+          setLastTreeEdit(null);
+        },
+      });
+    },
+    [paths, excludeItems, excludeText, excludeMode],
+  );
+
   // What the preview tree needs to decide what's included: the sources and every exclusion
   // the plan will pass to restic, exactly as they'd be saved.
   const treeRules = useMemo<TreeRulesInput>(
@@ -924,14 +948,16 @@ export default function BackupPlanEditPage() {
 
             {excludeItems.length > 0 && (
               <ul className="space-y-1.5 mt-2">
-                {excludeItems.map((p) => (
+                {excludeItems.map((p, i) => (
+                  // Keyed by position: patterns can legitimately repeat (a later `!x` after an
+                  // earlier one), and removal is by position too, since order is meaning here.
                   <li
-                    key={p}
+                    key={`${i}:${p}`}
                     className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
                   >
                     <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
                     <button
-                      onClick={() => removeExclude(p)}
+                      onClick={() => removeExcludeAt(i)}
                       className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
                     >
                       ×
@@ -1098,6 +1124,8 @@ export default function BackupPlanEditPage() {
       {/* Preview: what the sources and exclusions above add up to */}
       <PlanTreePreview
         rules={treeRules}
+        onApplyEdit={sourceMode === "paths" ? applyTreeEdit : undefined}
+        lastEdit={lastTreeEdit ? { summary: lastTreeEdit.summary, onUndo: lastTreeEdit.undo } : null}
         unavailableReason={
           sourceMode === "files"
             ? "The preview isn't available for plans that use path-list files yet."

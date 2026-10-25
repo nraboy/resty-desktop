@@ -294,3 +294,57 @@ fn kinds_reports_what_each_path_is() {
     assert_eq!(kinds(&paths, true), ["file", "dir", "dir", "missing"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── pattern preview ─────────────────────────────────────────────────────────
+
+fn count(root: &std::path::Path, base_excludes: &[&str], pattern: &str) -> MatchPreview {
+    let base = engine_for(root, base_excludes, &[]);
+    let mut all: Vec<&str> = base_excludes.to_vec();
+    all.push(pattern);
+    let with = engine_for(root, &all, &[]);
+    count_matches(
+        &base,
+        &with,
+        &FsProbe::default(),
+        &[root.to_str().unwrap().to_string()],
+        GENEROUS,
+        &AtomicBool::new(false),
+    )
+}
+
+#[test]
+fn a_pattern_preview_counts_newly_excluded_items_once_per_folder() {
+    let root = scratch("preview");
+    touch(&root.join("a/node_modules/x.js"));
+    touch(&root.join("a/node_modules/y.js"));
+    touch(&root.join("b/node_modules/z.js"));
+    touch(&root.join("b/keep.txt"));
+    touch(&root.join("top.log"));
+    let p = count(&root, &[], "node_modules");
+    // Two folders, not their three files.
+    assert_eq!((p.count, p.capped), (2, false));
+    assert_eq!(p.sample.len(), 2);
+
+    let p = count(&root, &[], "*.log");
+    assert_eq!(p.count, 1);
+    // Already excluded things don't count again.
+    let p = count(&root, &["node_modules"], "node_modules");
+    assert_eq!(p.count, 0);
+    let p = count(&root, &[], "/nothing/here");
+    assert_eq!(p.count, 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pattern_preview_stops_at_its_budget_and_says_so() {
+    let root = scratch("preview-budget");
+    for i in 0..600 {
+        touch(&root.join(format!("d{}/f{i}.txt", i % 7)));
+    }
+    let base = engine_for(&root, &[], &[]);
+    let with = engine_for(&root, &["*.nomatch"], &[]);
+    let tight = ScanLimits { budget: Duration::from_secs(30), max_entries: 100 };
+    let p = count_matches(&base, &with, &FsProbe::default(), &[root.to_str().unwrap().to_string()], tight, &AtomicBool::new(false));
+    assert!(p.capped && p.count == 0);
+    let _ = std::fs::remove_dir_all(&root);
+}

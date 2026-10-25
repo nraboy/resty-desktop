@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use super::cache::ExcludeFile;
+use super::plan_edit::{apply_edit, export_rules, EditAction, EditOutcome, ExportOut};
 use super::plan_rules::{
     clean_path, strip_source, Engine, FsProbe, Marker, Pattern, PlanRules, Probe, Reason, RuleInput,
 };
@@ -47,6 +48,8 @@ pub struct RuleOrigin {
     /// `None` for a pattern typed into the plan; the file's path for an exclude-file line.
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// From an `--iexclude-file`: matched case-insensitively, in a list a plain `!` can't cancel.
+    pub ignore_case: bool,
 }
 
 /// Something in the plan restic would refuse to run with, or a file we couldn't read.
@@ -145,7 +148,7 @@ pub(crate) fn build_rules(
         }
         let id = rules.len() as u32 + 1;
         rules.push(RuleInput { id, pattern: pattern.clone(), ignore_case });
-        origins.push(RuleOrigin { id, pattern, file, line });
+        origins.push(RuleOrigin { id, pattern, file, line, ignore_case });
     };
 
     for raw in &input.excludes {
@@ -411,6 +414,77 @@ pub(crate) fn scan_dir(
     out
 }
 
+// ── previewing a pattern ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchPreview {
+    /// Items that are backed up now and would be left out by the pattern (a folder counts once,
+    /// not its contents).
+    pub count: u64,
+    pub sample: Vec<String>,
+    /// The count is a lower bound: the scan stopped at its budget or its cap.
+    pub capped: bool,
+}
+
+const MATCH_CAP: u64 = 5000;
+const MATCH_SAMPLE: usize = 5;
+
+/// How many currently-included items `with` (the rules plus a new pattern) would reject that
+/// `base` doesn't: a breadth-first walk of every source folder that never enters an item either
+/// engine rejects, like restic.
+pub(crate) fn count_matches(
+    base: &Engine,
+    with: &Engine,
+    probe: &dyn Probe,
+    sources: &[String],
+    limits: ScanLimits,
+    cancel: &AtomicBool,
+) -> MatchPreview {
+    let mut out = MatchPreview { count: 0, sample: vec![], capped: false };
+    let start = Instant::now();
+    let mut scanned: u64 = 0;
+    for src in sources {
+        let is_dir = std::fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue; // a source file is exempt from patterns
+        }
+        let mut queue: VecDeque<String> = VecDeque::from([clean_path(src)]);
+        while let Some(current) = queue.pop_front() {
+            let Ok(rd) = std::fs::read_dir(&current) else { continue };
+            for ent in rd.flatten() {
+                scanned += 1;
+                if scanned & 0xFF == 0
+                    && (cancel.load(Ordering::Relaxed) || start.elapsed() > limits.budget || scanned > limits.max_entries)
+                {
+                    out.capped = true;
+                    return out;
+                }
+                let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
+                let path = if current == "/" { format!("/{name}") } else { format!("{current}/{name}") };
+                if base.judge_node(&path, probe).is_some() {
+                    continue; // already left out, with everything below it
+                }
+                if with.judge_node(&path, probe).is_some() {
+                    out.count += 1;
+                    if out.sample.len() < MATCH_SAMPLE {
+                        out.sample.push(path);
+                    }
+                    if out.count >= MATCH_CAP {
+                        out.capped = true;
+                        return out;
+                    }
+                    continue;
+                }
+                if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    queue.push_back(path);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Which scan is current. Starting a scan cancels the previous one; the frontend re-sends
 /// whatever is still unresolved, so superseding never loses work.
 #[derive(Default)]
@@ -533,6 +607,103 @@ pub async fn tree_scan_start(
         let _ = app.emit("tree:scan-done", ScanDoneEvent { scan_id });
     });
     Ok(scan_id)
+}
+
+/// Applies a click (include/exclude) to the plan's sources and patterns and returns the result —
+/// or why it can't be done. The edit is verified by the rule engine; see plan_edit.rs.
+#[tauri::command]
+pub async fn tree_plan_edit(rules: TreeRulesInput, action: EditAction) -> Result<EditOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_edit(
+            &rules,
+            &action,
+            &FsProbe::default(),
+            &|p| std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()),
+            &|name| std::env::var(name).unwrap_or_default(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "This pattern would leave out N items": a bounded scan comparing the plan with and without it.
+#[tauri::command]
+pub async fn tree_count_matches(
+    rules: TreeRulesInput,
+    pattern: String,
+    budget_ms: Option<u64>,
+) -> Result<MatchPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let pattern = pattern.trim().to_string();
+        if pattern.is_empty() || pattern.starts_with('#') {
+            return Ok(MatchPreview { count: 0, sample: vec![], capped: false });
+        }
+        Pattern::parse(&pattern).map_err(|_| format!("`{pattern}` isn't a valid pattern."))?;
+        let (base, _, _) = real_build(&rules)?;
+        let mut with_rules = rules.clone();
+        with_rules.excludes.push(pattern);
+        let (with, _, _) = real_build(&with_rules)?;
+        let limits = ScanLimits {
+            budget: Duration::from_millis(budget_ms.unwrap_or(2000).clamp(50, 30_000)),
+            max_entries: 2_000_000,
+        };
+        Ok(count_matches(&base, &with, &FsProbe::default(), base.sources(), limits, &AtomicBool::new(false)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The files and command line that reproduce this plan's include/exclude behaviour with the
+/// plain restic CLI.
+#[tauri::command]
+pub async fn tree_export(rules: TreeRulesInput) -> Result<ExportOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let built = build_rules(
+            &rules,
+            &|p| std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()),
+            &|name| std::env::var(name).unwrap_or_default(),
+        );
+        let mut out = export_rules(&built.rules);
+        for p in &built.problems {
+            out.notes.push(format!("Left out: {} ({})", p.what, p.error));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Writes the exported exclude file(s) into `dir` (created if needed), returning the paths.
+#[tauri::command]
+pub async fn tree_export_write(
+    dir: String,
+    exclude_file_name: String,
+    exclude_file: String,
+    iexclude_file_name: Option<String>,
+    iexclude_file: Option<String>,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+        let mut written = Vec::new();
+        let mut put = |name: &str, text: &str| -> Result<(), String> {
+            // Only a bare file name: this command must not write anywhere but `dir`.
+            if name.is_empty() || name.contains('/') || name.contains('\\') || name == ".." || name == "." {
+                return Err(format!("Invalid file name: {name}"));
+            }
+            let path = dir.join(name);
+            std::fs::write(&path, text).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+            written.push(path.to_string_lossy().into_owned());
+            Ok(())
+        };
+        put(&exclude_file_name, &exclude_file)?;
+        if let (Some(n), Some(t)) = (iexclude_file_name.as_deref(), iexclude_file.as_deref()) {
+            put(n, t)?;
+        }
+        Ok(written)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
