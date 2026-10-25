@@ -109,7 +109,9 @@ function StateBox({ state }: { state: DisplayState }) {
  */
 export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit, lastEdit }: Props) {
   const [supported, setSupported] = useState<boolean | null>(null);
-  const [open, setOpen] = useState(false);
+  // Open by default: the preview is the point of the card. It can still be collapsed, and nothing
+  // is read from disk until the card is open and the plan has sources.
+  const [open, setOpen] = useState(true);
   const [mode, setMode] = useState<RootMode>("sources");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [scrollTop, setScrollTop] = useState(0);

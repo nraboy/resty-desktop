@@ -80,7 +80,7 @@ folders, a per-folder time budget with a "not fully checked" state.
 
 ## The tree preview (phase 2, read-only)
 
-`components/PlanTreePreview.tsx` is a collapsible "Preview" card in the plan editor (after the
+`components/PlanTreePreview.tsx` is a "Preview" card in the plan editor (open by default, collapsible) (after the
 exclude sections). It is **additive**: the existing source/exclude editors are unchanged, and the
 card is hidden where `tree_supported` is false (Windows, until the engine handles Windows paths)
 and shows a message for plans that use path-list files.
