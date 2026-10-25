@@ -973,12 +973,12 @@ export default function SnapshotsPage() {
         onClose={() => setUnlockConfirm(false)}
       >
         <p className="text-sm text-gray-300 mb-4">
-          Remove all stale locks from this repository. Only do this if you are certain no other
-          restic process is currently running against it — unlocking an active operation can corrupt the repository.
+          Removes locks restic considers stale: older than 30 minutes, or left by a process on this
+          computer that no longer exists. Locks held by running operations are not removed.
         </p>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => setUnlockConfirm(false)}>Cancel</Button>
-          <Button variant="danger" loading={unlocking} onClick={handleUnlock}>Unlock</Button>
+          <Button variant="primary" loading={unlocking} onClick={handleUnlock}>Unlock</Button>
         </div>
       </Modal>
 

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
 use super::cache::{AppDb, BackupHandle, BackupPlan, CopyHandle, ExcludeFile, FullRepository, MasterKey, MirrorEntry, MirrorHandle, RetentionPolicy};
-use super::repo::{run_restic_blocking, run_restic_with_path};
+use super::repo::{
+    explain_lock_failure, is_lock_error, lock_retry_step, run_restic_blocking, run_restic_with_path,
+    unlock_quietly, LockRetry, LOCK_RETRIES,
+};
 use super::repo_locks::RepoLocks;
 use super::NoConsole;
 use crate::tasks::{emit_cancelling, new_operation_id, new_task_slot, OperationCtx, TaskKind, TaskOrigin, TaskProgress};
@@ -115,29 +118,38 @@ pub async fn refresh_snapshots(
     db.get_snapshots_vec(&repo_id)
 }
 
-/// Runs `run_restic_blocking`, retrying up to twice (2s apart) if the failure is restic's own
-/// "already locked" error — a residual collision with a *different* machine's or tool's genuine
-/// repo lock that `RepoLocks` (this process's own in-memory coordination — see CLAUDE.md's
-/// Concurrency section) has no visibility into. Matches `apply_retention`'s retry pattern
-/// exactly, just async (`tokio::time::sleep`) instead of sync (`std::thread::sleep`) since every
-/// caller here is an async `#[tauri::command]`. Any other error surfaces immediately — only a
-/// lock collision is worth retrying blind.
+/// Runs `run_restic_blocking`, retrying up to `LOCK_RETRIES` times if the failure is restic's
+/// own "already locked" error. The first retry is preceded by a stale-lock `restic unlock`
+/// (see `lock_retry_step`) — the common cause is a lock left by a dead process on this very
+/// machine, which never clears on its own. Anything still locked after that is a *live*
+/// lock, `RepoLocks` (this process's own in-memory coordination — see CLAUDE.md's
+/// Concurrency section) has no visibility into, so the remaining retries just wait, and a
+/// final lock error gets `LOCK_FAILURE_PREFIX`. Matches `apply_retention`'s retry pattern
+/// exactly, just async (`tokio::time::sleep`) instead of sync (`std::thread::sleep`) since
+/// every caller here is an async `#[tauri::command]`. Any other error surfaces immediately.
 async fn run_restic_blocking_retrying_on_lock(
     repo: FullRepository,
     args: Vec<String>,
     restic_path: String,
 ) -> Result<String, String> {
     let mut result = run_restic_blocking(repo.clone(), args.clone(), restic_path.clone()).await;
-    for _ in 0..2 {
-        match &result {
-            Err(e) if e.contains("already locked") => {
+    let mut retries = 0;
+    loop {
+        let is_lock = matches!(&result, Err(e) if is_lock_error(e));
+        match lock_retry_step(retries, is_lock, LOCK_RETRIES) {
+            LockRetry::GiveUp => break,
+            LockRetry::UnlockStaleThenRetry => {
+                let _ = run_restic_blocking(repo.clone(), vec!["unlock".into()], restic_path.clone()).await;
+                // Still wait: a live external lock is likelier than a stale one, and the old
+                // loop always slept before its first retry.
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                result = run_restic_blocking(repo.clone(), args.clone(), restic_path.clone()).await;
             }
-            _ => break,
+            LockRetry::WaitThenRetry => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
         }
+        retries += 1;
+        result = run_restic_blocking(repo.clone(), args.clone(), restic_path.clone()).await;
     }
-    result
+    result.map_err(|e| if is_lock_error(&e) { explain_lock_failure(&e) } else { e })
 }
 
 #[tauri::command]
@@ -650,7 +662,7 @@ pub(crate) fn classify_backup_exit(code: Option<i32>, has_snapshot: bool) -> Bac
             prefix: Some("Repository not found. Check the repository path."),
         },
         Some(11) => BackupExit::Failure {
-            prefix: Some("Could not lock the repository. Another restic process may be using it."),
+            prefix: Some(super::repo::LOCK_FAILURE_PREFIX),
         },
         Some(12) => BackupExit::Failure { prefix: Some("Wrong repository password.") },
         _ => BackupExit::Failure { prefix: None },
@@ -970,168 +982,190 @@ pub async fn execute_backup(
         use std::io::{BufRead, BufReader};
         use std::process::Stdio;
 
-        let mut cmd = std::process::Command::new(&restic_path_inner);
-        cmd.args(&args)
-            .env("RESTIC_REPOSITORY", &repo_for_spawn.path)
-            .env("RESTIC_COMPRESSION", &compression_inner);
-        // ensure_writable above already refuses a read-only repo before this closure is
-        // ever built, so plain apply_repo_password (no --no-lock) is correct here.
-        super::repo::apply_backend_env(&mut cmd, &repo_for_spawn.credentials);
-        super::repo::apply_repo_password(&mut cmd, &repo_for_spawn.password);
-        let mut child = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .no_console()
-            .augment_path()
-            .spawn()
-            .map_err(|e| format!("Failed to run restic: {e}"))?;
+        // One stale-lock unlock + one re-run if restic reports the repo locked (issue #43) —
+        // see `lock_retry_step`. Every other exit leaves via `return`, so this loops at most
+        // twice. The "started" notification/webhook already fired once, before this closure.
+        let mut lock_retries = 0u32;
+        loop {
+            let mut cmd = std::process::Command::new(&restic_path_inner);
+            cmd.args(&args)
+                .env("RESTIC_REPOSITORY", &repo_for_spawn.path)
+                .env("RESTIC_COMPRESSION", &compression_inner);
+            // ensure_writable above already refuses a read-only repo before this closure is
+            // ever built, so plain apply_repo_password (no --no-lock) is correct here.
+            super::repo::apply_backend_env(&mut cmd, &repo_for_spawn.credentials);
+            super::repo::apply_repo_password(&mut cmd, &repo_for_spawn.password);
+            let mut child = cmd
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .no_console()
+                .augment_path()
+                .spawn()
+                .map_err(|e| format!("Failed to run restic: {e}"))?;
 
-        let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
-        // Read line by line (lossy UTF-8, so an odd byte can't discard the whole capture) while
-        // rebuilding the identical raw stderr text failure messages use; JSON `error` lines
-        // are also parsed in case restic reports per-file errors on this stream.
-        let stderr_thread = std::thread::spawn(move || {
-            let mut raw = String::new();
-            let mut warns = WarningCollector::default();
-            let mut reader = BufReader::new(stderr);
-            let mut buf: Vec<u8> = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf);
-                        if let Some((item, message)) = parse_backup_error_line(line.trim()) {
-                            warns.push(item, message);
+            let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+            // Read line by line (lossy UTF-8, so an odd byte can't discard the whole capture) while
+            // rebuilding the identical raw stderr text failure messages use; JSON `error` lines
+            // are also parsed in case restic reports per-file errors on this stream.
+            let stderr_thread = std::thread::spawn(move || {
+                let mut raw = String::new();
+                let mut warns = WarningCollector::default();
+                let mut reader = BufReader::new(stderr);
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let line = String::from_utf8_lossy(&buf);
+                            if let Some((item, message)) = parse_backup_error_line(line.trim()) {
+                                warns.push(item, message);
+                            }
+                            raw.push_str(&line);
                         }
-                        raw.push_str(&line);
+                    }
+                }
+                (raw, warns)
+            });
+
+            let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
+
+            // Store child so cancel_backup can reach it.
+            *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
+
+            let reader = BufReader::new(stdout);
+            let mut summary_line: Option<String> = None;
+            let mut stdout_warns = WarningCollector::default();
+
+            // Drain to EOF unconditionally, even after a cancel is requested — the killed
+            // process closes stdout quickly on its own, and breaking early here risks missing
+            // the trailing `summary` line if the process happens to finish successfully in the
+            // same instant Stop is clicked (the reordered check below then needs summary_line
+            // to be complete for the success case, exactly like copy_snapshot/mirror_repo drain
+            // unconditionally).
+            for line in reader.lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    match v["message_type"].as_str() {
+                        Some("status") => {
+                            let progress = BackupProgress {
+                                repo_id: repo_id_inner.clone(),
+                                plan_id: plan_id_inner.clone(),
+                                percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
+                                files_done: v["files_done"].as_u64().unwrap_or(0),
+                                total_files: v["total_files"].as_u64().unwrap_or(0),
+                                bytes_done: v["bytes_done"].as_u64().unwrap_or(0),
+                                total_bytes: v["total_bytes"].as_u64().unwrap_or(0),
+                                seconds_elapsed: v["seconds_elapsed"].as_u64().unwrap_or(0),
+                                seconds_remaining: v["seconds_remaining"].as_u64(),
+                                current_files: v["current_files"]
+                                    .as_array()
+                                    .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+                                    .unwrap_or_default(),
+                            };
+                            let _ = app_inner.emit("backup:progress", &progress);
+                            task_progress_inner.emit(TaskProgress {
+                                percent_done: Some(progress.percent_done),
+                                items_done: Some(progress.files_done),
+                                items_total: Some(progress.total_files),
+                                bytes_done: Some(progress.bytes_done),
+                                bytes_total: Some(progress.total_bytes),
+                                label: None,
+                                seconds_elapsed: Some(progress.seconds_elapsed),
+                                seconds_remaining: progress.seconds_remaining,
+                                current_files: Some(progress.current_files.clone()),
+                                repo_id: None,
+                            });
+                        }
+                        Some("summary") => summary_line = Some(line),
+                        Some("error") => {
+                            if let Some((item, message)) = backup_error_fields(&v) {
+                                stdout_warns.push(item, message);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
-            (raw, warns)
-        });
 
-        let stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
+            let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
+                Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+                None => return Err("cancelled".to_string()),
+            };
+            let (stderr_str, stderr_warns) = stderr_thread.join().unwrap_or_default();
 
-        // Store child so cancel_backup can reach it.
-        *child_arc.lock().map_err(|e| e.to_string())? = Some(child);
+            let snapshot_id = summary_snapshot_id(summary_line.as_deref());
+            let exit = classify_backup_exit(status.code(), snapshot_id.is_some());
 
-        let reader = BufReader::new(stdout);
-        let mut summary_line: Option<String> = None;
-        let mut stdout_warns = WarningCollector::default();
-
-        // Drain to EOF unconditionally, even after a cancel is requested — the killed
-        // process closes stdout quickly on its own, and breaking early here risks missing
-        // the trailing `summary` line if the process happens to finish successfully in the
-        // same instant Stop is clicked (the reordered check below then needs summary_line
-        // to be complete for the success case, exactly like copy_snapshot/mirror_repo drain
-        // unconditionally).
-        for line in reader.lines() {
-            let line = line.map_err(|e| e.to_string())?;
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                match v["message_type"].as_str() {
-                    Some("status") => {
-                        let progress = BackupProgress {
-                            repo_id: repo_id_inner.clone(),
-                            plan_id: plan_id_inner.clone(),
-                            percent_done: v["percent_done"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
-                            files_done: v["files_done"].as_u64().unwrap_or(0),
-                            total_files: v["total_files"].as_u64().unwrap_or(0),
-                            bytes_done: v["bytes_done"].as_u64().unwrap_or(0),
-                            total_bytes: v["total_bytes"].as_u64().unwrap_or(0),
-                            seconds_elapsed: v["seconds_elapsed"].as_u64().unwrap_or(0),
-                            seconds_remaining: v["seconds_remaining"].as_u64(),
-                            current_files: v["current_files"]
-                                .as_array()
-                                .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
-                                .unwrap_or_default(),
-                        };
-                        let _ = app_inner.emit("backup:progress", &progress);
-                        task_progress_inner.emit(TaskProgress {
-                            percent_done: Some(progress.percent_done),
-                            items_done: Some(progress.files_done),
-                            items_total: Some(progress.total_files),
-                            bytes_done: Some(progress.bytes_done),
-                            bytes_total: Some(progress.total_bytes),
-                            label: None,
-                            seconds_elapsed: Some(progress.seconds_elapsed),
-                            seconds_remaining: progress.seconds_remaining,
-                            current_files: Some(progress.current_files.clone()),
-                            repo_id: None,
-                        });
-                    }
-                    Some("summary") => summary_line = Some(line),
-                    Some("error") => {
-                        if let Some((item, message)) = backup_error_fields(&v) {
-                            stdout_warns.push(item, message);
-                        }
-                    }
-                    _ => {}
+            // A completed exit (0, or 3 with a saved snapshot) always wins, even if `cancelled` got
+            // set in a race (e.g. Stop clicked just as restic finished) — the backup genuinely
+            // completed and must not be reported as cancelled (which would also discard a valid
+            // summary_line).
+            match exit {
+                BackupExit::Success => {
+                    return Ok(BackupOutcome {
+                        snapshot_id,
+                        warning_count: 0,
+                        missing_source_count: 0,
+                        warnings: Vec::new(),
+                        retention_skipped: false,
+                        summary_line: summary_line.unwrap_or_default(),
+                    });
                 }
+                BackupExit::Warnings => {
+                    // Prefer the structured stdout stream; stderr is the fallback, never summed
+                    // with it (restic reports each error once, so summing could only double-count).
+                    let restic_warns = if stdout_warns.total > 0 { stdout_warns } else { stderr_warns };
+                    // Stat after the run (not before): costs nothing on clean runs and can't
+                    // misreport a path that was there when restic read it.
+                    let missing = find_missing_sources(&paths_inner, &files_from_inner);
+                    let (warnings, warning_count, missing_source_count) =
+                        assemble_warnings(&missing, restic_warns, cfg!(target_os = "windows"));
+                    return Ok(BackupOutcome {
+                        snapshot_id,
+                        warning_count,
+                        missing_source_count,
+                        warnings,
+                        retention_skipped: missing_source_count > 0,
+                        summary_line: summary_line.unwrap_or_default(),
+                    });
+                }
+                BackupExit::Failure { .. } => {}
             }
-        }
 
-        let status = match child_arc.lock().map_err(|e| e.to_string())?.take() {
-            Some(mut c) => c.wait().map_err(|e| e.to_string())?,
-            None => return Err("cancelled".to_string()),
-        };
-        let (stderr_str, stderr_warns) = stderr_thread.join().unwrap_or_default();
-
-        let snapshot_id = summary_snapshot_id(summary_line.as_deref());
-        let exit = classify_backup_exit(status.code(), snapshot_id.is_some());
-
-        // A completed exit (0, or 3 with a saved snapshot) always wins, even if `cancelled` got
-        // set in a race (e.g. Stop clicked just as restic finished) — the backup genuinely
-        // completed and must not be reported as cancelled (which would also discard a valid
-        // summary_line).
-        match exit {
-            BackupExit::Success => {
-                return Ok(BackupOutcome {
-                    snapshot_id,
-                    warning_count: 0,
-                    missing_source_count: 0,
-                    warnings: Vec::new(),
-                    retention_skipped: false,
-                    summary_line: summary_line.unwrap_or_default(),
-                });
+            if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("cancelled".to_string());
             }
-            BackupExit::Warnings => {
-                // Prefer the structured stdout stream; stderr is the fallback, never summed
-                // with it (restic reports each error once, so summing could only double-count).
-                let restic_warns = if stdout_warns.total > 0 { stdout_warns } else { stderr_warns };
-                // Stat after the run (not before): costs nothing on clean runs and can't
-                // misreport a path that was there when restic read it.
-                let missing = find_missing_sources(&paths_inner, &files_from_inner);
-                let (warnings, warning_count, missing_source_count) =
-                    assemble_warnings(&missing, restic_warns, cfg!(target_os = "windows"));
-                return Ok(BackupOutcome {
-                    snapshot_id,
-                    warning_count,
-                    missing_source_count,
-                    warnings,
-                    retention_skipped: missing_source_count > 0,
-                    summary_line: summary_line.unwrap_or_default(),
-                });
+
+            // Exit 11 only (restic >= 0.17, this app's minimum): matching stderr text could re-run an
+                    // hour-long backup that failed late for an unrelated reason.
+                    let is_lock = status.code() == Some(11);
+            if lock_retry_step(lock_retries, is_lock, 1) == LockRetry::UnlockStaleThenRetry {
+                lock_retries += 1;
+                // `ensure_writable` already refused a read-only repo above, so this never runs
+                // against one.
+                unlock_quietly(&repo_for_spawn, &restic_path_inner);
+                // A Stop during the unlock can't reach a child (none is running between
+                // attempts) — it only sets the flag, so check it before re-spawning.
+                if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("cancelled".to_string());
+                }
+                continue;
             }
-            BackupExit::Failure { .. } => {}
-        }
 
-        if cancelled_arc.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("cancelled".to_string());
+            let msg = stderr_str.trim();
+            let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
+            let base = match exit {
+                BackupExit::Failure { prefix: Some(p) } => format!("{p}\n\n{base}"),
+                _ => base,
+            };
+            #[cfg(target_os = "macos")]
+            if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
+                return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
+            }
+            return Err(base);
         }
-
-        let msg = stderr_str.trim();
-        let base = if msg.is_empty() { "restic backup failed".to_string() } else { msg.to_string() };
-        let base = match exit {
-            BackupExit::Failure { prefix: Some(p) } => format!("{p}\n\n{base}"),
-            _ => base,
-        };
-        #[cfg(target_os = "macos")]
-        if base.to_lowercase().contains("permission denied") || base.to_lowercase().contains("operation not permitted") {
-            return Err(format!("{base}\n\nSome paths require Full Disk Access. Go to System Settings → Privacy & Security → Full Disk Access and add Resty Desktop."));
-        }
-        Err(base)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1961,19 +1995,27 @@ pub fn apply_retention(
     // CLAUDE.md's Concurrency section / repo_locks.rs). This is the primary fix for the
     // "repository is already locked" race (e.g. the user navigating to SnapshotsPage
     // right as this backup's retention kicks in, colliding with its background
-    // `refreshSnapshots`); the retry below is now just defense-in-depth for anything not
-    // routed through RepoLocks (an external restic/cron process).
+    // `refreshSnapshots`); the retry below is for anything not routed through RepoLocks:
+    // first it clears *stale* locks (a dead process's, e.g. issue #43), then it waits out a
+    // live external restic/cron process.
     let _wg = repo_locks.write_blocking(&repo.path);
     let mut result = run_restic_with_path(&repo, args_refs.clone(), &restic_path);
-    for _ in 0..2 {
-        match &result {
-            Err(e) if e.contains("already locked") => {
+    let mut retries = 0;
+    loop {
+        let is_lock = matches!(&result, Err(e) if is_lock_error(e));
+        match lock_retry_step(retries, is_lock, LOCK_RETRIES) {
+            LockRetry::GiveUp => break,
+            // Already past `ensure_writable` above, and `unlock` takes no `RepoLocks` guard.
+            LockRetry::UnlockStaleThenRetry => {
+                unlock_quietly(&repo, &restic_path);
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                result = run_restic_with_path(&repo, args_refs.clone(), &restic_path);
             }
-            _ => break,
+            LockRetry::WaitThenRetry => std::thread::sleep(std::time::Duration::from_secs(2)),
         }
+        retries += 1;
+        result = run_restic_with_path(&repo, args_refs.clone(), &restic_path);
     }
+    let result = result.map_err(|e| if is_lock_error(&e) { explain_lock_failure(&e) } else { e });
 
     match &result {
         Ok(_) => task_ctx.finished(),

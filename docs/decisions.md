@@ -105,6 +105,17 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `spawn_blocking`. (A former `schedule.rs::run_schedule_now` was a third caller — it was a
   foreground command, not background-spawned — and was removed as dead code: nothing in the UI
   ever invoked it.)
+- **A write op that fails on "already locked" runs plain `restic unlock` once, then retries (issue #43).**
+  The reporter's retention runs kept failing on a ~9-hour-old lock from a dead process on the same
+  machine; the old 2×2s retries could never help (a stale lock doesn't clear itself), and the only
+  other unlock was at master-password entry, which an app left unlocked in the tray never repeats.
+  Safe because plain `unlock` only removes what restic itself calls stale (>30 min old, or this host's
+  dead PID) — verified in restic's `lock_file.go`; never `--remove-all`, which would remove live locks and
+  stays a manual decision outside the app. Considered and rejected: an hourly background unlock sweep —
+  it fixes nothing until the next tick and adds steady traffic against every (often cloud) repo for a
+  problem that's rare; unlock-on-failure fixes the failing operation itself and only runs when needed.
+  All paths go through `repo::lock_retry_step` (bounded; pinned by tests), so it can't loop. Read ops
+  and copy/mirror are deliberately not covered: the next write op or the Unlock button clears the lock.
 - **`list_snapshots`, `get_snapshot_index_status`, and `get_repo_stats` don't emit on the `task`
   event bus (see Operation Event Bus)** because none of the three shells out to restic — nothing
   runs that a task could represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**,

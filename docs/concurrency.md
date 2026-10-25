@@ -41,7 +41,8 @@ and the scheduler tick). For a streaming op the guard is a local held across the
 exception to "acquired in the outer command body": since it queues and returns its `operationId`
 immediately (see Restic Integration), its guards are acquired *inside* the detached `spawn`ed task,
 right after it wins its turn on `MirrorHandle::turn` — the outer command has already returned by
-the time a guard would otherwise be needed. `restic unlock` calls (cancel paths, `unlock_app`) are
+the time a guard would otherwise be needed. `restic unlock` calls (cancel paths, `unlock_app`, and the
+unlock-once-on-"already locked" in the retry loops — see docs/restic.md "Stale locks") are
 **exempt** — they're the recovery mechanism and must never wait.
 
 `prune_repo`/`prune_all_repos` re-check `PruneHandle::cancelled` right after acquiring their

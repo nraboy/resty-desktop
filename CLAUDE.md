@@ -147,7 +147,9 @@ restic `Command` must set `.stdin(Stdio::null())` (Windows Scoop-shim spawn fail
 alongside `.no_console()`; an `async fn` `#[tauri::command]` must **never** call
 `std::process::Command` inline — always `spawn_blocking` (streaming) or `run_restic_blocking`
 (one-shot) — or it blocks a shared tokio worker and starves every other async command plus the
-`AppDb` lock. A repo can be marked **read-only** (`--no-lock` on every read op via
+`AppDb` lock. A write op or backup that fails on restic's "already locked" runs plain `restic unlock` **once**
+(stale locks only — never `--remove-all`) and retries, bounded via `repo::lock_retry_step`; see
+docs/restic.md "Stale locks" and docs/decisions.md. A repo can be marked **read-only** (`--no-lock` on every read op via
 `apply_repo_flags`); every write op instead calls `ensure_writable` and refuses outright. A stats
 refresh (`fetch_and_cache_stats`) runs restic **twice** — default mode for the restore-size figures,
 then `--mode raw-data` for the on-disk stored size (`ResticStats.raw_size`) — with the second call's
@@ -229,6 +231,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   accepted trade-off for the typical 1–3 endpoints per plan; `test_webhook` (Send Test) is
   the only path that surfaces delivery errors. Don't add fire-time retry/logging without
   treating it as a deliberate design change — see webhook.rs in docs/backend.md
+- Lock failures self-heal with a **single** plain `restic unlock` + bounded retry (issue #43) — not a
+  periodic sweep (rejected: background cloud traffic, fixes nothing until the next tick), never
+  `--remove-all`, and not for read ops or copy/mirror; every path goes through `lock_retry_step`. See
+  docs/decisions.md before widening it
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
