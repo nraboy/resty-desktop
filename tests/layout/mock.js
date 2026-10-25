@@ -82,6 +82,7 @@
     get_compression: () => "auto", get_restic_path: () => "/opt/homebrew/Cellar/restic/0.17.3/bin/restic", get_restore_path: () => "/Users/someone/Restored",
     get_db_size: () => ({ totalBytes: 123456789, reclaimableBytes: 45678901 }), check_full_disk_access: () => ({ supported: true, granted: false }),
     get_notification_settings: () => ({ started: true, successChanged: true, successUnchanged: false, failures: true, warnings: true }),
+    get_default_retention: () => ({ enabled: true, policy: { keepLast: 10, keepDaily: 7, keepWeekly: 4, keepMonthly: 12, keepYearly: 99 } }),
     list_repos: () => repos, get_repo_password: () => "pw", get_repo_credentials: () => [["B2_ACCOUNT_ID", "id"], ["B2_ACCOUNT_KEY", "key"]],
     get_repo_stats: (a) => (a.repoId === "repo-2" ? null : { total_size: 456789012345, total_file_count: 1234567, snapshots_count: 1234, raw_size: 123456789012, cached_at: now - 7200 }),
     list_snapshots: () => snapshots, get_snapshot_index_status: () => Object.fromEntries(snapshots.map((s, i) => [s.id, i % 3 === 1 ? "pending" : "complete"])),

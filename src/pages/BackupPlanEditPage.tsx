@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   checkFullDiskAccess,
+  getDefaultRetention,
   listBackupPlans,
   openFullDiskAccessSettings,
   saveBackupPlan,
@@ -14,10 +15,12 @@ import {
 import type { FullDiskAccessStatus } from "../lib/invoke";
 import type { BackupPlan, ExcludeFile, PlanWebhook, Repository, WebhookPreview, WebhookProvider } from "../lib/types";
 import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "../lib/config";
-import { isWindows, needsFullDiskAccess, parsePackSize, planReadPaths } from "../lib/utils";
+import { EMPTY_RETENTION_FIELDS, isWindows, needsFullDiskAccess, parsePackSize, parseRetention, planReadPaths, retentionToFields } from "../lib/utils";
+import type { RetentionFields as RetentionFieldValues } from "../lib/utils";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
+import RetentionFields from "../components/RetentionFields";
 import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
 
@@ -161,11 +164,9 @@ export default function BackupPlanEditPage() {
   const [excludeIfPresent, setExcludeIfPresent] = useState<string[]>([]);
   const [excludeIfPresentInput, setExcludeIfPresentInput] = useState("");
   const [excludeCaches, setExcludeCaches] = useState(false);
-  const [keepLast, setKeepLast] = useState("");
-  const [keepDaily, setKeepDaily] = useState("");
-  const [keepWeekly, setKeepWeekly] = useState("");
-  const [keepMonthly, setKeepMonthly] = useState("");
-  const [keepYearly, setKeepYearly] = useState("");
+  const [retention, setRetention] = useState<RetentionFieldValues>(EMPTY_RETENTION_FIELDS);
+  // True when the fields were seeded from Settings' default retention policy (new plans only).
+  const [retentionFromDefault, setRetentionFromDefault] = useState(false);
   const [limitUpload, setLimitUpload] = useState("");
   const [limitDownload, setLimitDownload] = useState("");
   const [packSize, setPackSize] = useState("");
@@ -227,11 +228,7 @@ export default function BackupPlanEditPage() {
             setExcludeText(plan.excludes.join("\n"));
             setExcludeIfPresent(plan.excludeIfPresent);
             setExcludeCaches(plan.excludeCaches);
-            setKeepLast(plan.retention?.keepLast?.toString() ?? "");
-            setKeepDaily(plan.retention?.keepDaily?.toString() ?? "");
-            setKeepWeekly(plan.retention?.keepWeekly?.toString() ?? "");
-            setKeepMonthly(plan.retention?.keepMonthly?.toString() ?? "");
-            setKeepYearly(plan.retention?.keepYearly?.toString() ?? "");
+            setRetention(retentionToFields(plan.retention));
             setLimitUpload(plan.limitUpload?.toString() ?? "");
             setLimitDownload(plan.limitDownload?.toString() ?? "");
             setPackSize(plan.packSize?.toString() ?? "");
@@ -241,8 +238,19 @@ export default function BackupPlanEditPage() {
           } else {
             setError("Backup plan not found.");
           }
-        } else if (allRepos.length > 0) {
-          setRepoId(allRepos[0].id);
+        } else {
+          if (allRepos.length > 0) setRepoId(allRepos[0].id);
+          // New plans only: seed retention from Settings' default policy. A failed load prefills
+          // nothing — the safe direction, since retention deletes snapshots.
+          const def = await getDefaultRetention().catch(() => null);
+          if (def?.enabled) {
+            const fields = retentionToFields(def.policy);
+            const parsed = parseRetention(fields);
+            if ("value" in parsed && parsed.value) {
+              setRetention(fields);
+              setRetentionFromDefault(true);
+            }
+          }
         }
       } catch (err: any) {
         setError(String(err));
@@ -501,10 +509,6 @@ export default function BackupPlanEditPage() {
       });
   }, [webhookModalOpen, draftProvider, previewTemplate]);
 
-  const hasRetention = [keepLast, keepDaily, keepWeekly, keepMonthly, keepYearly].some(
-    (s) => s.trim() !== "",
-  );
-
   // Sources are either/or: only the active tab's entries are saved and shown to the FDA check.
   const activePaths = sourceMode === "paths" ? paths : [];
   const activeFilesFrom = sourceMode === "files" ? filesFrom : [];
@@ -545,24 +549,8 @@ export default function BackupPlanEditPage() {
       const n = parseInt(s, 10);
       return Number.isNaN(n) ? undefined : n;
     };
-    const retention = hasRetention
-      ? {
-          keepLast: toNum(keepLast),
-          keepDaily: toNum(keepDaily),
-          keepWeekly: toNum(keepWeekly),
-          keepMonthly: toNum(keepMonthly),
-          keepYearly: toNum(keepYearly),
-        }
-      : undefined;
-    // 0 means "unset" throughout the app (restic rejects a forget with no effective policy),
-    // so a 0/negative/non-numeric count is an error here rather than a silently dead rule.
-    if (retention) {
-      const counts = Object.values(retention);
-      if (counts.every((v) => v === undefined) || counts.some((v) => v !== undefined && v < 1)) {
-        setError("Retention counts must be whole numbers of at least 1 — leave a field blank to disable it.");
-        return;
-      }
-    }
+    const parsedRetention = parseRetention(retention);
+    if ("error" in parsedRetention) { setError(parsedRetention.error); return; }
 
     setSaving(true);
     setError("");
@@ -583,7 +571,7 @@ export default function BackupPlanEditPage() {
         excludes,
         excludeIfPresent,
         excludeCaches,
-        retention,
+        retention: parsedRetention.value,
         limitUpload: toNum(limitUpload),
         limitDownload: toNum(limitDownload),
         webhooks,
@@ -1087,28 +1075,12 @@ export default function BackupPlanEditPage() {
         <p className="text-xs text-gray-500 mb-4">
           After each backup, old snapshots will be pruned. Leave all fields blank to skip pruning.
         </p>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-          {[
-            { label: "Keep last", unit: "snapshots", value: keepLast, set: setKeepLast },
-            { label: "Keep daily", unit: "days", value: keepDaily, set: setKeepDaily },
-            { label: "Keep weekly", unit: "weeks", value: keepWeekly, set: setKeepWeekly },
-            { label: "Keep monthly", unit: "months", value: keepMonthly, set: setKeepMonthly },
-            { label: "Keep yearly", unit: "years", value: keepYearly, set: setKeepYearly },
-          ].map(({ label, unit, value, set }) => (
-            <div key={label} className="flex items-center gap-3">
-              <label className="text-xs text-gray-400 w-28 flex-shrink-0">{label}</label>
-              <input
-                type="number"
-                min="0"
-                value={value}
-                onChange={(e) => set(e.target.value)}
-                placeholder="—"
-                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-              />
-              <span className="text-xs text-gray-500">{unit}</span>
-            </div>
-          ))}
-        </div>
+        <RetentionFields value={retention} onChange={setRetention} />
+        {retentionFromDefault && Object.values(retention).some((v) => v.trim() !== "") && (
+          <p className="mt-3 text-xs text-gray-500">
+            Pre-filled from your default retention policy in Settings. Clear the fields to skip pruning.
+          </p>
+        )}
       </div>
 
       {/* Bandwidth limits */}

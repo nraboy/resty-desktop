@@ -51,6 +51,7 @@ src/
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    RetentionFields.tsx   # The five `keep_*` inputs, shared by the plan editor and Settings' default retention card
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
     TruncatedText.tsx     # Text with a native `title` shown only when actually cut off; callers supply the truncation classes (bare `truncate` for free-text cells, `max-xl:truncate` for compact-only ones) — see docs/frontend.md
@@ -80,7 +81,7 @@ src/
     SchedulesPage.tsx     # List schedules; toggle/delete; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
-    SettingsPage.tsx      # Theme, tray, launch-at-login, auto-unlock, restic path, prune all, import/export, cache — see docs/frontend.md and docs/decisions.md
+    SettingsPage.tsx      # Theme, tray, launch-at-login, auto-unlock, restic path, default retention, prune all, import/export, cache — see docs/frontend.md and docs/decisions.md
 src-tauri/
   src/
     main.rs               # Calls restic_gui_lib::run()
@@ -370,9 +371,18 @@ proposing a change — several are pinned by a named test or reference a confirm
   snapshots will be removed", so it was never a deletion risk — it made every retention run fail.)
   `build_retention_args` drops zeros; every call site gates on `has_effective_retention`
   (`snapshot.rs`) rather than `is_some()`; `apply_retention` fails cleanly with no effective rule;
-  the editor rejects 0/negative counts; and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
+  the editor rejects 0/negative/decimal counts (`parseRetention`, shared with Settings' default); and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
   `> 0` test. Keep those in agreement — the Activity row waits on a `forget` op only when
-  retention will actually run. An imported plan with a hand-set zero is simply inert.
+  retention will actually run. An imported plan with a hand-set zero is simply inert; a decimal,
+  string or negative count in an import can't occur — `RetentionPolicy` is `Option<u32>`, so the
+  bundle/Backrest parse fails (whole file refused), pinned by tests in `transfer.rs`.
+- The Settings **default retention policy** (issue #48) is a **creation-time template**, off and
+  empty by default: the plan editor copies it into a *new* plan's fields and nothing reads it at
+  backup/`forget` time. Don't turn it into run-time inheritance — retention deletes snapshots, so a
+  Settings edit must never re-prune existing plans (and inheritance would need an "inherit" vs
+  "none" plan state through `apply_retention`, the scheduler and the activity reducers). Its load
+  (`load_default_retention`) fails *closed* — an error prefills nothing, unlike `notify::load`. See
+  docs/decisions.md
 - Controls use the native arrow cursor, not the web-style hand, with **no Settings toggle** (issue
   #35): a base-layer rule in `index.css` (`button, [role="button"] { cursor: default }`) overrides
   Tailwind preflight's `cursor: pointer`, no `cursor-pointer` classes remain, and the sidebar's

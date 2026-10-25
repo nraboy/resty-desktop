@@ -651,6 +651,8 @@ pub fn run() {
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,
             backup_plan::remove_backup_plan,
+            backup_plan::get_default_retention,
+            backup_plan::set_default_retention,
             // schedules
             schedule::list_schedules,
             schedule::save_schedule,

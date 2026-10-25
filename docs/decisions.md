@@ -941,6 +941,35 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   overflowed (up to 322px at 1280). Tables use `overflow-hidden`, never `overflow-x-auto`. Separate
   steps from the rest of #39 (revertable alone). See docs/frontend.md for the recipe.
 
+## Default retention policy is a creation-time template (issue #48)
+
+A Settings card ("Default Retention Policy") holds a switch plus the five `keep_*` values, stored
+as `default_retention_enabled` / `default_retention` (JSON) in `app_settings`. The plan editor
+copies them into a **new** plan's fields (`BackupPlanEditPage`'s `init`, `isNew` only) and says so
+under the fields. Nothing reads the default when a backup or `forget` runs.
+
+- **Why not live inheritance** (a plan with no retention of its own falling back to the global at
+  run time): retention deletes data, so editing one Settings value would change `forget` on every
+  inheriting plan at its next run, across all repos, without the user opening any of them. It would
+  also need a third plan state ("inherit" vs "explicitly none") threaded through
+  `has_effective_retention`, `apply_retention`, the scheduler, `activity.tsx` and
+  `BackupPlansPage.tsx`, and make exported bundles prune differently per machine. A template adds
+  none of that and keeps the save-time checks (`validate_plan_sources`, `check_retention_scope`)
+  authoritative for every plan that has retention.
+- **Off and empty by default** — no values are forced on anyone; restic doesn't force a policy and
+  neither does the GUI. The switch is what makes "is this active?" unambiguous: the inputs are
+  hidden while it's off, but the stored values are kept so turning it back on restores them.
+- **Fails closed.** `load_default_retention` returns off/empty on a DB error, missing key or bad
+  JSON, and the editor swallows a failed `getDefaultRetention`: nothing is prefilled. Notifications
+  fail open (`notify::load`) because a wrongly-silent notification is harmless; a wrongly-prefilled
+  retention policy is not.
+- **Switch saves immediately, values save explicitly.** The switch sends the *stored* policy, never
+  unsaved field edits, so flipping it can't commit half-typed numbers. "On with no rules" is allowed
+  (amber hint, prefills nothing) so the switch never has to be refused before its fields are visible.
+- Zero is unset, as everywhere (`save_default_retention` folds `Some(0)` → `None`; `parseRetention`
+  rejects 0, negatives, decimals and non-numeric text, sharing its rules and error text with the plan editor; the inputs also block `. , e + -` keystrokes). Imports need no such guard: `RetentionPolicy`
+  is `Option<u32>`, so a non-integer count fails the parse and the whole file is refused.
+
 ## Linux GPU Compatibility
 
 `src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.

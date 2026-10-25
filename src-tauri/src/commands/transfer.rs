@@ -880,6 +880,60 @@ mod tests {
         assert!(imported.use_fs_snapshot);
     }
 
+    /// A bundle plan with `retention` set to the given JSON object text.
+    fn plan_json_with_retention(retention: &str) -> String {
+        format!(
+            r#"{{"id": "p1", "name": "Daily", "repoId": "r1", "paths": ["/home"],
+                "tags": [], "excludes": [], "retention": {retention},
+                "limitUpload": null, "limitDownload": null}}"#
+        )
+    }
+
+    #[test]
+    fn import_rejects_non_integer_retention_counts() {
+        // `RetentionPolicy` fields are `Option<u32>`, so a hand-edited bundle can't smuggle in a
+        // decimal, string, exponent, negative or oversized count: the plan (and therefore the
+        // whole bundle, via `parse_bundle`) fails to deserialize instead of storing garbage.
+        for bad in [
+            r#"{"keepLast": 12.5}"#,
+            r#"{"keepDaily": "7"}"#,
+            r#"{"keepWeekly": "abc"}"#,
+            r#"{"keepMonthly": -3}"#,
+            r#"{"keepYearly": 1e2}"#,
+            r#"{"keepLast": 7.0}"#,
+            r#"{"keepLast": 99999999999}"#,
+            r#"{"keepLast": true}"#,
+        ] {
+            let json = plan_json_with_retention(bad);
+            assert!(
+                serde_json::from_str::<ExportPlan>(&json).is_err(),
+                "should have rejected retention {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_accepts_whole_number_and_null_retention_counts() {
+        let json = plan_json_with_retention(r#"{"keepLast": 7, "keepDaily": null}"#);
+        let p: ExportPlan = serde_json::from_str(&json).unwrap();
+        let r = p.retention.unwrap();
+        assert_eq!(r.keep_last, Some(7));
+        assert_eq!(r.keep_daily, None);
+        assert_eq!(r.keep_weekly, None);
+    }
+
+    #[test]
+    fn import_keeps_a_zero_retention_count_but_it_is_inert() {
+        // Zero parses (it's a valid u32) and is stored as-is, matching CLAUDE.md's "an imported
+        // plan with a hand-set zero is simply inert": nothing treats it as an effective rule.
+        let json = plan_json_with_retention(r#"{"keepLast": 0}"#);
+        let p: ExportPlan = serde_json::from_str(&json).unwrap();
+        let imported = backup_plan_from_export(&p, "n".into(), "Daily".into(), "r".into());
+        let r = imported.retention.unwrap();
+        assert_eq!(r.keep_last, Some(0));
+        assert!(!super::super::snapshot::has_effective_retention(&r));
+    }
+
     #[test]
     fn export_plan_missing_new_fields_deserializes_with_defaults() {
         // Simulates a bundle exported before this feature — no exclude_if_present /
@@ -1194,6 +1248,24 @@ mod backrest_tests {
         assert_eq!(r.keep_weekly, Some(4));
         assert_eq!(r.keep_monthly, Some(6));
         assert_eq!(r.keep_yearly, Some(2));
+    }
+
+    #[test]
+    fn backrest_rejects_non_integer_retention_counts() {
+        // Same `Option<u32>` guarantee as the Resty bundle: a decimal, string or negative count
+        // fails the parse, so the whole config is refused rather than stored with garbage.
+        for retention in [
+            r#"{"policyKeepLastN": 7.5}"#,
+            r#"{"policyKeepLastN": "7"}"#,
+            r#"{"policyKeepLastN": -1}"#,
+            r#"{"policyTimeBucketed": {"daily": 1.5}}"#,
+            r#"{"policyTimeBucketed": {"weekly": "four"}}"#,
+        ] {
+            let raw = format!(
+                r#"{{"repos": [], "plans": [{{"id": "p", "repo": "r", "paths": ["/x"], "retention": {retention}}}]}}"#
+            );
+            assert!(parse_backrest_str(&raw).is_err(), "should have rejected {retention}");
+        }
     }
 
     #[test]

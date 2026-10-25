@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DefaultRetention, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -177,6 +177,12 @@ export const getNotificationSettings = (): Promise<NotificationSettings> =>
 
 export const setNotificationSettings = (value: NotificationSettings): Promise<void> =>
   invoke("set_notification_settings", { value });
+
+export const getDefaultRetention = (): Promise<DefaultRetention> =>
+  invoke("get_default_retention");
+
+export const setDefaultRetention = (value: DefaultRetention): Promise<void> =>
+  invoke("set_default_retention", { value });
 
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });

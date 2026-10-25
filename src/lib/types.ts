@@ -290,6 +290,12 @@ export interface RetentionPolicy {
   keepYearly?: number;
 }
 
+/** Settings' default retention: a template copied into new plans, never applied at backup time. */
+export interface DefaultRetention {
+  enabled: boolean;
+  policy: RetentionPolicy;
+}
+
 export type WebhookProvider = "generic" | "discord" | "slack" | "teams" | "custom";
 
 /** Which backup lifecycle stages fire a webhook. `completed` deliberately has no
