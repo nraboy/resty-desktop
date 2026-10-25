@@ -103,6 +103,11 @@ export interface NotificationSettings {
   warnings: boolean;
 }
 
+export interface DbSize {
+  totalBytes: number;
+  reclaimableBytes: number;
+}
+
 export interface BackupHistoryEntry {
   id: string;
   repoId: string;

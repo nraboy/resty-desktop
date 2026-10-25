@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -361,18 +361,18 @@ export const describeCronExpr = (cronExpr: string): Promise<string> =>
 
 // ── cache ─────────────────────────────────────────────────────────────────
 
-export const clearBrowseCache = (): Promise<number> =>
+export const clearBrowseCache = (): Promise<DbSize> =>
   invoke("clear_browse_cache");
 
-export const cleanCache = (): Promise<[number, number]> =>
+export const cleanCache = (): Promise<[number, DbSize]> =>
   invoke("clean_cache");
 
 export const stopCleanup = (): Promise<void> => invoke("stop_cleanup");
 
-export const compressDatabase = (): Promise<number> =>
+export const compressDatabase = (): Promise<DbSize> =>
   invoke("compress_database");
 
-export const getDbSize = (): Promise<number> =>
+export const getDbSize = (): Promise<DbSize> =>
   invoke("get_db_size");
 
 export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>

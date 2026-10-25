@@ -415,6 +415,30 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   expected-to-be-slow place for that cost; Clear All Cache no longer pays it as a silent side
   effect of a button whose actual job is wiping data, not compacting the file. Run Compress Database
   afterward to reclaim the freed space. Don't re-add the `VACUUM` here.
+- **Compaction is not automatic, and issue #44 (a 100 GB `app_data.db`) was answered with a readout, not
+  a scheduled `VACUUM`.** A scheduled `VACUUM` has the same problem as the one removed above (one
+  full-file rewrite under the single `AppDb` mutex, unbatchable) plus a disk-space cost: it writes a
+  temporary copy of the live data, so it needs roughly that much free space. It also usually wouldn't
+  help — a database that big is mostly *live* `browse_cache_files` rows (one per file per indexed
+  snapshot), not free pages. So `checkpoint_and_size` returns `DbSize` (total + freelist-based
+  `reclaimable_bytes`, two O(1) header reads) and Settings shows it with a hint: compress when it's
+  worth it, otherwise "this is indexed data, reduce auto-indexing". Considered and deferred:
+  `auto_vacuum = INCREMENTAL` with `incremental_vacuum` chunks on the cleanup tick (existing databases
+  need one full `VACUUM` to convert) and deduplicating paths across snapshots (large migration). Revisit
+  incremental vacuum if the readout shows large reclaimable figures in practice.
+
+  Path dedup was analyzed in depth and parked, not rejected. The shape: a `paths` dictionary table with
+  `browse_cache_files` storing ids, rows still owned by exactly one snapshot, so the mark/drain/evict
+  and gated-status invariants carry over unchanged. Row-per-file-per-snapshot is untouched, so it shrinks
+  the file but not the row count. Real costs: unused paths need a batched sweep (no refcount triggers —
+  `INSERT OR REPLACE` skips delete triggers without `recursive_triggers`, and any trigger defeats the
+  truncate optimization `clear_cache` relies on), path ids must be interned inside each row-write
+  transaction with AUTOINCREMENT ids so a sweep can't strand or mis-point rows, indexing gets slower, and
+  the upgrade must rename-then-batch-delete the old table rather than `DROP` it at startup (a multi-GB
+  drop would block window creation). Revisit only with evidence: a measured size drop of ≥3× on a real
+  database (`COUNT(DISTINCT path)` vs `COUNT(*)`, `dbstat` per-index sizes) plus more reports like #44.
+  Storing only what changed between snapshots was ruled out — it gives rows multiple owners and
+  invalidates the cleanup/race invariants above.
 - **File search (`search_browse_files`/`search_repo_files`) uses `path LIKE '%query%'`** — the
   leading wildcard means SQLite can't use the index and does a full scan. This is a known,
   accepted cost (not an oversight): it's exactly why those two search commands are `async` +

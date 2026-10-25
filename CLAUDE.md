@@ -61,7 +61,7 @@ src/
     backends.ts           # detectBackend + credential hints for S3/B2/REST — see docs/restic.md
     invoke.ts             # Typed wrappers over tauri invoke()
     activity.tsx          # ActivityProvider: indexing, scheduler backups, stats, mirrors via the task event bus — see docs/concurrency.md
-    format.ts             # formatBytes, formatSize, formatDate, formatDuration, etc.
+    format.ts             # formatBytes, formatSize, formatDate, formatDuration, dbSizeHint (Settings DB-size hint), etc.
     config.ts             # MIN_RESTIC_MAJOR/MINOR constants for version warning
     utils.ts              # needsFullDiskAccess(paths) — macOS protected-path check
     theme.tsx             # ThemeProvider + useTheme(); persists to localStorage
@@ -303,7 +303,11 @@ proposing a change — several are pinned by a named test or reference a confirm
   regardless of row count; `VACUUM` scales with total DB size instead and would hold the same
   `AppDb` connection mutex for however long that takes, the same freeze class `clean_cache`'s old
   unbounded transaction caused. Reclaiming space is `compress_database` ("Compress Database")'s job
-  alone — see docs/decisions.md.
+  alone — see docs/decisions.md. Compaction is never automatic (issue #44, a 100 GB `app_data.db`):
+  `checkpoint_and_size` returns a `DbSize` (total + freelist-based `reclaimable_bytes`) and Settings
+  shows it with a compress-or-"that's live index data" hint (`dbSizeHint`, format.ts) instead. Path
+  deduplication and `auto_vacuum = INCREMENTAL` were analyzed and deliberately parked — don't build
+  either without the evidence named in docs/decisions.md
 - Stored repo size (`ResticStats.raw_size`) comes from `restic stats --mode raw-data`, not a `du`/filesystem walk (works for remote repos too); a failed raw-data call is non-fatal to the refresh
 - File search uses `LIKE '%query%'` (leading wildcard, no index) — accepted, not an oversight
 - `cached_at` columns are written but not read yet — kept for a future TTL feature

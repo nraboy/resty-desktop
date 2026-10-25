@@ -35,6 +35,17 @@ type MasterKeyRow = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 // ── public types (serialised to frontend) ─────────────────────────────────
 
+/// On-disk footprint of `app_data.db` (+ WAL) and how much of it a `VACUUM` could give
+/// back. `reclaimable_bytes` is the freelist (`freelist_count × page_size`) — pages
+/// SQLite has freed but not returned to the OS — so it is `0` for a database whose size
+/// is all live rows, however large.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbSize {
+    pub total_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupHistoryEntry {
@@ -2749,10 +2760,12 @@ impl AppDb {
     // ── size helper ──────────────────────────────────────────────────────────
 
     /// Checkpoint the WAL into the main file, then return the combined on-disk
-    /// size of `app_data.db` + `app_data.db-wal`. Must be called while the
-    /// `Connection` mutex is already held by the caller so no background thread
-    /// can append WAL frames between the checkpoint and the `fs::metadata` reads.
-    fn checkpoint_and_size(&self, conn: &Connection) -> u64 {
+    /// size of `app_data.db` + `app_data.db-wal`, plus the freelist-based
+    /// reclaimable estimate (two O(1) header-page reads, so no extra mutex hold of
+    /// note). Must be called while the `Connection` mutex is already held by the
+    /// caller so no background thread can append WAL frames between the checkpoint
+    /// and the `fs::metadata` reads.
+    fn checkpoint_and_size(&self, conn: &Connection) -> DbSize {
         // TRUNCATE mode moves all checkpointed frames into the main file and
         // zeros the WAL, so both files reflect the true post-operation footprint.
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -2760,12 +2773,20 @@ impl AppDb {
         let wal = std::fs::metadata(self.db_path.with_extension("db-wal"))
             .map(|m| m.len())
             .unwrap_or(0);
-        main + wal
+        let pragma = |name: &str| -> u64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0)
+        };
+        DbSize {
+            total_bytes: main + wal,
+            reclaimable_bytes: pragma("freelist_count") * pragma("page_size"),
+        }
     }
 
     /// Public entry-point for the `get_db_size` command: acquires the
     /// connection lock, checkpoints the WAL, and returns the combined size.
-    pub fn get_size(&self) -> Result<u64, String> {
+    pub fn get_size(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         Ok(self.checkpoint_and_size(&conn))
     }
@@ -2786,7 +2807,7 @@ impl AppDb {
     /// that cost — reclaiming space is deliberately its job alone, not an implicit side
     /// effect of clearing data here. Run it after this if the freed space needs to be
     /// returned to the OS.
-    pub fn clear_cache(&self) -> Result<u64, String> {
+    pub fn clear_cache(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
             "DELETE FROM browse_cache_files;
@@ -2997,7 +3018,7 @@ impl AppDb {
     }
 
     /// Remove only orphaned cache rows, leaving live caches intact, in a single
-    /// synchronous call. Returns `(rows_deleted, db_size_bytes)`. Orphans are:
+    /// synchronous call. Returns `(rows_deleted, DbSize)`. Orphans are:
     ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
     ///     exists in `repositories` (e.g. a deleted repo),
     ///   - `browse_cache_files` / `browse_cache_status` / `indexed_snapshots`
@@ -3017,7 +3038,7 @@ impl AppDb {
     /// a `pub fn` rather than `#[cfg(test)]`-gated since it's the natural non-batched
     /// building block any future non-UI caller (e.g. a CLI/debug command) would want.
     #[allow(dead_code)]
-    pub fn clean_cache(&self) -> Result<(u64, u64), String> {
+    pub fn clean_cache(&self) -> Result<(u64, DbSize), String> {
         let mut removed = self.mark_orphans()?;
         loop {
             let batch = self.drain_orphans(CLEAN_CACHE_BATCH_ROWS)?;
@@ -3034,7 +3055,7 @@ impl AppDb {
     /// Rewrite the database file to reclaim free pages, without deleting any
     /// rows. Unlike `clear_cache`, this never touches live data — it's a plain
     /// `VACUUM` for users who just want to recover disk space.
-    pub fn compress_database(&self) -> Result<u64, String> {
+    pub fn compress_database(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
         Ok(self.checkpoint_and_size(&conn))
@@ -3217,7 +3238,7 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
 }
 
 #[tauri::command]
-pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
+pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<DbSize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db = app.state::<AppDb>();
         db.clear_cache()
@@ -3337,7 +3358,7 @@ pub(crate) async fn run_cleanup(app: tauri::AppHandle, origin: TaskOrigin) -> Re
 /// (`rows_deleted`, `db_size_bytes`) are unchanged from before extraction, so the
 /// `invoke.ts` wrapper and Settings UI need no changes.
 #[tauri::command]
-pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, u64), String> {
+pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, DbSize), String> {
     let removed = run_cleanup(app.clone(), TaskOrigin::Manual).await?;
     let size = tauri::async_runtime::spawn_blocking(move || app.state::<AppDb>().get_size())
         .await
@@ -3356,12 +3377,12 @@ pub async fn stop_cleanup(
 }
 
 #[tauri::command]
-pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
+pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<DbSize, String> {
     db.get_size()
 }
 
 #[tauri::command]
-pub async fn compress_database(app: tauri::AppHandle) -> Result<u64, String> {
+pub async fn compress_database(app: tauri::AppHandle) -> Result<DbSize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db = app.state::<AppDb>();
         db.compress_database()
@@ -4791,6 +4812,36 @@ mod tests {
         assert_eq!(count_rows(&db, "repo_stats_cache"), 0);
         assert_eq!(count_rows(&db, "browse_cache_files"), 0);
         assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+    }
+
+    /// `DbSize.reclaimable_bytes` is the freelist: live rows report none, deleted rows
+    /// show up as reclaimable (clear_cache never vacuums), and `compress_database`
+    /// returns them to zero.
+    #[test]
+    fn db_size_reports_reclaimable_after_clear_and_none_after_compress() {
+        // File-backed (not `test_db()`'s in-memory/empty-path DB) so the size reads see real files.
+        let dir = std::env::temp_dir().join(format!("resty-dbsize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app_data.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        AppDb::init_schema(&conn).unwrap();
+        let db = AppDb::new(conn, path);
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(5000)).unwrap();
+
+        assert_eq!(db.get_size().unwrap().reclaimable_bytes, 0);
+
+        let cleared = db.clear_cache().unwrap();
+        assert!(cleared.reclaimable_bytes > 0, "freed pages should be on the freelist");
+        assert!(cleared.reclaimable_bytes <= cleared.total_bytes);
+
+        let compressed = db.compress_database().unwrap();
+        assert_eq!(compressed.reclaimable_bytes, 0);
+        assert!(compressed.total_bytes < cleared.total_bytes);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

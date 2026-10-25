@@ -3,8 +3,8 @@ import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getNotificationSettings, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setLaunchAtLogin, setNotificationSettings, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { NotificationSettings } from "../lib/types";
-import { formatBytes } from "../lib/format";
+import type { DbSize, NotificationSettings } from "../lib/types";
+import { dbSizeHint, formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import { useActivity } from "../lib/activity";
 import type { Theme } from "../lib/theme";
@@ -47,7 +47,7 @@ export default function SettingsPage() {
   const [cleanedCount, setCleanedCount] = useState<number | null>(null);
   const [compressing, setCompressing] = useState(false);
   const [compressed, setCompressed] = useState(false);
-  const [dbSize, setDbSize] = useState<number | null>(null);
+  const [dbSize, setDbSize] = useState<DbSize | null>(null);
   // Shared by all three Application Cache buttons below — each had a try/finally with no
   // catch, so a failed clear/clean/compress was previously invisible.
   const [cacheOpError, setCacheOpError] = useState("");
@@ -425,6 +425,8 @@ export default function SettingsPage() {
       setChangingPassword(false);
     }
   };
+
+  const dbHint = dbSize ? dbSizeHint(dbSize) : null;
 
   return (
     <div className="p-6">
@@ -1103,7 +1105,26 @@ export default function SettingsPage() {
         )}
         {cacheOpError && <p className="text-sm text-red-300 mt-3">{cacheOpError}</p>}
         {dbSize !== null && (
-          <p className="text-xs text-gray-500 mt-3">Current DB Size: {formatBytes(dbSize)}</p>
+          <>
+            <p className="text-xs text-gray-500 mt-3">
+              Current DB Size: {formatBytes(dbSize.totalBytes)}
+              {dbSize.reclaimableBytes > 0 && ` · ${formatBytes(dbSize.reclaimableBytes)} reclaimable`}
+            </p>
+            {dbHint?.kind === "compress" && (
+              <p className="text-xs text-amber-400 mt-1">
+                Compress Database can reclaim about {formatBytes(dbHint.reclaimableBytes)}. It needs
+                about {formatBytes(dbHint.neededBytes)} of free disk space while it runs and pauses
+                other app activity until it finishes.
+              </p>
+            )}
+            {dbHint?.kind === "large" && (
+              <p className="text-xs text-gray-500 mt-1">
+                This size is indexed file data, so Compress Database won't shrink it. Turning off
+                auto-indexing, or indexing only the snapshots you need to browse or search, keeps it
+                smaller.
+              </p>
+            )}
+          </>
         )}
       </div>
 
