@@ -56,6 +56,9 @@ interface Props {
   onApplyEdit?: (outcome: EditOutcome) => void;
   /** The last edit made from the tree, with a way to take it back. */
   lastEdit?: { summary: string; onUndo: () => void } | null;
+  /** False while the preview's tab is hidden: nothing is loaded or scanned until it's shown
+   * (the component stays mounted so its state survives a tab switch). Defaults to true. */
+  active?: boolean;
 }
 
 const STATE_LABEL: Record<DisplayState, string> = {
@@ -107,7 +110,7 @@ function StateBox({ state }: { state: DisplayState }) {
  * cheap, and subtree scans (is anything inside excluded?) run in the backend only for the
  * included folders you can see.
  */
-export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit, lastEdit }: Props) {
+export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit, lastEdit, active = true }: Props) {
   const [supported, setSupported] = useState<boolean | null>(null);
   // Open by default: the preview is the point of the card. It can still be collapsed, and nothing
   // is read from disk until the card is open and the plan has sources.
@@ -263,9 +266,9 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
 
   // Start (and restart on any change of rules or roots) once the preview is open.
   useEffect(() => {
-    if (!open || !supported) return;
+    if (!open || !supported || !active) return;
     refresh();
-  }, [open, supported, activeKey, mode, refresh]);
+  }, [open, supported, active, activeKey, mode, refresh]);
 
   // Cancel any running scan when the component goes away.
   useEffect(
@@ -279,7 +282,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   // ── streamed scan results ─────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!open || !supported) return;
+    if (!open || !supported || !active) return;
     let buffer: ScanEventPayload[] = [];
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -308,7 +311,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
       unlisten?.();
       clearInterval(timer);
     };
-  }, [open, supported]);
+  }, [open, supported, active]);
 
   // ── what to render ────────────────────────────────────────────────────────
 
@@ -319,7 +322,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   // supersedes the running one in the backend, so everything still unresolved is re-sent.
   const scanKey = `${start}:${end}:${rows.length}:${scans.current.size}:${verdicts.current.size}`;
   useEffect(() => {
-    if (!open || !supported) return;
+    if (!open || !supported || !active) return;
     if (scanTimer.current) clearTimeout(scanTimer.current);
     scanTimer.current = setTimeout(async () => {
       const gen = generation.current;
@@ -346,7 +349,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     };
     // `rows` is derived from the refs, so `scanKey` stands in for it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, supported, scanKey]);
+  }, [open, supported, active, scanKey]);
 
   const toggle = (path: string) => {
     setExpanded((prev) => {

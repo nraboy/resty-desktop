@@ -49,6 +49,8 @@ src/
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
+    plan/                 # The plan editor's pieces: PlanHeader (editable title, repo, actions), PlanTabs (accessible tablist), FilesTab (SourcesCard, ExcludeCard, MarkersCard + the preview), RetentionTab, AdvancedTab (+ WebhooksCard), TagsTab
+    SegmentedToggle.tsx   # Bordered two/three-way switch used inside cards
     PlanTreeEditDialog.tsx # Include/exclude dialog behind a click in the plan tree: pattern scopes + live match count, or the exact rules an include will add
     PlanTreeExportDialog.tsx # "Use with restic CLI": the exclude file(s) and restic command for the plan
     PlanTreePreview.tsx   # Backup-plan editor's read-only file-tree preview: included / partly included / excluded, with the reason per row — see docs/backup-plan-tree.md
@@ -69,6 +71,7 @@ src/
     cron.ts               # parseCronToSimple/buildCronExpr — pure cron helpers, unit-tested
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
     planTreeEdit.ts       # Pattern-scope options, glob escaping and edit-summary helpers for the tree's dialogs — pure, unit-tested
+    planForm.ts           # The plan editor's form as pure functions: state, load a plan, validate (naming the tab an error belongs to), build the plan, tab summaries — unit-tested
     planTree.ts           # Row states, reason text and row flattening for PlanTreePreview — pure, unit-tested
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
@@ -79,7 +82,7 @@ src/
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
-    BackupPlanEditPage.tsx # Create/edit plan: sources (Paths | List files tabs, `--files-from`), tags, excludes (Simple | Expert) + exclude pattern files (`--(i)exclude-file`), retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
+    BackupPlanEditPage.tsx # Create/edit plan shell: loads/saves the form (lib/planForm.ts), sticky header (editable name h1, repository, Save/Cancel/Delete) and Files | Retention | Advanced | Tags tabs (components/plan/) — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
