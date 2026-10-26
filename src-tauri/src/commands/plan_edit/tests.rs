@@ -367,7 +367,7 @@ fn windows_adds_and_removes_sources_in_the_native_spelling() {
 }
 
 #[test]
-fn windows_export_quotes_with_double_quotes_and_writes_slash_patterns() {
+fn windows_export_quotes_for_powershell_and_writes_slash_patterns() {
     let mut i = win_input(&["C:\\Program Files\\App", "D:\\data"], &["node_modules", "C:/s/cost$5"]);
     i.exclude_if_present = vec![".nobackup".into()];
     let built = build_rules(&i, &no_read, &no_env);
@@ -375,10 +375,53 @@ fn windows_export_quotes_with_double_quotes_and_writes_slash_patterns() {
     assert_eq!(
         out.command,
         "restic backup --exclude-file restic-excludes.txt --exclude-if-present .nobackup \
-         \"C:\\Program Files\\App\" D:\\data"
+         'C:\\Program Files\\App' D:\\data"
     );
+    assert!(out.notes.iter().any(|n| n.contains("PowerShell")));
     let lines: Vec<&str> = out.exclude_file.lines().filter(|l| !l.starts_with('#')).collect();
     assert_eq!(lines, ["node_modules", "C:/s/cost$$5"]);
+}
+
+#[test]
+fn windows_export_never_lets_powershell_expand_or_split_a_name() {
+    // `$(…)`, `$var`, a backtick, `%VAR%`, `,` and a leading `@` all do something in a shell; inside
+    // PowerShell single quotes none of them does, and a `'` is doubled.
+    let names = [
+        "C:\\x\\$(calc)",
+        "C:\\x\\$env:USERNAME",
+        "C:\\x\\a`b",
+        "C:\\x\\%TEMP%",
+        "C:\\x\\a,b",
+        "C:\\x\\it's",
+    ];
+    let i = win_input(&names, &[]);
+    let out = export_rules(&build_rules(&i, &no_read, &no_env).rules);
+    assert_eq!(
+        out.command,
+        "restic backup 'C:\\x\\$(calc)' 'C:\\x\\$env:USERNAME' 'C:\\x\\a`b' 'C:\\x\\%TEMP%' 'C:\\x\\a,b' 'C:\\x\\it''s'"
+    );
+}
+
+#[test]
+fn an_argument_no_shell_can_carry_safely_leaves_the_command_out() {
+    // A double quote (hand-typed marker, Windows) or a control character (any OS): no command,
+    // with a note naming the culprit — but the exclude file is still produced.
+    let mut i = win_input(&["C:\\s"], &["node_modules"]);
+    i.exclude_if_present = vec!["we\"ird".into()];
+    let out = export_rules(&build_rules(&i, &no_read, &no_env).rules);
+    assert_eq!(out.command, "");
+    assert!(out.notes.iter().any(|n| n.contains("No command is shown") && n.contains("we\\\"ird")));
+    assert!(out.exclude_file.contains("node_modules"));
+
+    let out = export_rules(&build_rules(&input(&["/a\nb"], &[]), &no_read, &no_env).rules);
+    assert_eq!(out.command, "");
+    assert!(out.notes.iter().any(|n| n.contains("No command is shown") && n.contains("/a\\nb")));
+
+    // The Unix quote handles a `"` fine.
+    let mut u = input(&["/s"], &[]);
+    u.exclude_if_present = vec!["we\"ird".into()];
+    let out = export_rules(&build_rules(&u, &no_read, &no_env).rules);
+    assert_eq!(out.command, "restic backup --exclude-if-present 'we\"ird' /s");
 }
 
 #[test]

@@ -66,20 +66,22 @@ export default function PlanTreeExportDialog({ open, rules, onClose }: Props) {
         {data && (
           <>
             <p className="text-sm text-gray-400">
-              Save the file{data.iexcludeFile ? "s" : ""} below next to where you run the command; restic then includes exactly what
+              Save the file{data.iexcludeFile ? "s" : ""} below next to where you run restic; it then includes exactly what
               this plan does.
             </p>
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-500">Command</span>
-                <button type="button" onClick={copy} className="text-xs text-gray-400 hover:text-gray-50">
-                  {copied ? "Copied" : "Copy"}
-                </button>
+            {data.command && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-gray-500">Command</span>
+                  <button type="button" onClick={copy} className="text-xs text-gray-400 hover:text-gray-50">
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <pre className="text-xs font-mono text-gray-300 bg-gray-800 border border-gray-700 rounded-lg p-3 whitespace-pre-wrap break-all select-text">
+                  {data.command}
+                </pre>
               </div>
-              <pre className="text-xs font-mono text-gray-300 bg-gray-800 border border-gray-700 rounded-lg p-3 whitespace-pre-wrap break-all select-text">
-                {data.command}
-              </pre>
-            </div>
+            )}
             <details>
               <summary className="text-xs text-gray-400 cursor-default">{data.excludeFileName}</summary>
               <pre className="mt-1 text-xs font-mono text-gray-300 bg-gray-800 border border-gray-700 rounded-lg p-3 max-h-56 overflow-auto select-text">

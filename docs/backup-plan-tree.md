@@ -58,7 +58,13 @@ selects it, and the tree/edit commands take the app's native style. On Windows:
 - Drive-letter patterns match like restic's "relative-style" patterns (a window of components, not
   anchored to the root); a pattern such as `C:/` hits restic's empty-part-as-`**` quirk, which is
   mirrored. **UNC paths (`\\server\share`) are not supported.**
-- CLI export quotes with double quotes on Windows (backslash is plain) and single quotes on Unix.
+- CLI export (`shell_quote`) targets `sh` on Unix and **PowerShell** on Windows, and uses single
+  quotes in both (fully literal: no `$(…)`, `$var`, backtick or `%` expansion — double quotes would
+  let a folder named `$(calc)`, e.g. from an imported plan, run when the command is pasted). Only a
+  conservative set of plain characters stays unquoted (not `,`, `@`, `%`, `=` on Windows). An
+  argument with a control character, or a `"` on Windows, can't be quoted safely: the command is
+  then omitted with a note and only the exclude file(s) are offered. cmd.exe users are told to swap
+  the quotes.
 - Case: matching stays case-sensitive (restic's behaviour); only `--iexclude*` rules fold case.
 
 The Windows rules are pure string logic, so they are unit-tested on every OS, including restic's

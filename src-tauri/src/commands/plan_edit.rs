@@ -298,21 +298,33 @@ fn file_line(pattern: &str) -> String {
     pattern.replace('$', "$$")
 }
 
-/// Quotes one argument for the shell the command is pasted into: single quotes for a POSIX shell;
-/// double quotes on Windows (cmd and PowerShell both honour them, and a Windows path cannot
-/// contain one).
-fn shell_quote(style: PathStyle, s: &str) -> String {
-    // A backslash is an ordinary character in a Windows path, but the shell's escape on Unix.
-    let plain = |c: char| {
-        c.is_ascii_alphanumeric() || "/._-:=+@%,".contains(c) || (style == PathStyle::Windows && c == '\\')
+/// Quotes one argument so the shell the command is pasted into reads it back as exactly `s`, or
+/// `None` when no quoting can promise that. The shell is POSIX `sh` on Unix and PowerShell on
+/// Windows; in both, single quotes are fully literal (no `$`, backtick or `%` expansion), so
+/// everything but a conservative set of plain characters goes inside them, with `'` doubled
+/// (`''`) in PowerShell and written `'\''` in `sh`. Plain characters exclude the ones PowerShell
+/// treats specially even unquoted (`,` builds an array, a leading `@` splats, `%` and `$` expand).
+///
+/// A control character (newline, escape…) is refused everywhere — pasted into a terminal it can do
+/// more than name a file — and so is `"` on Windows, which Windows PowerShell mangles when passing
+/// an argument to a native program. The caller then omits the command and says why. A Windows path
+/// can't contain `"`; only a hand-typed marker name could.
+fn shell_quote(style: PathStyle, s: &str) -> Option<String> {
+    if s.chars().any(|c| c.is_control() || (style == PathStyle::Windows && c == '"')) {
+        return None;
+    }
+    let plain = |c: char| match style {
+        // A backslash is the shell's escape on Unix, an ordinary path character on Windows.
+        PathStyle::Unix => c.is_ascii_alphanumeric() || "/._-:=+@%,".contains(c),
+        PathStyle::Windows => c.is_ascii_alphanumeric() || "/\\._-:+".contains(c),
     };
     if !s.is_empty() && s.chars().all(plain) {
-        return s.to_string();
+        return Some(s.to_string());
     }
-    match style {
+    Some(match style {
         PathStyle::Unix => format!("'{}'", s.replace('\'', "'\\''")),
-        PathStyle::Windows => format!("\"{s}\""),
-    }
+        PathStyle::Windows => format!("'{}'", s.replace('\'', "''")),
+    })
 }
 
 /// Renders a plan's rules as restic CLI inputs: one ordered `--exclude-file` (flag patterns and
@@ -350,15 +362,22 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
         cmd.push("--iexclude-file".to_string());
         cmd.push(IEXCLUDE_FILE_NAME.to_string());
     }
+    // An argument that can't be quoted safely (see `shell_quote`) leaves the command out rather
+    // than printing one that does something other than what the plan says.
+    let mut unquotable: Vec<String> = Vec::new();
+    let mut quote = |arg: &str, cmd: &mut Vec<String>| match shell_quote(rules.style, arg) {
+        Some(q) => cmd.push(q),
+        None => unquotable.push(arg.escape_debug().to_string()),
+    };
     for m in &rules.markers {
         cmd.push("--exclude-if-present".to_string());
-        cmd.push(shell_quote(rules.style, m));
+        quote(m, &mut cmd);
     }
     if rules.exclude_caches {
         cmd.push("--exclude-caches".to_string());
     }
     for s in &rules.sources {
-        cmd.push(shell_quote(rules.style, &rules.style.to_native(&rules.style.clean(s))));
+        quote(&rules.style.to_native(&rules.style.clean(s)), &mut cmd);
     }
 
     let mut notes = vec![
@@ -368,12 +387,24 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     if n_ci > 0 {
         notes.push("Case-insensitive patterns are in their own file because restic keeps them in a separate list.".to_string());
     }
+    if rules.style == PathStyle::Windows {
+        notes.push("The command is written for PowerShell. In cmd.exe, replace the single quotes with double quotes.".to_string());
+    }
+    let command = if unquotable.is_empty() {
+        cmd.join(" ")
+    } else {
+        notes.push(format!(
+            "No command is shown: {} can't be written safely for a shell (it contains a control character or a double quote). Use the exclude file and pass the sources to restic yourself.",
+            unquotable.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ")
+        ));
+        String::new()
+    };
     ExportOut {
         exclude_file_name: EXCLUDE_FILE_NAME.to_string(),
         exclude_file: cs,
         iexclude_file_name: (n_ci > 0).then(|| IEXCLUDE_FILE_NAME.to_string()),
         iexclude_file: (n_ci > 0).then_some(ci),
-        command: cmd.join(" "),
+        command,
         notes,
     }
 }
