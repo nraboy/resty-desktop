@@ -11,6 +11,7 @@ import ContextMenu from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import Spinner from "../components/Spinner";
 import { SearchIcon, RestoreIcon } from "../components/icons";
 import { APPEND_ONLY_TITLE } from "../lib/backends";
@@ -396,8 +397,8 @@ export default function BrowsePage() {
                 </th>
               )}
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
-              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Size</th>
-              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32">Modified</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32 min-w-[8rem]">Size</th>
+              <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-32 min-w-[8rem]">Modified</th>
               <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-24 wide:w-auto text-right">Actions</th>
             </tr>
           </thead>
@@ -428,25 +429,25 @@ export default function BrowsePage() {
                       />
                     </td>
                   )}
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-2.5 max-w-0 w-full">
                     <div className="flex items-center gap-2">
                       <FileIcon type={entry.type} />
                       {entry.type === "dir" ? (
                         <button
                           onClick={() => enterDir(entry)}
-                          className="text-gray-200 hover:text-gray-50 transition-colors text-left"
+                          className="text-gray-200 hover:text-gray-50 transition-colors text-left min-w-0 overflow-hidden"
                         >
-                          {entry.name}
+                          <TruncatedText as="span" text={entry.name} className="block truncate" />
                         </button>
                       ) : (
-                        <span className="text-gray-300">{entry.name}</span>
+                        <TruncatedText as="span" text={entry.name} className="text-gray-300 min-w-0 truncate" />
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-2.5 text-gray-500 text-xs">
+                  <td className="px-4 py-2.5 text-gray-500 text-xs min-w-[8rem] whitespace-nowrap">
                     {entry.type === "dir" ? "—" : formatSize(entry.size)}
                   </td>
-                  <td className="px-4 py-2.5 text-gray-500 text-xs">
+                  <td className="px-4 py-2.5 text-gray-500 text-xs min-w-[8rem] whitespace-nowrap">
                     {entry.mtime ? formatDateOnly(entry.mtime) : "—"}
                   </td>
                   <td className="px-4 py-2.5 text-right">

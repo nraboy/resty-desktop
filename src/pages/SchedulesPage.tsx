@@ -8,6 +8,7 @@ import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import { TrashIcon, PencilIcon, WarningIcon } from "../components/icons";
 
 export default function SchedulesPage() {
@@ -160,7 +161,7 @@ export default function SchedulesPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Schedules</h1>
           <p className="text-sm text-gray-500 mt-0.5">
@@ -257,7 +258,7 @@ export default function SchedulesPage() {
                 className="group flex-1 min-w-0"
                 onClick={() => selectMode ? toggleSelectOne(sched.id) : navigate(`/schedules/${sched.id}`)}
               >
-                <p className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate">{sched.name}</p>
+                <TruncatedText as="p" text={sched.name} className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate" />
                 <p className="text-xs text-gray-500 mt-0.5">
                   {sched.cronExpr}
                   {" · "}

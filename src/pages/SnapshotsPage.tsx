@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, deleteSnapshots, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
@@ -12,6 +12,7 @@ import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Tooltip from "../components/Tooltip";
+import TruncatedText from "../components/TruncatedText";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
 import EmptyState from "../components/EmptyState";
@@ -77,7 +78,6 @@ export default function SnapshotsPage() {
   const [multiDeleteOpen, setMultiDeleteOpen] = useState(false);
   const [multiDeletePrune, setMultiDeletePrune] = useState(true);
   const [multiDeleting, setMultiDeleting] = useState(false);
-  const [multiDeleteProgress, setMultiDeleteProgress] = useState({ current: 0, total: 0 });
   const [multiDeleteDone, setMultiDeleteDone] = useState(false);
   const [multiDeleteError, setMultiDeleteError] = useState("");
 
@@ -145,6 +145,10 @@ export default function SnapshotsPage() {
         setAllRepos(repos);
         const found = repos.find((r) => r.id === repoId) ?? null;
         setRepo(found);
+        // Manual deletes follow the repo's prune choice; the user can still tick the box.
+        // Set both ways so moving from a deferred repo to a normal one restores the default.
+        setPruneOnDelete(!found?.deferPrune);
+        setMultiDeletePrune(!found?.deferPrune);
         // No match means load() (which needs a repo) will never run to clear `loading`, so
         // release it here — same class as the catch below — to reach "Repository not found".
         if (!found) setLoading(false);
@@ -336,23 +340,15 @@ export default function SnapshotsPage() {
     const ids = Array.from(selectedIds);
     setMultiDeleting(true);
     setMultiDeleteError("");
-    setMultiDeleteProgress({ current: 0, total: ids.length });
-    for (let i = 0; i < ids.length; i++) {
-      setMultiDeleteProgress({ current: i, total: ids.length });
-      try {
-        await deleteSnapshot(repoId, ids[i], multiDeletePrune);
-      } catch (err: any) {
-        setMultiDeleteError(String(err));
-        setMultiDeleting(false);
-        // ids[0..i) were already deleted: drop them from the selection so a retry doesn't
-        // re-target gone snapshots, and reload (a cache read — delete_snapshot updates it) so
-        // they leave the list. Mirrors BackupPlansPage/SchedulesPage's identical error path.
-        setSelectedIds(new Set(ids.slice(i)));
-        await load();
-        return;
-      }
+    // One `restic forget id1 id2 …` (+ one `--prune`): restic checks every id before removing
+    // any, so a failure leaves the selection intact and nothing deleted.
+    try {
+      await deleteSnapshots(repoId, ids, multiDeletePrune);
+    } catch (err: any) {
+      setMultiDeleteError(String(err));
+      setMultiDeleting(false);
+      return;
     }
-    setMultiDeleteProgress({ current: ids.length, total: ids.length });
     setMultiDeleting(false);
     setMultiDeleteDone(true);
     setSelectedIds(new Set());
@@ -488,15 +484,15 @@ export default function SnapshotsPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
+        <div className="min-w-0">
           <h1 className="text-xl font-semibold text-gray-100">Snapshots</h1>
           {repo && (
-            <div className="flex items-center gap-2 mt-0.5">
-              <p className="text-sm text-gray-500">{repo.name}</p>
+            <div className="flex items-center gap-2 mt-0.5 min-w-0">
+              <TruncatedText as="p" text={repo.name} className="text-sm text-gray-500 truncate" />
               {repo.readOnly && (
                 <span
-                  className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                  className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0"
                   title="Every restic call uses --no-lock; writing operations are disabled."
                 >
                   Read-only
@@ -513,13 +509,13 @@ export default function SnapshotsPage() {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-shrink-0">
           <Input
             placeholder="Filter snapshots…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onClear={() => setFilter("")}
-            className="w-56"
+            className="w-56 max-xl:w-44"
           />
           {refreshing && <span className="text-xs text-gray-500">Updating…</span>}
           {selectMode ? (
@@ -613,10 +609,10 @@ export default function SnapshotsPage() {
                   )}
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">ID</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
-                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Host</th>
+                  <th className="max-mid:hidden px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[18%]">Host</th>
                   <th className="hidden wide:table-cell px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider text-right">Size</th>
                   <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Paths</th>
-                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Tags</th>
+                  <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[32%]">Tags</th>
                   {!selectMode && (
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-20 wide:w-auto text-right">Actions</th>
                   )}
@@ -662,14 +658,16 @@ export default function SnapshotsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(snap.time)}</td>
-                    <td className="px-4 py-3 text-gray-400">{snap.hostname}</td>
+                    <td className="max-mid:hidden px-4 py-3 text-gray-400 max-w-0 w-[18%]">
+                      <TruncatedText text={snap.hostname} className="truncate" />
+                    </td>
                     <td
                       className="hidden wide:table-cell px-4 py-3 text-gray-400 whitespace-nowrap text-right tabular-nums"
                       title="Bytes restic processed when this snapshot was created. Snapshot Stats reports restore size, which can differ."
                     >
                       {formatSize(snap.size ?? undefined)}
                     </td>
-                    <td className="px-4 py-3 text-gray-400 max-w-xs">
+                    <td className="px-4 py-3 text-gray-400 max-w-xs whitespace-nowrap">
                       <Tooltip
                         title="Backup Paths"
                         content={(() => {
@@ -689,14 +687,14 @@ export default function SnapshotsPage() {
                         </div>
                       </Tooltip>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 max-w-0 w-[32%]">
                       <div className="flex flex-wrap gap-1">
                         {(snap.tags ?? []).map((tag) => (
                           <span
                             key={tag}
-                            className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full"
+                            className="inline-flex items-center gap-1 text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full max-w-full"
                           >
-                            {tag}
+                            <TruncatedText as="span" text={tag} className="truncate min-w-0" />
                             {!selectMode && (
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleRemoveTag(snap, tag); }}
@@ -857,19 +855,14 @@ export default function SnapshotsPage() {
                 className="rounded bg-gray-700 border-gray-600"
                 disabled={multiDeleting}
               />
-              Also run <span className="font-mono text-xs">restic prune</span> after each forget
+              Also run <span className="font-mono text-xs">restic prune</span> once after forgetting
             </label>
             {multiDeleting && (
               <div className="mb-4">
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <span>Deleting snapshot {multiDeleteProgress.current + 1} of {multiDeleteProgress.total}…</span>
-                </div>
-                <div className="w-full bg-gray-800 rounded-full h-2">
-                  <div
-                    className="bg-red-500 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${Math.round((multiDeleteProgress.current / multiDeleteProgress.total) * 100)}%` }}
-                  />
-                </div>
+                <p className="text-xs text-gray-400 mb-1">
+                  Deleting {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}…
+                </p>
+                <ProgressBar indeterminate colorClass="bg-red-500" heightClass="h-2" />
               </div>
             )}
             <div className="flex justify-end gap-2">
@@ -991,12 +984,12 @@ export default function SnapshotsPage() {
         onClose={() => setUnlockConfirm(false)}
       >
         <p className="text-sm text-gray-300 mb-4">
-          Remove all stale locks from this repository. Only do this if you are certain no other
-          restic process is currently running against it — unlocking an active operation can corrupt the repository.
+          Removes locks restic considers stale: older than 30 minutes, or left by a process on this
+          computer that no longer exists. Locks held by running operations are not removed.
         </p>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => setUnlockConfirm(false)}>Cancel</Button>
-          <Button variant="danger" loading={unlocking} onClick={handleUnlock}>Unlock</Button>
+          <Button variant="primary" loading={unlocking} onClick={handleUnlock}>Unlock</Button>
         </div>
       </Modal>
 

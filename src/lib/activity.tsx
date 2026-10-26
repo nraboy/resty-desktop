@@ -60,8 +60,9 @@
 // whole lifecycle via `origin: "scheduler"`: `kind:"backup"` (started/progress/finished, targetId
 // = plan_id) for the transfer phase, then `kind:"forget"` (started/finished, same targetId) for
 // retention — see `reduceSchedulerBackup`. A plan with no retention configured never gets a
-// `forget` op (scheduler.rs only emits one when the plan has ≥1 keep_* flag set), so that case is
-// dismissed by the plan-lookup effect below rather than an event, since only that lookup knows
+// `forget` op (scheduler.rs only emits one when `has_effective_retention` holds and the backup
+// didn't set `retentionSkipped`), so that case is dismissed by the plan-lookup effect below
+// rather than an event, since only that lookup knows
 // whether retention is actually configured for the plan. The row shows the plan name only (the
 // bus has no schedule name) — resolved the same lazy, cached-DB-read way `indexBatchRepoNames`
 // resolves repo names.
@@ -276,7 +277,10 @@ export const initialStatsOpsState: StatsOpsState = { inFlight: new Map(), failed
 /** Pure reducer over `stats`-kind task events. Exported for a unit test (see
  *  activity.test.ts) rather than only exercised through the provider's effect. */
 export function reduceStatsOps(state: StatsOpsState, event: TaskEvent): StatsOpsState {
-  if (event.kind !== "stats") return state;
+  // Repo-level refreshes only (fetch_and_cache_stats emits no targetId). get_snapshot_stats also
+  // emits kind "stats" but carries the snapshot id, and the Snapshot Stats modal reads that
+  // command's own promise — it must not spin or mark the whole repo row as failed.
+  if (event.kind !== "stats" || event.targetId) return state;
   const inFlight = new Map(state.inFlight);
   const failed = new Set(state.failed);
   switch (event.phase) {

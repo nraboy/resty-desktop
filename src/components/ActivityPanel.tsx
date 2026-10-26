@@ -63,7 +63,7 @@ import { useEffect, useRef, useState } from "react";
 import { useActivity, activeTaskCount, standaloneSnapshotIndexes } from "../lib/activity";
 import { cancelBackup, cancelIndexBatch, cancelMirror, cancelPrune, stopCleanup } from "../lib/invoke";
 import { CANCELLED_BACKUP_ERROR } from "../lib/types";
-import { formatBytes, formatRelative, isOverdue } from "../lib/format";
+import { capList, formatBytes, formatRelative, isOverdue } from "../lib/format";
 import ProgressBar from "./ProgressBar";
 import Tooltip from "./Tooltip";
 import { CheckCircleIcon, XCircleIcon, MinusCircleIcon, WarningIcon } from "./icons";
@@ -546,9 +546,17 @@ export default function ActivityPanel({ open, onClose }: ActivityPanelProps) {
                       {u.planNames.length === 0 ? (
                         "No plans"
                       ) : (
-                        u.planNames.map((name) => (
-                          <div key={name} className="truncate" title={name}>{name}</div>
-                        ))
+                        (() => {
+                          const { shown, remaining } = capList(u.planNames, 5);
+                          return (
+                            <>
+                              {shown.map((name) => (
+                                <div key={name} className="truncate" title={name}>{name}</div>
+                              ))}
+                              {remaining > 0 && <div className="text-gray-500">+{remaining} more</div>}
+                            </>
+                          );
+                        })()
                       )}
                     </div>
                   }

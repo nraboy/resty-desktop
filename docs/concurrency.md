@@ -34,14 +34,16 @@ Wired into every shared-lock op (`execute_backup`, `restore_snapshot`, `restore_
 `copy_snapshot`/`mirror_repo` — both src **and** dest — `refresh_snapshots`,
 `get_snapshot_stats`, `diff_snapshots`, `refresh_repo_stats`, `check_repo`,
 `list_files`, `run_full_index` — shared by `index_snapshot`/`index_snapshots_batch` **and** the
-`cache_warmer` auto-sweep) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
+`cache_warmer` auto-sweep — and `cache_warmer`'s own `refresh_all_snapshots` tick) and every exclusive-lock op (`delete_snapshot`, `tag_snapshot`,
 `prune_repo`/`prune_all_repos`, `apply_retention` — covering both callers: `forget_by_plan`
 and the scheduler tick). For a streaming op the guard is a local held across the
 `spawn_blocking(...).await`, claimed for the whole child-process lifetime. `mirror_repo` is the one
 exception to "acquired in the outer command body": since it queues and returns its `operationId`
 immediately (see Restic Integration), its guards are acquired *inside* the detached `spawn`ed task,
 right after it wins its turn on `MirrorHandle::turn` — the outer command has already returned by
-the time a guard would otherwise be needed. `restic unlock` calls (cancel paths, `unlock_app`) are
+the time a guard would otherwise be needed. `restic unlock` calls (cancel paths, the `unlock_app`/`try_auto_unlock` sweep
+(`spawn_stale_lock_cleanup`), the user-facing `unlock_repo`, and the
+unlock-once-on-"already locked" in the retry loops — see docs/restic.md "Stale locks") are
 **exempt** — they're the recovery mechanism and must never wait.
 
 `prune_repo`/`prune_all_repos` re-check `PruneHandle::cancelled` right after acquiring their
@@ -55,11 +57,13 @@ the race fired (killing an already-exited child is a harmless no-op).
 
 `RepoLocks` only coordinates this app's own operations — it can't see a different machine or tool
 (restic CLI, Backrest, another Resty Desktop instance) genuinely holding the repo's real restic
-lock. All four exclusive-lock commands (`delete_snapshot`, `tag_snapshot` via
-`run_restic_blocking_retrying_on_lock`; `prune_repo`/`prune_all_repos` via
-`run_one_prune_attempt`) retry up to twice, 2s apart, on restic's own "already locked" error
-before surfacing it, matching `apply_retention`'s original retry pattern. `prune_repo`/
-`prune_all_repos` capture stderr for this (previously discarded via `Stdio::null()`), so a prune
+lock. Every write path retries through the pure `repo::lock_retry_step`: `delete_snapshot`/
+`tag_snapshot` via `run_restic_blocking_retrying_on_lock`, `prune_repo`/`prune_all_repos` via
+`run_prune_retrying_on_lock` (which wraps `run_one_prune_attempt`), and `apply_retention`. On
+restic's own "already locked" error the first retry is preceded by one stale-lock `restic unlock`,
+then up to `LOCK_RETRIES` (2) retries 2s apart before the error surfaces; `execute_backup` gets
+one unlock plus one re-run, on exit 11 only. See docs/restic.md "Stale locks" for the full policy.
+`prune_repo`/`prune_all_repos` capture stderr for this (previously discarded via `Stdio::null()`), so a prune
 failure surfaces restic's actual error text instead of a generic "Prune failed".
 
 Coverage is intentionally partial-safe: since writers only wait on the `readers` counter (never
@@ -97,14 +101,17 @@ history; `reduceSchedulerBackup` dismisses the scheduled-backup row immediately 
 **Envelope** (`TaskEvent`, camelCase over the wire):
 `operationId` (unique per operation instance — see below), `kind` (`backup`|`restore`|
 `restorePath`|`copy`|`mirror`|`prune`|`forget`|`tag`|`check`|`diff`|`index`|`unlock`|`stats`|
-`testConnection`|`browse`|`init`), `phase`
-(`started`|`progress`|`cancelling`|`cancelled`|`finished`|`failed`), `repoId`, `targetId`
+`testConnection`|`browse`|`cleanup`|`init` — `init` is reserved and not emitted yet), `phase`
+(`pending`|`started`|`progress`|`cancelling`|`cancelled`|`finished`|`failed` — `pending` means
+registered and cancellable but still waiting its turn: queued Index All batches and mirror runs,
+followed by `started`), `repoId`, `targetId`
 (plan/snapshot/schedule id, when one applies), `origin` (`manual`|`scheduler`|`background`),
 `progress` (normalized `percentDone`/`itemsDone`/`itemsTotal`/`bytesDone`/`bytesTotal`/`label`,
 plus `secondsElapsed`/`secondsRemaining`/`currentFiles`/`repoId` — per-kind detail kept lossless
 vs the legacy `backup:progress`/`restore:progress` payloads even though no consumer reads it yet
 (`currentFiles`/`secondsRemaining` are backup-only, `repoId` is prune-all's per-tick repo,
-distinct from the envelope's own `repoId` which is `""` for a multi-repo prune) — only on
+distinct from the envelope's own `repoId` which is `""` for a multi-repo prune — as it is for
+`testConnection` and `cleanup`) — only on
 `phase: progress`), `error` (only on `phase: failed`), `at` (unix millis).
 
 **Why `operationId` is the core of the design, not an afterthought:** today's per-operation events
@@ -118,7 +125,8 @@ lifetime specifically so that retrofit never has to happen.
 **`OperationCtx<S: TaskSink>`** owns one operation's lifecycle: `OperationCtx::new(...)` emits
 `started`; `.progress_emitter()` returns a cheap `Clone`-able `TaskProgressEmitter` for emitting
 `progress` from inside a `spawn_blocking` closure (the ctx itself stays in the outer async scope
-so it can read the final `Result`); exactly one of `.finished()` / `.failed(err)` / `.cancelled()`
+so it can read the final `Result`); `OperationCtx::new_pending`/`new_pending_with_id` instead
+emit `pending` and a later `.activate()` emits `started` (Index All batches, queued mirrors); exactly one of `.finished()` / `.failed(err)` / `.cancelled()`
 must be called on every exit path. If none is called (an unhandled early return or panic unwind),
 `Drop` emits a trailing `failed("operation dropped")` — a **backstop only**, not the intended
 path; every wired call site is expected to call a terminal method explicitly (see the
@@ -127,15 +135,15 @@ used specifically so every one of their several early-return points still report
 `OperationCtx` instead of falling through to the Drop backstop). `TaskSink` is a trait (implemented
 for `AppHandle`) purely so `tasks.rs`'s tests can record emitted events without a real app.
 
-Cancellable operations (backup, restore, copy, prune) carry a `current_task: TaskSlot`
+Cancellable operations (backup, restore, copy, prune, cleanup) carry a `current_task: TaskSlot`
 (`Arc<Mutex<Option<TaskRef>>>`) on their existing handle (`BackupHandle`, `RestoreHandle`, ...) —
 `OperationCtx::new` publishes its `TaskRef` (including the operation's `origin`, so
 `emit_cancelling` reports the operation's real origin rather than assuming every cancel is
 user-initiated) there on start and clears it on terminal; the matching `cancel_*` command calls
 `emit_cancelling(&app, &handle.current_task)` right before its existing kill/stop logic, so
 `cancelling` always precedes the `cancelled`/`finished` the operation itself emits once it actually
-stops. Operations with no cancel path (check, diff, tag, unlock, forget, single-snapshot
-`index_snapshot`) pass `None` for the slot.
+stops. Operations with no cancel path (check, diff, tag, unlock, forget, stats, browse, testConnection,
+restorePath, single-snapshot `index_snapshot`) pass `None` for the slot.
 
 The `index_snapshots_batch` ("Index All") batch is a deliberate exception to the shared-handle
 `current_task` pattern above: since multiple batches (e.g. for different repos) can run
@@ -166,7 +174,7 @@ unambiguous — a *running* mirror is killed immediately, a *queued* one never s
 
 **Coverage:** every restic-shelling operation is wired, including the click-bounded metadata reads
 (`refresh_repo_stats` — via the shared `fetch_and_cache_stats` helper, `not` the outer command —
-`get_snapshot_stats`, `test_repo_connection`, `list_files`). Two categories are excluded, deliberately:
+`get_snapshot_stats`, `test_repo_connection`, `list_files`). Three categories are excluded:
 - **Not real restic operations at all** — `list_snapshots` (`AppDb::get_snapshots_vec`, pure cached
   DB read), `get_snapshot_index_status` (sync DB read), and `get_repo_stats` (sync, cache-only DB
   read — no restic call, ever, not even a fallback on a miss; see its doc comment in repo.rs for
@@ -180,16 +188,20 @@ unambiguous — a *running* mirror is killed immediately, a *queued* one never s
   every other wired operation this isn't bounded by a user action, so it was kept off the bus to
   avoid unbounded event volume over a long-running session; revisit deliberately if a future
   consumer needs ambient background activity visible too.
+- **Not wired yet (a gap, not a decision)** — `refresh_snapshots` (the Snapshots page's manual
+  Refresh), `init_repo` (`TaskKind::Init` is reserved for it), the fire-and-forget stale-lock sweep
+  (`spawn_stale_lock_cleanup`) and the `get_restic_version` probe. Wire them through `OperationCtx`
+  if a consumer ever needs them.
 
-Any new restic-shelling command should go through `OperationCtx` unless it falls in one of those
-two categories.
+Any new restic-shelling command should go through `OperationCtx` unless it falls in one of the
+first two categories.
 
 **`TaskKind::Cleanup` is wired despite shelling out to nothing** — the one deliberate exception to
 "restic-shelling operation" as the wiring criterion. It's wired anyway because it can run for
 minutes on a large backlog (batched `DELETE`s over a possibly-huge `browse_cache_files`), the same
 shape as prune or a backup, not a database read like `list_snapshots`/`get_repo_stats` above. It's
-also the one kind that emits `repoId: ""` — cleanup isn't scoped to a single repository, so
-consumers keying off `repoId` must not assume every kind carries a real one.
+also, like Prune All and `testConnection`, a kind that emits `repoId: ""` — cleanup isn't scoped to a
+single repository, so consumers keying off `repoId` must not assume every event carries a real one.
 
 Two callers share this kind and the single `run_cleanup` implementation behind it: the
 `clean_cache` command (the "Clean Orphaned Data" button, `TaskOrigin::Manual`) and
@@ -203,15 +215,16 @@ would immediately abandon — the real guard is still inside `run_cleanup`. The 
 distinguish `origin` for this kind — `reduceCleanup` treats a `Background`-originated run
 identically to a `Manual` one, including a working Stop button either way.
 
-**Frontend scope — seven stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
-`index`'s batch-level progress, the scheduler-backup `activeBackup` row, `prune`'s
-`activePrune` row, mirror's `activeMirrors`, and cleanup's `activeCleanup` row); everything else
-still emits into the void.**
+**Frontend scope — eight stateful consumers so far (`stats`, `index`'s per-snapshot lifecycle,
+`index`'s batch-level progress, standalone manual snapshot indexes' `activeSnapshotIndexes`, the
+scheduler-backup `activeBackup` row, `prune`'s `activePrune` row, mirror's `activeMirrors`, and
+cleanup's `activeCleanup` row); everything else still emits into the void.**
 `src/lib/types.ts`
 mirrors the envelope (`TaskEvent`, `TaskKind`, `TaskPhase`,
 `TaskOrigin`, `TaskProgress`) so a consumer has a ready-made contract. `ActivityProvider`
-(`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` — repo stats refreshes
-never had a legacy per-operation feed (the page always updated straight from the command's
+(`src/lib/activity.tsx`) subscribes to `task` filtered to `kind: "stats"` with no `targetId` — repo
+stats refreshes (`get_snapshot_stats` also emits `kind: "stats"`, but with the snapshot id as
+`targetId`, and its modal reads the command's own promise, so those events are ignored) never had a legacy per-operation feed (the page always updated straight from the command's
 promise return), so this was the first case with no existing detail feed to duplicate or
 choreograph around. The subscription is deliberately **lifecycle-only, and text-free**: it tracks
 `operationId → repoId` across `started`/`finished`/`failed`/`cancelled` to drive both an
@@ -282,7 +295,7 @@ same `targetId`, matched only once the backup op has reached `finished`) for ret
 two ops `execute_backup`/`apply_retention` already emit via their own `OperationCtx`s (see
 scheduler.rs), just filtered and correlated on the frontend rather than the backend re-emitting a
 combined signal. A plan with no retention configured never gets a `forget` op (`scheduler.rs` only
-calls `apply_retention` when the plan has ≥1 `keep_*` flag set), so the reducer alone can't decide
+calls `apply_retention` when `has_effective_retention` holds and the backup didn't set `retentionSkipped`), so the reducer alone can't decide
 when to dismiss that case — it leaves the row sitting with a `backupFinished: true` marker, and a
 separate provider effect (keyed on the run and re-checked when `backupFinished` flips) resolves the
 plan via `listBackupPlans()` and clears the row once it confirms no retention is coming. That same
@@ -302,7 +315,7 @@ had for stats.
 like `index`'s batch-level progress — reads real `progress` off the bus rather than treating it
 purely as a lifecycle signal. `reducePrune` (`activity.tsx`) is a single nullable slot, not a
 `Map`, since prune is single-in-flight app-wide (`PruneHandle`'s `busy` guard) unlike concurrent
-index batches. It covers both `prune_all_repos` (progress-bearing: `itemsDone`/`itemsTotal`/
+index batches. It covers both `prune_all_repos` (read-only repos are skipped and not counted in `itemsTotal`; progress-bearing: `itemsDone`/`itemsTotal`/
 `label` per repo — emitted twice per repo, once before that repo's prune starts and once after it
 finishes, mirroring `index_snapshots_batch`'s already-correct `i + 1` pattern; the pre-work emit
 alone would report `N - 1 of N` on the batch's final repo, since it only ever names the repo
@@ -345,6 +358,17 @@ queued/running phase live, rather than duplicating that state locally — see it
 Project Structure tree above for the full modal state machine, including the backstop that infers a
 terminal outcome from `activeMirrors` dropping the id, for the narrow case where the modal's own
 dedicated listener loses a race with an unusually fast mirror.
+
+`activeSnapshotIndexes` is the eighth consumer — standalone manual single-snapshot indexing ("Index
+Snapshot" / "Index Now"), the inverse guard of `reduceIndexBatches`: `reduceSnapshotIndexes`
+(`activity.tsx`) wants `kind === "index"`, `origin === "manual"` **and** a `targetId`, tracking
+`started` → `finished`/`failed`/`cancelled` as a `Map<operationId, ActiveSnapshotIndex>` (single-snapshot
+ops never emit `pending`/`progress`). An "Index All" batch's own per-snapshot events look identical on
+the wire, so this reducer picks those up too; `standaloneSnapshotIndexes` filters out every entry whose
+`repoId` matches a currently-running batch, and both `ActivityPanel` and `activeTaskCount` (Sidebar
+strip) go through it so a batch's per-snapshot progress isn't also counted or rendered as a redundant
+standalone row. Repo names for these rows come from the same `indexBatchRepoNames` lookup (keyed by
+`batchRepoIdsKey`) the batch rows use.
 
 The *data* (the actual `ResticStats` numbers) never rides the event either — a consumer hears
 `finished` and re-reads `get_repo_stats` (a guaranteed cache hit, since `fetch_and_cache_stats`

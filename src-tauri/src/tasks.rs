@@ -1,15 +1,15 @@
 //! Unified operation lifecycle event bus.
 //!
 //! Every restic-shelling operation (backup, restore, copy, mirror, prune, forget,
-//! check, diff, index, unlock, init) emits a `task` event through this module,
+//! check, diff, index, unlock, stats, ...) emits a `task` event through this module,
 //! alongside — not instead of — its existing detailed feed (e.g. `backup:progress`).
 //! See CLAUDE.md's "Operation Event Bus" section for the full design rationale.
 //!
-//! The frontend's `ActivityProvider` (`src/lib/activity.tsx`) consumes it for seven
+//! The frontend's `ActivityProvider` (`src/lib/activity.tsx`) consumes it for eight
 //! stateful views so far — `stats`, `index`'s per-snapshot lifecycle, `index`'s
-//! batch-level progress, the scheduler-backup row, `prune`'s row, mirror's rows, and
-//! cleanup's row; every other kind still emits into the void, ready for a future
-//! consumer to build on its uniform, `operationId`-correlatable stream. See
+//! batch-level progress, standalone manual snapshot indexes, the scheduler-backup row,
+//! `prune`'s row, mirror's rows, and cleanup's row; every other kind still emits into the
+//! void, ready for a future consumer to build on its uniform, `operationId`-correlatable stream. See
 //! docs/concurrency.md for the full consumer list.
 
 use serde::Serialize;
@@ -55,12 +55,13 @@ pub enum TaskKind {
 #[serde(rename_all = "camelCase")]
 pub enum TaskPhase {
     /// An operation that's been created and registered (so it's already visible
-    /// and cancellable) but hasn't started its real work yet — currently only
-    /// emitted by "Index All" batches waiting their turn on `IndexHandle::batch_turn`
-    /// (see browse.rs's `index_snapshots_batch`). Followed by `Started` once the
-    /// operation actually begins, or a cancel-path phase if it's stopped while
-    /// still pending. Not emitted by any reject-on-busy operation (backup, restore,
-    /// prune, copy, mirror) — those have no queued state to represent.
+    /// and cancellable) but hasn't started its real work yet — emitted by "Index All"
+    /// batches waiting their turn on `IndexHandle::batch_turn` (see browse.rs's
+    /// `index_snapshots_batch`) and by mirror runs queued behind `MirrorHandle::turn`
+    /// (`new_pending_with_id`, snapshot.rs). Followed by `Started` once the operation
+    /// actually begins, or a cancel-path phase if it's stopped while still pending. Not
+    /// emitted by any reject-on-busy operation (backup, restore, prune, copy) — those
+    /// have no queued state to represent.
     Pending,
     Started,
     Progress,
@@ -152,8 +153,8 @@ pub struct TaskRef {
     pub origin: TaskOrigin,
 }
 
-/// Slot a cancellable handle (BackupHandle, RestoreHandle, CopyHandle,
-/// MirrorHandle, PruneHandle) carries so its `cancel_*` command can find the
+/// Slot a cancellable handle (BackupHandle, RestoreHandle, CopyHandle, PruneHandle,
+/// CleanupHandle) carries so its `cancel_*` command can find the
 /// currently-running operation's identity. `None` when idle.
 pub type TaskSlot = Arc<Mutex<Option<TaskRef>>>;
 
