@@ -61,6 +61,16 @@ describe("reduceStatsOps", () => {
     expect(state.failed.size).toBe(0);
   });
 
+  it("ignores snapshot-scoped stats events (targetId set)", () => {
+    // get_snapshot_stats emits kind "stats" with the snapshot id as targetId; it must neither
+    // spin the repo row nor mark the whole repo's refresh as failed.
+    let state = reduceStatsOps(initialStatsOpsState, taskEvent({ operationId: "op1", repoId: "repoA", targetId: "abc12345", phase: "started" }));
+    expect(state.inFlight.size).toBe(0);
+    state = reduceStatsOps(state, taskEvent({ operationId: "op1", repoId: "repoA", targetId: "abc12345", phase: "failed" }));
+    expect(state.inFlight.size).toBe(0);
+    expect(state.failed.has("repoA")).toBe(false);
+  });
+
   it("is a no-op removing an unknown operationId", () => {
     const state = reduceStatsOps(initialStatsOpsState, taskEvent({ operationId: "op1", repoId: "repoA", phase: "started" }));
     const result = reduceStatsOps(state, taskEvent({ operationId: "unknown", phase: "finished" }));

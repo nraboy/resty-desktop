@@ -62,6 +62,10 @@ struct ExportRepo {
     /// bundles loading.
     #[serde(default)]
     insecure_tls: bool,
+    /// Retention's `--prune` opt-out (issue #49). Added after bundle v1 shipped — defaults to
+    /// `false` so older exports import as repos that prune normally.
+    #[serde(default)]
+    defer_prune: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
     /// encrypted under the export passphrase exactly like `password`. Added after
     /// bundle v1 shipped — `#[serde(default)]` means an older export (which predates
@@ -264,6 +268,7 @@ pub fn export_data(
                 password,
                 read_only: r.read_only,
                 insecure_tls: r.insecure_tls,
+                defer_prune: r.defer_prune,
                 credentials,
             });
         }
@@ -460,6 +465,7 @@ pub fn import_data(
             insecure_tls: false,
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
+            defer_prune: r.defer_prune,
         });
     }
 
@@ -725,6 +731,9 @@ pub fn import_backrest_config(
             // deliberately deferred follow-up, not done here.
             credentials_nonce: None,
             credentials_ciphertext: None,
+            // Backrest's `prunePolicy` is a schedule and Resty has no prune schedule yet;
+            // deferring here would leave an imported repo never pruning on its own.
+            defer_prune: false,
         });
     }
 
@@ -891,6 +900,60 @@ mod tests {
         assert!(imported.use_fs_snapshot);
     }
 
+    /// A bundle plan with `retention` set to the given JSON object text.
+    fn plan_json_with_retention(retention: &str) -> String {
+        format!(
+            r#"{{"id": "p1", "name": "Daily", "repoId": "r1", "paths": ["/home"],
+                "tags": [], "excludes": [], "retention": {retention},
+                "limitUpload": null, "limitDownload": null}}"#
+        )
+    }
+
+    #[test]
+    fn import_rejects_non_integer_retention_counts() {
+        // `RetentionPolicy` fields are `Option<u32>`, so a hand-edited bundle can't smuggle in a
+        // decimal, string, exponent, negative or oversized count: the plan (and therefore the
+        // whole bundle, via `parse_bundle`) fails to deserialize instead of storing garbage.
+        for bad in [
+            r#"{"keepLast": 12.5}"#,
+            r#"{"keepDaily": "7"}"#,
+            r#"{"keepWeekly": "abc"}"#,
+            r#"{"keepMonthly": -3}"#,
+            r#"{"keepYearly": 1e2}"#,
+            r#"{"keepLast": 7.0}"#,
+            r#"{"keepLast": 99999999999}"#,
+            r#"{"keepLast": true}"#,
+        ] {
+            let json = plan_json_with_retention(bad);
+            assert!(
+                serde_json::from_str::<ExportPlan>(&json).is_err(),
+                "should have rejected retention {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_accepts_whole_number_and_null_retention_counts() {
+        let json = plan_json_with_retention(r#"{"keepLast": 7, "keepDaily": null}"#);
+        let p: ExportPlan = serde_json::from_str(&json).unwrap();
+        let r = p.retention.unwrap();
+        assert_eq!(r.keep_last, Some(7));
+        assert_eq!(r.keep_daily, None);
+        assert_eq!(r.keep_weekly, None);
+    }
+
+    #[test]
+    fn import_keeps_a_zero_retention_count_but_it_is_inert() {
+        // Zero parses (it's a valid u32) and is stored as-is, matching CLAUDE.md's "an imported
+        // plan with a hand-set zero is simply inert": nothing treats it as an effective rule.
+        let json = plan_json_with_retention(r#"{"keepLast": 0}"#);
+        let p: ExportPlan = serde_json::from_str(&json).unwrap();
+        let imported = backup_plan_from_export(&p, "n".into(), "Daily".into(), "r".into());
+        let r = imported.retention.unwrap();
+        assert_eq!(r.keep_last, Some(0));
+        assert!(!super::super::snapshot::has_effective_retention(&r));
+    }
+
     #[test]
     fn export_plan_missing_new_fields_deserializes_with_defaults() {
         // Simulates a bundle exported before this feature — no exclude_if_present /
@@ -927,6 +990,7 @@ mod tests {
             password: EncSecret { nonce: "n".to_string(), ciphertext: "c".to_string() },
             read_only: false,
             insecure_tls: false,
+            defer_prune: true,
             credentials: vec![ExportCredential {
                 key: "B2_ACCOUNT_ID".to_string(),
                 value: EncSecret { nonce: "cn".to_string(), ciphertext: "cc".to_string() },
@@ -934,6 +998,7 @@ mod tests {
         };
         let json = serde_json::to_string(&repo).unwrap();
         let back: ExportRepo = serde_json::from_str(&json).unwrap();
+        assert!(back.defer_prune);
         assert_eq!(back.credentials.len(), 1);
         assert_eq!(back.credentials[0].key, "B2_ACCOUNT_ID");
         assert_eq!(back.credentials[0].value.nonce, "cn");
@@ -979,6 +1044,8 @@ mod tests {
         }"#;
         let repo: ExportRepo = serde_json::from_str(json).unwrap();
         assert!(repo.credentials.is_empty());
+        // Likewise predates `deferPrune`: an old bundle imports as a repo that prunes normally.
+        assert!(!repo.defer_prune);
     }
 
     #[test]
@@ -1232,6 +1299,24 @@ mod backrest_tests {
         assert_eq!(r.keep_weekly, Some(4));
         assert_eq!(r.keep_monthly, Some(6));
         assert_eq!(r.keep_yearly, Some(2));
+    }
+
+    #[test]
+    fn backrest_rejects_non_integer_retention_counts() {
+        // Same `Option<u32>` guarantee as the Resty bundle: a decimal, string or negative count
+        // fails the parse, so the whole config is refused rather than stored with garbage.
+        for retention in [
+            r#"{"policyKeepLastN": 7.5}"#,
+            r#"{"policyKeepLastN": "7"}"#,
+            r#"{"policyKeepLastN": -1}"#,
+            r#"{"policyTimeBucketed": {"daily": 1.5}}"#,
+            r#"{"policyTimeBucketed": {"weekly": "four"}}"#,
+        ] {
+            let raw = format!(
+                r#"{{"repos": [], "plans": [{{"id": "p", "repo": "r", "paths": ["/x"], "retention": {retention}}}]}}"#
+            );
+            assert!(parse_backrest_str(&raw).is_err(), "should have rejected {retention}");
+        }
     }
 
     #[test]

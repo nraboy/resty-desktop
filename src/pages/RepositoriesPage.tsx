@@ -27,6 +27,7 @@ import {
   renameRepo,
   updateRepoSecrets,
   updateRepoPath,
+  updateRepoDeferPrune,
   updateRepoReadOnly,
   updateRepoInsecureTls,
   testRepoConnection,
@@ -51,6 +52,7 @@ import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
 import InsecureTlsField from "../components/InsecureTlsField";
+import TruncatedText from "../components/TruncatedText";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
 type ModalMode = "add" | "init" | null;
@@ -111,6 +113,7 @@ export default function RepositoriesPage() {
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
   const [editInsecureTls, setEditInsecureTls] = useState(false);
+  const [editDeferPrune, setEditDeferPrune] = useState(false);
   // Populated with stored credential values when the edit modal opens (see
   // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
   // Save sends whatever rows are present (blank-key rows are dropped); "Clear stored
@@ -303,7 +306,7 @@ export default function RepositoriesPage() {
   useEffect(() => {
     const unlistenTask = listen<TaskEvent>("task", (e) => {
       const t = e.payload;
-      if (t.kind !== "stats" || t.phase !== "finished") return;
+      if (t.kind !== "stats" || t.targetId || t.phase !== "finished") return;
       getRepoStats(t.repoId)
         .then((s) => setStatsMap((prev) => ({ ...prev, [t.repoId]: s })))
         .catch(() => {});
@@ -542,6 +545,12 @@ export default function RepositoriesPage() {
         await initRepo({ id, name: form.name, path, password: form.password, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
       } else {
         await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
+        // A duplicate keeps the source's "prune after retention" choice (add has no checkbox for
+        // it). Best-effort: the repo already exists, so a failure here must not read as a failed
+        // add and invite a second, duplicate-of-the-duplicate submit.
+        if (duplicateSource?.deferPrune) {
+          await updateRepoDeferPrune(id, true).catch(() => {});
+        }
       }
       await load();
       setModalMode(null);
@@ -635,6 +644,11 @@ export default function RepositoriesPage() {
       if (newInsecureTls !== editTarget.insecureTls) {
         await updateRepoInsecureTls(editTarget.id, newInsecureTls);
       }
+      // The checkbox is disabled while read-only, so its stored value is left alone rather than
+      // reset — unticking read-only later brings the same choice back.
+      if (!editReadOnly && editDeferPrune !== editTarget.deferPrune) {
+        await updateRepoDeferPrune(editTarget.id, editDeferPrune);
+      }
       await load();
       setEditTarget(null);
     } catch (err: any) {
@@ -670,6 +684,7 @@ export default function RepositoriesPage() {
     setEditNoPassword(false);
     setEditReadOnly(repo.readOnly);
     setEditInsecureTls(repo.insecureTls);
+    setEditDeferPrune(repo.deferPrune);
     setEditTestResult(null);
     setEditCredentialRows([]);
     setEditLoadedCredentials([]);
@@ -889,6 +904,8 @@ export default function RepositoriesPage() {
     try {
       await pruneRepo(pruneTarget.id);
       setPruneDone(true);
+      // Pick up the new lastPrunedAt for the row's "Pruned …" line.
+      load().catch(() => {});
     } catch (err: any) {
       const msg = String(err);
       if (msg === "Cancelled") {
@@ -916,7 +933,7 @@ export default function RepositoriesPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Repositories</h1>
           <p className="text-sm text-gray-500 mt-0.5">Manage your Restic backup repositories</p>
@@ -955,11 +972,11 @@ export default function RepositoriesPage() {
           }
         />
       ) : (
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 gap-3">
           {repos.map((repo) => (
             <div
               key={repo.id}
-              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors"
+              className="flex items-center justify-between p-4 rounded-xl border bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors gap-4"
               onClick={() => navigate(`/snapshots/${repo.id}`)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -967,13 +984,13 @@ export default function RepositoriesPage() {
                 setContextMenu({ repo, x: e.clientX, y: e.clientY });
               }}
             >
-              <div className="flex items-center gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-gray-100">{repo.name}</p>
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <TruncatedText as="p" text={repo.name} className="text-sm font-medium text-gray-100 truncate" />
                     {repo.readOnly && (
                       <span
-                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0"
                         title="Every restic call uses --no-lock; writing operations are disabled."
                       >
                         Read-only
@@ -981,17 +998,25 @@ export default function RepositoriesPage() {
                     )}
                     {repo.insecureTls && (
                       <span
-                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-amber-500 text-amber-400"
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-amber-500 text-amber-400 flex-shrink-0 whitespace-nowrap"
                         title="TLS certificate verification is turned off for this repository (--insecure-tls)."
                       >
                         Insecure TLS
                       </span>
                     )}
+                    {repo.deferPrune && !repo.readOnly && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0 whitespace-nowrap"
+                        title="Retention only forgets snapshots; run Prune… to reclaim storage."
+                      >
+                        Prune deferred
+                      </span>
+                    )}
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5 font-mono">{repo.path}</p>
+                  <TruncatedText as="p" text={repo.path} className="text-xs text-gray-500 mt-0.5 font-mono truncate" />
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-shrink-0">
                 <div className="flex items-center gap-4">
                   <div className="text-right min-w-[150px]">
                     {repo.id in statsMap ? (
@@ -1032,6 +1057,14 @@ export default function RepositoriesPage() {
                       <p className="text-xs text-gray-500">—</p>
                     ) : (
                       <p className="text-xs text-gray-500 animate-pulse">loading…</p>
+                    )}
+                    {repo.deferPrune && !repo.readOnly && (
+                      <p
+                        className="text-xs text-gray-500"
+                        title={repo.lastPrunedAt != null ? formatTimestamp(repo.lastPrunedAt) : undefined}
+                      >
+                        {repo.lastPrunedAt != null ? `Pruned ${formatRelative(repo.lastPrunedAt)}` : "Not pruned yet"}
+                      </p>
                     )}
                   </div>
                   <ActionButton
@@ -1330,7 +1363,10 @@ export default function RepositoriesPage() {
             <input
               type="checkbox"
               checked={editReadOnly}
-              onChange={(e) => { setEditReadOnly(e.target.checked); setEditTestResult(null); }}
+              onChange={(e) => {
+                setEditReadOnly(e.target.checked);
+                setEditTestResult(null);
+              }}
             />
             Read-only repository (--no-lock)
           </label>
@@ -1339,6 +1375,15 @@ export default function RepositoriesPage() {
             checked={editInsecureTls}
             onChange={(v) => { setEditInsecureTls(v); setEditTestResult(null); }}
           />
+          <label className={`flex items-center gap-2 text-sm ${editReadOnly ? "text-gray-500" : "text-gray-400"}`}>
+            <input
+              type="checkbox"
+              checked={!editDeferPrune}
+              disabled={editReadOnly}
+              onChange={(e) => setEditDeferPrune(!e.target.checked)}
+            />
+            Prune after retention (forget --prune)
+          </label>
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}

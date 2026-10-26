@@ -141,6 +141,17 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   `spawn_blocking`. (A former `schedule.rs::run_schedule_now` was a third caller — it was a
   foreground command, not background-spawned — and was removed as dead code: nothing in the UI
   ever invoked it.)
+- **A write op that fails on "already locked" runs plain `restic unlock` once, then retries (issue #43).**
+  The reporter's retention runs kept failing on a ~9-hour-old lock from a dead process on the same
+  machine; the old 2×2s retries could never help (a stale lock doesn't clear itself), and the only
+  other unlock was at master-password entry, which an app left unlocked in the tray never repeats.
+  Safe because plain `unlock` only removes what restic itself calls stale (>30 min old, or this host's
+  dead PID) — verified in restic's `lock_file.go`; never `--remove-all`, which would remove live locks and
+  stays a manual decision outside the app. Considered and rejected: an hourly background unlock sweep —
+  it fixes nothing until the next tick and adds steady traffic against every (often cloud) repo for a
+  problem that's rare; unlock-on-failure fixes the failing operation itself and only runs when needed.
+  All paths go through `repo::lock_retry_step` (bounded; pinned by tests), so it can't loop. Read ops
+  and copy/mirror are deliberately not covered: the next write op or the Unlock button clears the lock.
 - **`list_snapshots`, `get_snapshot_index_status`, and `get_repo_stats` don't emit on the `task`
   event bus (see Operation Event Bus)** because none of the three shells out to restic — nothing
   runs that a task could represent. **`cache_warmer`'s `refresh_all_snapshots` tick also doesn't**,
@@ -451,6 +462,30 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   expected-to-be-slow place for that cost; Clear All Cache no longer pays it as a silent side
   effect of a button whose actual job is wiping data, not compacting the file. Run Compress Database
   afterward to reclaim the freed space. Don't re-add the `VACUUM` here.
+- **Compaction is not automatic, and issue #44 (a 100 GB `app_data.db`) was answered with a readout, not
+  a scheduled `VACUUM`.** A scheduled `VACUUM` has the same problem as the one removed above (one
+  full-file rewrite under the single `AppDb` mutex, unbatchable) plus a disk-space cost: it writes a
+  temporary copy of the live data, so it needs roughly that much free space. It also usually wouldn't
+  help — a database that big is mostly *live* `browse_cache_files` rows (one per file per indexed
+  snapshot), not free pages. So `checkpoint_and_size` returns `DbSize` (total + freelist-based
+  `reclaimable_bytes`, two O(1) header reads) and Settings shows it with a hint: compress when it's
+  worth it, otherwise "this is indexed data, reduce auto-indexing". Considered and deferred:
+  `auto_vacuum = INCREMENTAL` with `incremental_vacuum` chunks on the cleanup tick (existing databases
+  need one full `VACUUM` to convert) and deduplicating paths across snapshots (large migration). Revisit
+  incremental vacuum if the readout shows large reclaimable figures in practice.
+
+  Path dedup was analyzed in depth and parked, not rejected. The shape: a `paths` dictionary table with
+  `browse_cache_files` storing ids, rows still owned by exactly one snapshot, so the mark/drain/evict
+  and gated-status invariants carry over unchanged. Row-per-file-per-snapshot is untouched, so it shrinks
+  the file but not the row count. Real costs: unused paths need a batched sweep (no refcount triggers —
+  `INSERT OR REPLACE` skips delete triggers without `recursive_triggers`, and any trigger defeats the
+  truncate optimization `clear_cache` relies on), path ids must be interned inside each row-write
+  transaction with AUTOINCREMENT ids so a sweep can't strand or mis-point rows, indexing gets slower, and
+  the upgrade must rename-then-batch-delete the old table rather than `DROP` it at startup (a multi-GB
+  drop would block window creation). Revisit only with evidence: a measured size drop of ≥3× on a real
+  database (`COUNT(DISTINCT path)` vs `COUNT(*)`, `dbstat` per-index sizes) plus more reports like #44.
+  Storing only what changed between snapshots was ruled out — it gives rows multiple owners and
+  invalidates the cleanup/race invariants above.
 - **File search (`search_browse_files`/`search_repo_files`) uses `path LIKE '%query%'`** — the
   leading wildcard means SQLite can't use the index and does a full scan. This is a known,
   accepted cost (not an oversight): it's exactly why those two search commands are `async` +
@@ -760,7 +795,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   from an internal id already resolved from this app's own data (a repo, plan, or snapshot id),
   never from a URL query param, `location.search`, or other external input. Re-flagging this from
   a future `npm audit` run without checking reachability first would push a breaking
-  major-version migration (v7 changes routing APIs across all 13 routed pages) for zero actual
+  major-version migration (v7 changes routing APIs across all 12 routed pages) for zero actual
   risk reduction.
 - **Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature
   (`default-features = false, features = ["xdg-portal"]`), not the plugin's default `gtk3`
@@ -866,6 +901,135 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   (b) a restic-version check, since a wrong guess turns every backup of the plan into a failure.
   Same principle applies to any future backup flag: gate on what 0.17 supports.
 
+- **Display times follow the web view's ICU time-zone data, not the OS's — a stale-ICU hour
+  offset is a declined, cosmetic fix (issue #40).** Every date the UI shows goes through
+  `Intl.DateTimeFormat` (`formatDate`/`formatDateOnly` in `src/lib/format.ts`, no explicit
+  `timeZone`), so the offset applied is whatever the *web view's* bundled ICU believes for the
+  user's zone; `date` and restic (Go) read the OS's tzdata instead. When the two disagree, every
+  app time is off by the difference. The reporter: Linux Mint 22.3, AppImage, `Africa/Casablanca`
+  — Morocco moved to permanent UTC+0 on 2026-09-20, the OS says +00, the ICU still says +01, so
+  every time was +1h versus `restic snapshots` (reproduced: Node 24's ICU 77.1/tz 2025b gives the
+  same +01; macOS system tzdata 2026c gives +00). **Display-only:** timestamps are stored and
+  passed around raw, so restore, retention, schedules and snapshot comparisons are unaffected.
+  - Who's affected: only zones whose rules changed after the web view's ICU data was built.
+    Mainly the **AppImage**, whose bundled WebKitGTK/ICU is frozen at the build image's version
+    (ubuntu-22.04 → ICU 70); briefly anyone on Linux right after a brand-new tz change (Morocco).
+    macOS (system WebKit) and Windows (WebView2) get tz updates with the OS/Edge. Examples of
+    zones that changed since 2021: Mexico, Jordan/Syria, Egypt, Paraguay, eastern Kazakhstan.
+  - Rejected fixes: (1) **JS date libraries** — date-fns-tz/Luxon/Day.js/Temporal all use the
+    same ICU; moment-timezone or a `tzdata` package only moves the staleness into `package.json`.
+    (2) **Rust-formatted display strings** — needs locale formatting in Rust (chrono locales +
+    locale detection), a raw+display pair on every date payload (comparisons, sorting and
+    `formatRelative` still need the raw value), and visibly changes the date format for everyone.
+    (3) **Startup-offset fallback** (a sync command returning the OS's current UTC offset via
+    `chrono::Local`; `format.ts` rebuilds its formatters with a fixed `Etc/GMT±N` zone when it
+    disagrees with `getTimezoneOffset()`) — small, but permanent logic for a handful of users, and
+    in fallback mode past dates use today's offset. (4) **ubuntu-24.04 build image** — its ICU 74
+    is still older than the 2024+ rule changes, and it raises the AppImage's glibc floor.
+  - Workaround for an affected user whose zone currently equals UTC: launch with `TZ=UTC`
+    (`Exec=env TZ=UTC /path/to/Resty-Desktop.AppImage` in the `.desktop` file). Untested against
+    the AppImage; the autostart entry the app writes won't carry it, and it's zone-specific.
+  - Revisit if more reports come in; the startup-offset fallback (3) is the preferred fix then.
+    Don't add per-zone special cases.
+
+
+## Window size, persistence and the compact tier (issue #39)
+
+- **`tauri-plugin-window-state` saves/restores `SIZE | POSITION | MAXIMIZED` only — never
+  `VISIBLE`.** The plugin's default is `StateFlags::all()`, and restoring `VISIBLE` calls
+  `show()` + `set_focus()`, which would defeat the hidden login launch (`should_start_hidden`)
+  and the `visible: false` startup path. `with_state_flags` also governs what is *saved*, so a
+  visible flag is never written. Don't widen the flags.
+- **Restore is manual** (`.skip_initial_state("main")` + `restore_state` in `setup()`), so
+  `fit_to_monitor` runs immediately after, before the window is first shown. The plugin stores
+  *physical* px and applies them unclamped, so a size saved on a bigger or differently scaled
+  display could open larger than the current one; `fitted_inner_size` (pure, unit-tested)
+  shrinks the inner size so the outer frame fits the monitor's work area, then re-centers.
+  A maximized window is skipped (the OS sizes it). With no monitor to measure (possible on
+  Wayland) the restored size stands. Wayland ignores app-set position, so only size restores there.
+- **No "keep the default size when there is no monitor info" guard — deliberately left out.** Read
+  from tao 0.37.1 (not tested on a real Wayland session): for an unmapped (still-hidden) window,
+  `current_monitor` falls back to `display.primary_monitor()` (`platform_impl/linux/window.rs`), and
+  monitor/window sizes are both scaled by the same factor, so `fit_to_monitor` normally gets a usable
+  monitor even on Wayland; the early return is a safety net. A bad size would need *both* no monitor info
+  and a saved size larger than the current screen, and is recoverable (resize/maximize, or delete
+  `app_config_dir()/.window-state.json`). The guard would also turn off the remembered size for exactly the
+  Wayland users it helps. Known imprecision: on multi-monitor setups the fallback measures the first/primary
+  monitor, not necessarily the one the window opens on, so it can shrink slightly more than needed
+  (harmless; `center()` is a no-op on Wayland). If a user reports a wrong-size window on Wayland, add the
+  guard then (skip the restored size when `current_monitor`/`primary_monitor` both fail) rather than before.
+- **`reset_app` deliberately does not delete the window-state file.** The plugin holds state in
+  memory and rewrites `app_config_dir()/.window-state.json` on `RunEvent::Exit`, so deleting it
+  would be undone at quit; and window geometry isn't user data. Don't "fix" this.
+- A hidden login launch with a saved *maximized* state stays hidden: tao defers maximizing a
+  hidden window (verified for Windows in tao 0.37.1, `window_state.rs`); re-check macOS/Linux
+  manually when touching this.
+- **Compact tier is `max-xl:`-additive only** (below 1280); nothing that applies at ≥1280 is
+  edited, and truncation classes are `max-xl:`-prefixed — see docs/frontend.md for why
+  (`overflow-hidden` tables would clip). The one removed class is `LogsPage`'s `min-w-[800px]`,
+  which never took effect at ≥1280.
+- **Exceptions, added later** (the compact tier started as `max-xl:`-additive only; these apply at every
+  width, including ≥1280, and `LogsPage` also lost `overflow-x-auto`, now `overflow-hidden`): free-text
+  table cells (Logs Plan/Repository, Snapshots Host/Tags,
+  Browse/Diff names) are `truncate` + shrinkable (`max-w-0` + a `w-[N%]`) at *every* width, including
+  ≥1280, so a long user-chosen name ellipsizes with a hover title instead of wrapping or overflowing.
+  A per-tier `ch` cap was tried first and rejected: caps are upper bounds, so two long columns still
+  overflowed (up to 322px at 1280). Tables use `overflow-hidden`, never `overflow-x-auto`. Separate
+  steps from the rest of #39 (revertable alone). See docs/frontend.md for the recipe.
+
+## Default retention policy is a creation-time template (issue #48)
+
+A Settings card ("Default Retention Policy") holds a switch plus the five `keep_*` values, stored
+as `default_retention_enabled` / `default_retention` (JSON) in `app_settings`. The plan editor
+copies them into a **new** plan's fields (`BackupPlanEditPage`'s `init`, `isNew` only) and says so
+under the fields. Nothing reads the default when a backup or `forget` runs.
+
+- **Why not live inheritance** (a plan with no retention of its own falling back to the global at
+  run time): retention deletes data, so editing one Settings value would change `forget` on every
+  inheriting plan at its next run, across all repos, without the user opening any of them. It would
+  also need a third plan state ("inherit" vs "explicitly none") threaded through
+  `has_effective_retention`, `apply_retention`, the scheduler, `activity.tsx` and
+  `BackupPlansPage.tsx`, and make exported bundles prune differently per machine. A template adds
+  none of that and keeps the save-time checks (`validate_plan_sources`, `check_retention_scope`)
+  authoritative for every plan that has retention.
+- **Off and empty by default** — no values are forced on anyone; restic doesn't force a policy and
+  neither does the GUI. The switch is what makes "is this active?" unambiguous: the inputs are
+  hidden while it's off, but the stored values are kept so turning it back on restores them.
+- **Fails closed.** `load_default_retention` returns off/empty on a DB error, missing key or bad
+  JSON, and the editor swallows a failed `getDefaultRetention`: nothing is prefilled. Notifications
+  fail open (`notify::load`) because a wrongly-silent notification is harmless; a wrongly-prefilled
+  retention policy is not.
+- **Switch saves immediately, values save explicitly.** The switch sends the *stored* policy, never
+  unsaved field edits, so flipping it can't commit half-typed numbers. "On with no rules" is allowed
+  (amber hint, prefills nothing) so the switch never has to be refused before its fields are visible.
+- Zero is unset, as everywhere (`save_default_retention` folds `Some(0)` → `None`; `parseRetention`
+  rejects 0, negatives, decimals and non-numeric text, sharing its rules and error text with the plan editor; the inputs also block `. , e + -` keystrokes). Imports need no such guard: `RetentionPolicy`
+  is `Option<u32>`, so a non-integer count fails the parse and the whole file is refused.
+
+## Deferred prune, and the known multi-delete gap (issue #49)
+
+Retention is per-repo opt-out of `--prune` (`repositories.defer_prune`); see docs/restic.md
+"Deferred prune". Decisions worth keeping:
+
+- **Per repo, not per plan or global.** Early-deletion fees depend on where the repo is stored,
+  and several plans can share one repo.
+- **Explicit prunes ignore the flag.** "Prune…" and "Prune All" still prune a deferred repo —
+  they're how a deferred prune gets done.
+- **Backrest import leaves it off.** Backrest's prune policy is a schedule; Resty has none, so
+  deferring on import would leave the repo never pruning by itself.
+
+**Bulk delete is a single batched `forget`.** `delete_snapshot` takes `snapshot_ids: Vec<String>`
+and runs `restic forget id1 id2 … [--prune]` (`build_forget_args`), so a ticked "prune" runs once
+for the whole selection instead of once per snapshot (which was expensive on a cloud repo).
+`SnapshotsPage.handleMultiDelete` makes one `deleteSnapshots` call; the single-delete path is the
+one-id case (`deleteSnapshot` wraps it). Restic validates every id before removing any, so a bad id
+fails the whole batch with nothing deleted — there is no half-deleted state and no per-snapshot
+progress (the modal shows an indeterminate bar). An empty list is rejected up front. The task
+event's `targetId` is the snapshot id only for a one-id call, `None` for a batch. This replaced an
+earlier plan (forget each with `prune = false`, then one trailing `pruneRepo`), which would have
+needed `PruneHandle.busy` handling and its own prune progress/Hide state for no benefit; the
+earlier "batch forget rejected as double the work" judgement was wrong. A schedule action for
+"prune repo X" is the remaining open follow-up.
 
 ## Linux GPU Compatibility
 

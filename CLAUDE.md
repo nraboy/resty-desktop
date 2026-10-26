@@ -22,7 +22,8 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Shell plugin | `tauri-plugin-shell` — only `open` is exposed (`shell:allow-open`, used for hardcoded http(s) links in App.tsx/SettingsPage.tsx); `"open": true` applies the plugin's default validator (http(s)/mailto/tel only) |
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/warnings/failure, each gated by a global setting (`commands/notify.rs`) |
-| Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
+| Window state | `tauri-plugin-window-state` — `SIZE\|POSITION\|MAXIMIZED` only (never `VISIBLE`), restored by hand in `setup()` then `fit_to_monitor`; min window 1024×640, default 1366×800; see docs/decisions.md |
+| Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch (a relaunch carrying `--from-autostart` is ignored on purpose — `lib.rs`) |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 4 (`v1` feature), opt-in, stores the *derived* master key; macOS/Windows guaranteed, Linux (Secret Service) best-effort; see docs/data.md |
 | ID generation | `crypto.randomUUID()` (native browser API) |
@@ -50,21 +51,25 @@ src/
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    RetentionFields.tsx   # The five `keep_*` inputs, shared by the plan editor and Settings' default retention card
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
-    Sidebar.tsx           # Left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
+    TruncatedText.tsx     # Text with a native `title` shown only when actually cut off; callers supply the truncation classes (bare `truncate` for free-text cells, `max-xl:truncate` for compact-only ones) — see docs/frontend.md
+    Sidebar.tsx           # Icon rail below 1280px (`max-xl:`); left nav with app icon; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
     ActivityPanel.tsx     # Right-side overlay drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's status strip, open state owned by App.tsx — see docs/concurrency.md
   lib/
     types.ts              # Shared TS types (Repository, Snapshot, BackupPlan, etc.); isRemoteRepo() helper
     backends.ts           # detectBackend + credential hints for S3/B2/REST — see docs/restic.md
     invoke.ts             # Typed wrappers over tauri invoke()
     activity.tsx          # ActivityProvider: indexing, scheduler backups, stats, mirrors via the task event bus — see docs/concurrency.md
-    format.ts             # formatBytes, formatSize, formatDate, formatDuration, etc.
+    format.ts             # formatBytes, formatSize, formatDate, formatDuration, dbSizeHint (Settings DB-size hint), etc.
     config.ts             # MIN_RESTIC_MAJOR/MINOR constants for version warning
-    utils.ts              # needsFullDiskAccess(paths) — macOS protected-path check
+    utils.ts              # needsFullDiskAccess(path) — macOS protected-path check for one path (callers iterate, e.g. via planReadPaths)
     theme.tsx             # ThemeProvider + useTheme(); persists to localStorage
     cron.ts               # parseCronToSimple/buildCronExpr — pure cron helpers, unit-tested
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
+    breakpoints.test.ts   # Pins Sidebar's `useIsCompact` 1280 query to Tailwind's stock `xl` (and fails if tailwind.config.js overrides it)
+    node-stubs.d.ts       # Ambient node:* types for the file-reading tests (the project has no @types/node)
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx  # Add/open/duplicate/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
@@ -78,19 +83,22 @@ src/
     SchedulesPage.tsx     # List schedules; toggle/delete; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
-    SettingsPage.tsx      # Theme, tray, launch-at-login, auto-unlock, restic path, prune all, import/export, cache — see docs/frontend.md and docs/decisions.md
+    SettingsPage.tsx      # Theme, tray, launch-at-login, auto-unlock, restic path, default retention, prune all, import/export, cache — see docs/frontend.md and docs/decisions.md
 src-tauri/
   src/
     main.rs               # Calls restic_gui_lib::run()
     lib.rs                # Tauri builder; registers commands; manages app state; native menu bar; tray — see docs/concurrency.md
     tasks.rs              # Unified `task` event bus (TaskEvent, OperationCtx) — see docs/concurrency.md
+    gpu_compat.rs         # NVIDIA+Wayland env workaround (gated) + AppImage fixups/`is_appimage` — see docs/decisions.md
+    cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing + the ~5-minute orphan-cleanup tick — see docs/concurrency.md
+    scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
     commands/
       mod.rs                # get_restic_path(); NoConsole trait for Finder-launched PATH
       auth.rs               # Setup/unlock/lock master password; auto-unlock — see docs/data.md
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
-      notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
+      notify.rs             # Global notification toggles (started/success-changed/success-unchanged/warnings/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
@@ -101,8 +109,6 @@ src-tauri/
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
       webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
-  cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing + the ~5-minute orphan-cleanup tick — see docs/concurrency.md
-  scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
 ```
 
 ## Routes
@@ -140,16 +146,19 @@ Full detail (env-var policy, streaming vs. one-shot calls, `mirror_repo`'s queue
 credentials incl. REST, stats-cache policy): **docs/restic.md**.
 
 Retain always: restic's binary path is user-configurable (defaults to `restic` on `$PATH`); every
-command sets `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` as **env vars, never process args**; every
+command sets `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` as **env vars, never process args** (a repo with an
+empty stored password gets `--insecure-no-password` instead and no `RESTIC_PASSWORD`); every
 restic `Command` must set `.stdin(Stdio::null())` (Windows Scoop-shim spawn failures otherwise)
 alongside `.no_console()`; an `async fn` `#[tauri::command]` must **never** call
 `std::process::Command` inline — always `spawn_blocking` (streaming) or `run_restic_blocking`
 (one-shot) — or it blocks a shared tokio worker and starves every other async command plus the
-`AppDb` lock. A repo can be marked **read-only** (`--no-lock` on every read op via
+`AppDb` lock. A write op or backup that fails on restic's "already locked" runs plain `restic unlock` **once**
+(stale locks only — never `--remove-all`) and retries, bounded via `repo::lock_retry_step`; see
+docs/restic.md "Stale locks" and docs/decisions.md. A repo can be marked **read-only** (`--no-lock` on every read op via
 `apply_repo_flags`); every write op instead calls `ensure_writable` and refuses outright. A stats
 refresh (`fetch_and_cache_stats`) runs restic **twice** — default mode for the restore-size figures,
 then `--mode raw-data` for the on-disk stored size (`ResticStats.raw_size`) — with the second call's
-failure deliberately non-fatal to the refresh; see docs/restic.md.
+failure deliberately non-fatal to the refresh; see docs/restic.md. Retention runs `forget --prune` unless the repo has `defer_prune` set (per repo, since cloud early-deletion fees depend on where it's stored); explicit prunes still prune it — see docs/restic.md "Deferred prune".
 
 ## Concurrency: Per-Repository Lock Registry
 
@@ -167,18 +176,20 @@ restic/cron process — the retry-on-"already locked" logic remains the backstop
 
 ## Operation Event Bus
 
-Full detail (seven stateful frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
+Full detail (eight stateful frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
 per-run registries): **docs/concurrency.md**.
 
 Retain always: `tasks.rs` defines a uniform `task` event (`TaskEvent`) layered **on top of**,
 never instead of, existing detailed feeds (`backup:progress`, etc.). Envelope: `operationId`
 (unique per operation instance — the correlation key, since `repoId` alone can't distinguish
-concurrent operations), `kind`, `phase` (`started`|`progress`|`cancelling`|`cancelled`|
+concurrent operations), `kind`, `phase` (`pending`|`started`|`progress`|`cancelling`|`cancelled`|
 `finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at` (plus `retentionSkipped`, set only on a finished `backup`). Every
 restic-shelling operation is wired via `OperationCtx`, except pure-DB reads (`list_snapshots`,
-`get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
-(`clean_cache`, the "Clean Orphaned Data" button) is the one kind that emits `repoId: ""` — it
-never shells out to restic and isn't scoped to a single repo; every other kind carries a real one.
+`get_repo_stats`), the continuous 60s `cache_warmer` snapshot-refresh tick, and the still-unwired
+`refresh_snapshots` and `init_repo` (see docs/concurrency.md). `TaskKind::Cleanup` (`clean_cache`, the
+"Clean Orphaned Data" button, and the automatic `maybe_run_cleanup`) never shells out to restic and
+isn't scoped to a single repo, so it emits `repoId: ""`; Prune All and `testConnection` do too, so a
+consumer keying off `repoId` must not assume every event carries a real one.
 
 ## Security Architecture
 
@@ -227,6 +238,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   accepted trade-off for the typical 1–3 endpoints per plan; `test_webhook` (Send Test) is
   the only path that surfaces delivery errors. Don't add fire-time retry/logging without
   treating it as a deliberate design change — see webhook.rs in docs/backend.md
+- Lock failures self-heal with a **single** plain `restic unlock` + bounded retry (issue #43) — not a
+  periodic sweep (rejected: background cloud traffic, fixes nothing until the next tick), never
+  `--remove-all`, and not for read ops or copy/mirror; every path goes through `lock_retry_step`. See
+  docs/decisions.md before widening it
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
@@ -304,20 +319,28 @@ proposing a change — several are pinned by a named test or reference a confirm
   `execute_backup`/`apply_retention`'s re-fetch-failure fallback) now either fetches real data
   first or does nothing on failure. Don't reintroduce a caller that clears `snapshots_cache` with
   no real listing in hand — see docs/decisions.md.
-- `clear_cache` ("Clear All Cache") deliberately does **not** `VACUUM` — its `DELETE FROM table;`
+- `clear_browse_cache` ("Clear All Cache", which calls `AppDb::clear_cache`) deliberately does **not** `VACUUM` — its `DELETE FROM table;`
   calls have no `WHERE` clause, so SQLite's truncate optimization already makes them cheap
   regardless of row count; `VACUUM` scales with total DB size instead and would hold the same
   `AppDb` connection mutex for however long that takes, the same freeze class `clean_cache`'s old
   unbounded transaction caused. Reclaiming space is `compress_database` ("Compress Database")'s job
-  alone — see docs/decisions.md.
+  alone — see docs/decisions.md. Compaction is never automatic (issue #44, a 100 GB `app_data.db`):
+  `checkpoint_and_size` returns a `DbSize` (total + freelist-based `reclaimable_bytes`) and Settings
+  shows it with a compress-or-"that's live index data" hint (`dbSizeHint`, format.ts) instead. Path
+  deduplication and `auto_vacuum = INCREMENTAL` were analyzed and deliberately parked — don't build
+  either without the evidence named in docs/decisions.md
 - Stored repo size (`ResticStats.raw_size`) comes from `restic stats --mode raw-data`, not a `du`/filesystem walk (works for remote repos too); a failed raw-data call is non-fatal to the refresh
 - File search uses `LIKE '%query%'` (leading wildcard, no index) — accepted, not an oversight
 - `cached_at` columns are written but not read yet — kept for a future TTL feature
 - `panic = "abort"` is deliberately not set in the release profile
 - Known, deferred frontend duplication (search/index pattern, FileIcon, index-batch UI, etc.)
+- Displayed times use the web view's `Intl`/ICU zone rules, not the OS's: a stale bundled ICU (the
+  AppImage's, e.g. Morocco in issue #40) shows every time off by the rule difference. Cosmetic and
+  affects very few users — a declined fix, not an oversight; see docs/decisions.md before adding
+  any offset/zone logic
 - Linux/Wayland title-bar buttons freezing after a tray restore was an upstream `tao` 0.35 bug
   (its custom Wayland header's `EventBox` sat above the buttons), fixed by tao ≥ 0.36 / tauri ≥
-  2.12. Don't pin tauri below 2.12 and don't add an app-side workaround without re-verifying on
+  2.12 (enforced by the `tauri = "2.12"` manifest floor). Don't pin tauri below 2.12 and don't add an app-side workaround without re-verifying on
   Wayland; see docs/decisions.md
 - Backup progress bars are non-monotonic by design (restic's own `percent_done` behavior)
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
@@ -326,7 +349,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `bundle.targets` in `tauri.conf.json` is an explicit list (`deb`/`appimage`/`rpm`/`dmg`/`nsis`/`msi`).
   AppImage was dropped in v0.0.8 for Mesa 25+ black windows and re-added (issue #28) once
   tauri#15665/#15781 were verified fixed in tauri-bundler 2.10.0 / `@tauri-apps/cli` ≥ 2.12.0 —
-  that CLI version is a floor, don't pin lower. `"deb"` must stay listed (the AppImage bundler
+  that CLI version is a floor (`"@tauri-apps/cli": "^2.12.0"` in package.json), don't pin lower. `"deb"` must stay listed (the AppImage bundler
   builds from the deb output tree). App-side, AppImage-only: `gpu_compat::apply_appimage_fixups`
   unsets the dangling `GST_PLUGIN_SYSTEM_PATH_1_0`, and `commands/portal.rs` + an `App.tsx` banner
   warn when the file-chooser portal is missing (an AppImage has no `depends`). A
@@ -362,9 +385,26 @@ proposing a change — several are pinned by a named test or reference a confirm
   snapshots will be removed", so it was never a deletion risk — it made every retention run fail.)
   `build_retention_args` drops zeros; every call site gates on `has_effective_retention`
   (`snapshot.rs`) rather than `is_some()`; `apply_retention` fails cleanly with no effective rule;
-  the editor rejects 0/negative counts; and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
+  the editor rejects 0/negative/decimal counts (`parseRetention`, shared with Settings' default); and `activity.tsx`/`BackupPlansPage.tsx` mirror the same
   `> 0` test. Keep those in agreement — the Activity row waits on a `forget` op only when
-  retention will actually run. An imported plan with a hand-set zero is simply inert.
+  retention will actually run. An imported plan with a hand-set zero is simply inert; a decimal,
+  string or negative count in an import can't occur — `RetentionPolicy` is `Option<u32>`, so the
+  bundle/Backrest parse fails (whole file refused), pinned by tests in `transfer.rs`.
+- The Settings **default retention policy** (issue #48) is a **creation-time template**, off and
+  empty by default: the plan editor copies it into a *new* plan's fields and nothing reads it at
+  backup/`forget` time. Don't turn it into run-time inheritance — retention deletes snapshots, so a
+  Settings edit must never re-prune existing plans (and inheritance would need an "inherit" vs
+  "none" plan state through `apply_retention`, the scheduler and the activity reducers). Its load
+  (`load_default_retention`) fails *closed* — an error prefills nothing, unlike `notify::load`. See
+  docs/decisions.md
+- **Deferred prune** (issue #49): retention is `forget --prune` unless the repo has `defer_prune` set
+  (edit-modal checkbox "Prune after retention", ticked by default and stored inverted — a positive
+  label on purpose, the original "Don't prune…" double negative confused users). It's per **repo**, not
+  per plan or global (cloud early-deletion fees depend on where the repo lives), and explicit
+  "Prune…"/"Prune All" still prune a deferred repo. A failed flag lookup **fails closed** (no prune);
+  a read-only repo keeps its stored choice but the row hides the badge. `last_pruned_at` is
+  best-effort bookkeeping. Bulk snapshot delete is one `restic forget id1 id2 … [--prune]` (the
+  `delete_snapshot` command takes a list), so a ticked "prune" runs once — see docs/decisions.md
 - Controls use the native arrow cursor, not the web-style hand, with **no Settings toggle** (issue
   #35): a base-layer rule in `index.css` (`button, [role="button"] { cursor: default }`) overrides
   Tailwind preflight's `cursor: pointer`, no `cursor-pointer` classes remain, and the sidebar's
@@ -397,6 +437,22 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `set_launch_at_login`'s disable path checks `is_enabled()` first (Windows idempotency)
 - `reset_app` also best-effort clears the OS autostart entry, not just DB tables
 - The Windows `Run` registry value `auto-launch` writes is unquoted — not fixable from app code
+- Window size is persisted by `tauri-plugin-window-state` with **no `VISIBLE` flag** (it would
+  `show()` the window and break the hidden login launch), restored manually then shrunk by
+  `fit_to_monitor` (the plugin restores physical px unclamped), and `reset_app` deliberately does
+  **not** delete the state file (the plugin rewrites it at exit). The sub-1280 compact layout's *structural* changes (icon rail, hidden/stacked columns, header wrap) are
+  `max-xl:`/`max-mid:`-additive only — never edit a class that applies at ≥1280 for them, and keep `truncate`/
+  `max-w-0` `max-xl:`-prefixed there (full-width truncation would clip
+  `overflow-hidden` tables). Deliberate exceptions, all because a long user-chosen name must never wrap,
+  overflow or scroll at any width: free-text table cells (Logs Plan/Repository, Snapshots Host/Tags,
+  Browse/Diff names) are shrinkable (`max-w-0` + `w-[N%]`) + `truncate`; the Repositories list is
+  `grid-cols-1` with truncated rows; page-header titles next to a toolbar truncate; `Button` is
+  `whitespace-nowrap`; `Modal` titles wrap with a `flex-shrink-0` close button; and no-wrap/`min-w` guards
+  (Snapshots Paths, Browse Size/Modified, Diff Change, small badges/labels) apply at every width — they
+  only change a layout that would otherwise wrap. The column *percentages* on Logs/Snapshots do reshape how
+  spare width is shared at full size (name columns get it). Tables use
+  `overflow-hidden`, never `overflow-x-auto` (the Logs `min-w-[800px]` + `overflow-x-auto` were removed).
+  See docs/decisions.md and docs/frontend.md
 - `react-router-dom` stays on 6.x — its two audit advisories are unreachable in this app
 - Dark-mode `--tw-gray-500` (`139 148 163`) and light-mode `--tw-gray-500` (`88 103 126`) are
   deliberately not stock Tailwind values — both tuned so gray-500 text passes WCAG AA (≥4.5:1)
@@ -424,7 +480,7 @@ are silently dropped — see docs/data.md for the full list).
 
 ## Theming
 
-Three modes: Dark (default), Light, System. Stored in `localStorage`; applied as `dark`/`light`/`system` class on `<html>`. All theme-sensitive colors route through CSS custom properties in `src/index.css`, extended in `tailwind.config.js` (`gray.50–950`, `blue/green/red.300/400/700/900`, `amber.300/400/500/700/900`).
+Three modes: System (the default when nothing is stored), Dark, Light; `:root` carries the dark values. Stored in `localStorage`; applied as `dark`/`light`/`system` class on `<html>`. All theme-sensitive colors route through CSS custom properties in `src/index.css`, extended in `tailwind.config.js` (`gray.50–950`, `blue/green/red.300/400/700/900`, `amber.300/400/500/700/900`, `purple.400`, `yellow.400`).
 
 **Adding a themed color:** add `--tw-<color>-<shade>` to both `:root` and `html.light` (and the
 `system` media-query block, kept identical to `light`) in `src/index.css`, extend
@@ -481,7 +537,7 @@ docs/decisions.md.
 
 ## Releases
 
-`.github/workflows/release.yml` — triggered by `v*` tag; a `test` job (frontend + Rust tests) gates the build; builds on ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. Requires `permissions: contents: write`. Skipped on non-GitHub CI (`github.server_url` check).
+`.github/workflows/release.yml` — triggered by `v*` tag; a `test` job (frontend + Rust tests) gates the build; builds on ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. The `build` job carries `permissions: contents: write` and the `github.server_url` check that skips it on non-GitHub CI; the `test` job always runs.
 
 Pre-built macOS binaries are not notarized: `sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app`.
 
@@ -494,7 +550,12 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,schedule,snapshot,transfer,webhook}.rs`.
+- Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
+  build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
+  controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a
+  local Chrome/Chromium (`CHROME_BIN`); skips without one (fails only with `LAYOUT_REQUIRE_BROWSER`). Deliberately
+  not run by CI (`test.yml` calls `test:vite`/`test:rust` separately).
 - CI (`.github/workflows/test.yml`) runs on every push that isn't a `v*` tag and on PRs.
 
 ```bash
@@ -504,7 +565,8 @@ npm run lint:rust    # cargo clippy --all-targets -- -D warnings
 npm run lint:all     # both of the above
 npm run test:vite   # frontend tests only
 npm run test:rust   # Rust tests only (cargo test)
-npm run test:all    # both
+npm run test:layout # layout tests: real build in headless Chrome, mocked backend (~15s)
+npm run test:all    # all three
 ```
 
 Linting is deliberately narrow and **is wired into CI** — `.github/workflows/test.yml` runs
@@ -514,8 +576,9 @@ enables only `eslint-plugin-react-hooks` (`rules-of-hooks` + `exhaustive-deps`) 
 `typescript-eslint` rule sets, no stylistic rules — because `npm run typecheck` already covers
 type errors and stylistic linting adds churn without preventing the regressions this project
 actually sees. `npm run lint:rust` runs `cargo clippy` with `-D warnings`; the few call sites that
-can't reasonably shrink (`#[tauri::command]`s with many parameters, one intentionally
-fire-and-forget `spawn_blocking` unlock) carry a targeted `#[allow(clippy::...)]` with a comment,
+can't reasonably shrink (`#[tauri::command]`s with many parameters, two intentionally
+fire-and-forget `spawn_blocking`s — the post-cancel unlock in `execute_backup`, snapshot.rs, and webhook
+delivery in webhook.rs) carry a targeted `#[allow(clippy::...)]` with a comment,
 matching the pre-existing pattern in `cache.rs`. Neither linter catches this project's actual
 biggest regression risk — the concurrency/ordering invariants documented in the Concurrency and
 Restic Integration sections above (`RepoLocks` ordering, `busy` flags, cancel-path races); those

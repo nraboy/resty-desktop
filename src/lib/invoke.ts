@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DefaultRetention, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,9 @@ export const renameRepo = (repoId: string, newName: string): Promise<void> =>
 
 export const updateRepoPath = (repoId: string, newPath: string): Promise<void> =>
   invoke("update_repo_path", { repoId, newPath });
+
+export const updateRepoDeferPrune = (repoId: string, deferPrune: boolean): Promise<void> =>
+  invoke("update_repo_defer_prune", { repoId, deferPrune });
 
 export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<void> =>
   invoke("update_repo_read_only", { repoId, readOnly });
@@ -182,6 +185,12 @@ export const getNotificationSettings = (): Promise<NotificationSettings> =>
 export const setNotificationSettings = (value: NotificationSettings): Promise<void> =>
   invoke("set_notification_settings", { value });
 
+export const getDefaultRetention = (): Promise<DefaultRetention> =>
+  invoke("get_default_retention");
+
+export const setDefaultRetention = (value: DefaultRetention): Promise<void> =>
+  invoke("set_default_retention", { value });
+
 export const checkRepo = (repoId: string): Promise<CheckResult> =>
   invoke("check_repo", { repoId });
 
@@ -212,7 +221,11 @@ export const refreshSnapshots = (repoId: string): Promise<Snapshot[]> =>
   invoke("refresh_snapshots", { repoId });
 
 export const deleteSnapshot = (repoId: string, snapshotId: string, prune: boolean): Promise<void> =>
-  invoke("delete_snapshot", { repoId, snapshotId, prune });
+  deleteSnapshots(repoId, [snapshotId], prune);
+
+/** One `restic forget id1 id2 …`, so `prune` runs once for the whole batch. */
+export const deleteSnapshots = (repoId: string, snapshotIds: string[], prune: boolean): Promise<void> =>
+  invoke("delete_snapshot", { repoId, snapshotIds, prune });
 
 export const tagSnapshot = (
   repoId: string,
@@ -365,18 +378,18 @@ export const describeCronExpr = (cronExpr: string): Promise<string> =>
 
 // ── cache ─────────────────────────────────────────────────────────────────
 
-export const clearBrowseCache = (): Promise<number> =>
+export const clearBrowseCache = (): Promise<DbSize> =>
   invoke("clear_browse_cache");
 
-export const cleanCache = (): Promise<[number, number]> =>
+export const cleanCache = (): Promise<[number, DbSize]> =>
   invoke("clean_cache");
 
 export const stopCleanup = (): Promise<void> => invoke("stop_cleanup");
 
-export const compressDatabase = (): Promise<number> =>
+export const compressDatabase = (): Promise<DbSize> =>
   invoke("compress_database");
 
-export const getDbSize = (): Promise<number> =>
+export const getDbSize = (): Promise<DbSize> =>
   invoke("get_db_size");
 
 export const listBackupHistory = (): Promise<BackupHistoryEntry[]> =>

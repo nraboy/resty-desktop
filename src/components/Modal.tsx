@@ -56,12 +56,12 @@ export default function Modal({ title, open, onClose, children, maxWidth = "max-
       />
       <div className={`relative z-10 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full ${maxWidth} mx-4 flex flex-col max-h-[90vh]`}>
         <div className="flex items-center justify-between flex-shrink-0 px-6 pt-6 pb-4">
-          <h2 id={titleId} className="text-lg font-semibold text-gray-100">{title}</h2>
+          <h2 id={titleId} className="text-lg font-semibold text-gray-100 min-w-0 break-words">{title}</h2>
           <button
             ref={closeButtonRef}
             onClick={onClose}
             aria-label="Close"
-            className="text-gray-400 hover:text-gray-200 transition-colors"
+            className="text-gray-400 hover:text-gray-200 transition-colors flex-shrink-0 ml-4"
           >
             <XIcon className="w-5 h-5" />
           </button>

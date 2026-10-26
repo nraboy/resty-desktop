@@ -136,7 +136,7 @@ async fn tick(app: &tauri::AppHandle) {
                     if has_effective_retention(r) {
                         // apply_retention's own OperationCtx (kind: Forget) tells the Activity
                         // panel this plan has moved from the byte-transfer phase to the
-                        // retention finalize step (a `forget --prune` that can take 10s+; only
+                        // retention finalize step (a `forget`, plus `--prune` unless the repo defers it, that can take 10s+; only
                         // reached with an effective, non-zero keep value) — the
                         // panel keeps the active task visible and swaps its subtitle to
                         // "Applying retention rules…" on that op's "started" event (see

@@ -1,18 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getLaunchAtLogin, getLaunchAtLoginWarning, getNotificationSettings, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setLaunchAtLogin, setNotificationSettings, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
+import { activateTray, cancelPrune, changeMasterPassword, checkFullDiskAccess, cleanCache, clearBrowseCache, compressDatabase, deactivateTray, getAutoIndexing, getAutoUnlock, getAutoUnlockSupported, getCompression, getDbSize, getDefaultRetention, getLaunchAtLogin, getLaunchAtLoginWarning, getNotificationSettings, getRemoteAutoRefresh, getResticPath, getResticVersion, getRestorePath, getTrayEnabled, getTrayWarning, listRepos, openFullDiskAccessSettings, pruneAllRepos, setAutoIndexing, setAutoUnlock, setCompression as saveCompression, setDefaultRetention, setLaunchAtLogin, setNotificationSettings, setRemoteAutoRefresh, setResticPath, setRestorePath, setTrayEnabled } from "../lib/invoke";
 import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { NotificationSettings } from "../lib/types";
-import { formatBytes } from "../lib/format";
+import type { DbSize, NotificationSettings, RetentionPolicy } from "../lib/types";
+import { dbSizeHint, formatBytes } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import { useActivity } from "../lib/activity";
+import { EMPTY_RETENTION_FIELDS, parseRetention, retentionToFields } from "../lib/utils";
+import type { RetentionFields as RetentionFieldValues } from "../lib/utils";
 import type { Theme } from "../lib/theme";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import ImportExportCard from "../components/ImportExportCard";
 import ProgressBar from "../components/ProgressBar";
+import RetentionFields from "../components/RetentionFields";
 import Tooltip from "../components/Tooltip";
 import { ChevronDownIcon, CheckIcon, WarningIcon } from "../components/icons";
 
@@ -47,7 +50,7 @@ export default function SettingsPage() {
   const [cleanedCount, setCleanedCount] = useState<number | null>(null);
   const [compressing, setCompressing] = useState(false);
   const [compressed, setCompressed] = useState(false);
-  const [dbSize, setDbSize] = useState<number | null>(null);
+  const [dbSize, setDbSize] = useState<DbSize | null>(null);
   // Shared by all three Application Cache buttons below — each had a try/finally with no
   // catch, so a failed clear/clean/compress was previously invisible.
   const [cacheOpError, setCacheOpError] = useState("");
@@ -102,6 +105,20 @@ export default function SettingsPage() {
   // loop is the sole source of truth for this card.
   const notificationsTouchedRef = useRef(false);
 
+  // Default retention: a template for *new* plans (see backup_plan.rs). The switch saves at once;
+  // the five values save through the card's own button, so `savedRetention` is what's stored and
+  // `retentionFields` may hold unsaved edits.
+  const [defaultRetentionEnabled, setDefaultRetentionEnabled] = useState(false);
+  // The switch stays disabled until the stored policy has loaded: it saves `savedRetention`, so
+  // flipping it earlier would overwrite the stored values with the empty initial state.
+  const [defaultRetentionLoaded, setDefaultRetentionLoaded] = useState(false);
+  const [retentionFields, setRetentionFields] = useState<RetentionFieldValues>(EMPTY_RETENTION_FIELDS);
+  const [savedRetention, setSavedRetention] = useState<RetentionPolicy>({});
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionSaved, setRetentionSaved] = useState(false);
+  const [retentionError, setRetentionError] = useState("");
+  const retentionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -132,6 +149,12 @@ export default function SettingsPage() {
       notificationsRef.current = v;
       setNotificationsLocal(v);
     }).catch(() => {});
+    getDefaultRetention().then((d) => {
+      setDefaultRetentionEnabled(d.enabled);
+      setSavedRetention(d.policy);
+      setRetentionFields(retentionToFields(d.policy));
+      setDefaultRetentionLoaded(true);
+    }).catch((e) => setRetentionError(String(e)));
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });
@@ -156,6 +179,7 @@ export default function SettingsPage() {
       if (cleanTimerRef.current !== null) clearTimeout(cleanTimerRef.current);
       if (compressTimerRef.current !== null) clearTimeout(compressTimerRef.current);
       if (passwordTimerRef.current !== null) clearTimeout(passwordTimerRef.current);
+      if (retentionTimerRef.current !== null) clearTimeout(retentionTimerRef.current);
     };
   }, []);
 
@@ -177,6 +201,40 @@ export default function SettingsPage() {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Sends the *stored* policy, never unsaved field edits, so flipping the switch can't commit
+  // half-typed values. Fields reset to the stored policy so what's shown is what's saved.
+  const handleDefaultRetentionToggle = async (next: boolean) => {
+    setDefaultRetentionEnabled(next);
+    setRetentionFields(retentionToFields(savedRetention));
+    setRetentionError("");
+    try {
+      await setDefaultRetention({ enabled: next, policy: savedRetention });
+    } catch (err: any) {
+      setDefaultRetentionEnabled(!next);
+      setRetentionError(String(err));
+    }
+  };
+
+  const handleSaveDefaultRetention = async () => {
+    const parsed = parseRetention(retentionFields);
+    if ("error" in parsed) { setRetentionError(parsed.error); return; }
+    const policy = parsed.value ?? {};
+    setRetentionSaving(true);
+    setRetentionError("");
+    setRetentionSaved(false);
+    try {
+      await setDefaultRetention({ enabled: true, policy });
+      setSavedRetention(policy);
+      setRetentionSaved(true);
+      if (retentionTimerRef.current !== null) clearTimeout(retentionTimerRef.current);
+      retentionTimerRef.current = setTimeout(() => setRetentionSaved(false), 2000);
+    } catch (err: any) {
+      setRetentionError(String(err));
+    } finally {
+      setRetentionSaving(false);
     }
   };
 
@@ -425,6 +483,8 @@ export default function SettingsPage() {
       setChangingPassword(false);
     }
   };
+
+  const dbHint = dbSize ? dbSizeHint(dbSize) : null;
 
   return (
     <div className="p-6">
@@ -719,6 +779,55 @@ export default function SettingsPage() {
             </Tooltip>
           </label>
         </div>
+      </div>
+
+      <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <h2 className="text-sm font-medium text-gray-300 mb-1">Default Retention Policy</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Applies only when you create a backup plan — existing plans are never changed. Leave it
+          off to start every plan with no retention, which is restic's own default.
+        </p>
+        <label className="flex items-center gap-3 select-none">
+          <button
+            role="switch"
+            aria-checked={defaultRetentionEnabled}
+            aria-label="Pre-fill new backup plans with a retention policy"
+            disabled={!defaultRetentionLoaded}
+            onClick={() => handleDefaultRetentionToggle(!defaultRetentionEnabled)}
+            className={[
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 disabled:cursor-not-allowed",
+              defaultRetentionEnabled ? "bg-blue-600" : "bg-gray-700",
+            ].join(" ")}
+          >
+            <span
+              className={[
+                "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                defaultRetentionEnabled ? "translate-x-4" : "translate-x-1",
+              ].join(" ")}
+            />
+          </button>
+          <span className="text-sm text-gray-300">Pre-fill new backup plans with a retention policy</span>
+        </label>
+        {defaultRetentionEnabled && (
+          <div className="mt-4 space-y-3">
+            <RetentionFields value={retentionFields} onChange={setRetentionFields} />
+            {![savedRetention.keepLast, savedRetention.keepDaily, savedRetention.keepWeekly, savedRetention.keepMonthly, savedRetention.keepYearly].some((n) => (n ?? 0) > 0) && (
+              <p className="text-xs text-amber-500">
+                No rules set — new plans will start with no retention.
+              </p>
+            )}
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSaveDefaultRetention} loading={retentionSaving}>Save Default</Button>
+              {retentionSaved && (
+                <span className="text-sm text-green-400 flex items-center gap-1">
+                  <CheckIcon className="w-4 h-4" />
+                  Saved
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {retentionError && <p className="mt-3 text-sm text-red-300">{retentionError}</p>}
       </div>
 
       <div className="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-5">
@@ -1103,7 +1212,26 @@ export default function SettingsPage() {
         )}
         {cacheOpError && <p className="text-sm text-red-300 mt-3">{cacheOpError}</p>}
         {dbSize !== null && (
-          <p className="text-xs text-gray-500 mt-3">Current DB Size: {formatBytes(dbSize)}</p>
+          <>
+            <p className="text-xs text-gray-500 mt-3">
+              Current DB Size: {formatBytes(dbSize.totalBytes)}
+              {dbSize.reclaimableBytes > 0 && ` · ${formatBytes(dbSize.reclaimableBytes)} reclaimable`}
+            </p>
+            {dbHint?.kind === "compress" && (
+              <p className="text-xs text-amber-400 mt-1">
+                Compress Database can reclaim about {formatBytes(dbHint.reclaimableBytes)}. It needs
+                about {formatBytes(dbHint.neededBytes)} of free disk space while it runs and pauses
+                other app activity until it finishes.
+              </p>
+            )}
+            {dbHint?.kind === "large" && (
+              <p className="text-xs text-gray-500 mt-1">
+                This size is indexed file data, so Compress Database won't shrink it. Turning off
+                auto-indexing, or indexing only the snapshots you need to browse or search, keeps it
+                smaller.
+              </p>
+            )}
+          </>
         )}
       </div>
 

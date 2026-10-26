@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isPermissionWarning, isWindowsUserAgent, needsFullDiskAccess, parsePackSize, planReadPaths } from "./utils";
+import { isPermissionWarning, isWindowsUserAgent, needsFullDiskAccess, parsePackSize, parseRetention, planReadPaths, retentionToFields } from "./utils";
 
 describe("needsFullDiskAccess", () => {
   describe("~/Library paths", () => {
@@ -161,5 +161,36 @@ describe("isPermissionWarning", () => {
   it("does not match other read errors", () => {
     expect(isPermissionWarning("Source path not found")).toBe(false);
     expect(isPermissionWarning("input/output error")).toBe(false);
+  });
+});
+
+describe("parseRetention", () => {
+  const blank = { keepLast: "", keepDaily: "", keepWeekly: "", keepMonthly: "", keepYearly: "" };
+  it("treats all-blank as no retention", () => {
+    expect(parseRetention(blank)).toEqual({ value: undefined });
+    expect(parseRetention({ ...blank, keepLast: "  " })).toEqual({ value: undefined });
+  });
+  it("parses filled fields and leaves blanks unset", () => {
+    expect(parseRetention({ ...blank, keepDaily: "7", keepWeekly: "4" })).toEqual({
+      value: { keepLast: undefined, keepDaily: 7, keepWeekly: 4, keepMonthly: undefined, keepYearly: undefined },
+    });
+  });
+  it("rejects 0, negative and non-numeric counts", () => {
+    expect(parseRetention({ ...blank, keepLast: "0" })).toHaveProperty("error");
+    expect(parseRetention({ ...blank, keepDaily: "-2" })).toHaveProperty("error");
+    expect(parseRetention({ ...blank, keepYearly: "abc" })).toHaveProperty("error");
+    expect(parseRetention({ ...blank, keepLast: "3", keepDaily: "0" })).toHaveProperty("error");
+  });
+  it("rejects decimals and exponents instead of truncating them", () => {
+    expect(parseRetention({ ...blank, keepLast: "12.5" })).toHaveProperty("error");
+    expect(parseRetention({ ...blank, keepLast: "1e2" })).toHaveProperty("error");
+    expect(parseRetention({ ...blank, keepLast: "3", keepDaily: "abc" })).toHaveProperty("error");
+  });
+  it("round-trips through retentionToFields", () => {
+    const policy = { keepLast: 3, keepMonthly: 12 };
+    expect(parseRetention(retentionToFields(policy))).toEqual({
+      value: { keepLast: 3, keepDaily: undefined, keepWeekly: undefined, keepMonthly: 12, keepYearly: undefined },
+    });
+    expect(retentionToFields(undefined)).toEqual(blank);
   });
 });
