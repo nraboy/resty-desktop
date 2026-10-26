@@ -3,7 +3,7 @@
 // by the Rust engine (commands/plan_edit.rs); the patterns offered here are plain restic
 // patterns and are only ever applied through that verification.
 
-import type { SourceKind } from "./planTree";
+import { baseName, isInside, joinPath, rootOf, type SourceKind } from "./planTree";
 
 /** The result of `tree_plan_edit`: the plan's sources and patterns after the edit. */
 export interface EditOutcome {
@@ -39,7 +39,10 @@ export interface ExportOut {
 
 /** Escapes the characters Go's `filepath.Match` (and so restic) treats specially, so a literal
  * path or name can be used inside a pattern. Mirrors `escape_glob` in plan_edit.rs. */
-export function escapeGlob(s: string): string {
+export function escapeGlob(s: string, windows = false): string {
+  // On Windows a backslash is a path separator, not an escape, so a literal `[` is written as the
+  // class `[[]` (`*` and `?` can't occur in a Windows file name).
+  if (windows) return s.replace(/\[/g, "[[]");
   return s.replace(/[\\[\]*?]/g, (c) => `\\${c}`);
 }
 
@@ -50,21 +53,21 @@ export interface ScopeOption {
   pattern: string;
 }
 
-const baseName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
-
 /** The folders between a source and the path's own folder, nearest first (at most `max`). */
 function ancestorsBelowSource(path: string, sources: string[], max: number): string[] {
   const src = sources
-    .filter((s) => path === s || path.startsWith(s + "/"))
+    .filter((s) => path === s || isInside(path, s))
     .sort((a, b) => b.length - a.length)[0];
-  const parts = path.split("/").filter(Boolean);
-  const out: string[] = [];
-  let acc = "";
+  const root = rootOf(path);
+  if (!root) return [];
+  const parts = path.slice(root.length).split("/").filter(Boolean);
   const chain: string[] = [];
+  let acc = root;
   for (const p of parts.slice(0, -1)) {
-    acc += "/" + p;
+    acc = joinPath(acc, p);
     chain.push(acc);
   }
+  const out: string[] = [];
   for (let i = chain.length - 1; i >= 0 && out.length < max; i--) {
     // Stop at the source: a pattern scoped above it would reach outside what's backed up.
     if (src && chain[i].length < src.length) break;
@@ -78,27 +81,27 @@ function ancestorsBelowSource(path: string, sources: string[], max: number): str
  * contents only, the name anywhere, the name under a nearer ancestor, a file extension. The
  * first option is the default. `{ancestor}/**\/{name}` follows restic's `**` rule.
  */
-export function scopeOptions(path: string, kind: SourceKind, sources: string[]): ScopeOption[] {
+export function scopeOptions(path: string, kind: SourceKind, sources: string[], windows = false): ScopeOption[] {
   const name = baseName(path);
-  const opts: ScopeOption[] = [{ id: "exact", label: "This exact item", pattern: escapeGlob(path) }];
+  const opts: ScopeOption[] = [{ id: "exact", label: "This exact item", pattern: escapeGlob(path, windows) }];
   if (kind === "dir") {
-    opts.push({ id: "contents", label: "Everything inside it, keeping the folder itself", pattern: `${escapeGlob(path)}/*` });
+    opts.push({ id: "contents", label: "Everything inside it, keeping the folder itself", pattern: `${escapeGlob(path, windows)}/*` });
   }
   opts.push({
     id: "name",
     label: kind === "dir" ? `Any folder named “${name}”, anywhere` : `Any file named “${name}”, anywhere`,
-    pattern: escapeGlob(name),
+    pattern: escapeGlob(name, windows),
   });
   for (const a of ancestorsBelowSource(path, sources, 3)) {
     opts.push({
       id: `under:${a}`,
       label: `“${name}” anywhere under ${baseName(a) || a}`,
-      pattern: `${escapeGlob(a)}/**/${escapeGlob(name)}`,
+      pattern: `${escapeGlob(a, windows)}/**/${escapeGlob(name, windows)}`,
     });
   }
   const dot = name.lastIndexOf(".");
   if (kind !== "dir" && dot > 0 && dot < name.length - 1) {
-    opts.push({ id: "ext", label: `All “.${name.slice(dot + 1)}” files`, pattern: `*${escapeGlob(name.slice(dot))}` });
+    opts.push({ id: "ext", label: `All “.${name.slice(dot + 1)}” files`, pattern: `*${escapeGlob(name.slice(dot), windows)}` });
   }
   return opts;
 }

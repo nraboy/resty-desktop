@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { treeCountMatches, treePlanEdit } from "../lib/invoke";
-import type { NodeVerdict, SourceKind, TreeRulesInput } from "../lib/planTree";
+import { baseName, type NodeVerdict, type SourceKind, type TreeRulesInput } from "../lib/planTree";
 import { escapeGlob, scopeOptions, type EditOutcome, type MatchPreview } from "../lib/planTreeEdit";
+import { isWindows } from "../lib/utils";
 import Button from "./Button";
 import Modal from "./Modal";
 
@@ -28,7 +29,6 @@ function modeFor(t: EditTarget): Mode {
   return t.verdict?.included ? "exclude" : "include";
 }
 
-const baseName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 
 function PatternList({ rules }: { rules: string[] }) {
   return (
@@ -53,7 +53,11 @@ export default function PlanTreeEditDialog({ target, rules, onClose, onApply }: 
 
 function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { target: EditTarget }) {
   const mode = modeFor(target);
-  const options = useMemo(() => scopeOptions(target.path, target.kind, rules.sources), [target, rules.sources]);
+  const windows = isWindows();
+  const options = useMemo(
+    () => scopeOptions(target.path, target.kind, rules.sources, windows),
+    [target, rules.sources, windows],
+  );
   const [optionId, setOptionId] = useState("exact");
   const [pattern, setPattern] = useState(options[0]?.pattern ?? "");
   const [preview, setPreview] = useState<MatchPreview | null>(null);
@@ -89,7 +93,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
     let cancelled = false;
     const action =
       mode === "removeSource"
-        ? ({ kind: "exclude", path: target.path, pattern: escapeGlob(target.path) } as const)
+        ? ({ kind: "exclude", path: target.path, pattern: escapeGlob(target.path, windows) } as const)
         : ({ kind: "include", path: target.path, scope: includeScope } as const);
     treePlanEdit(rulesRef.current, action)
       .then((o) => !cancelled && setOutcome(o))
@@ -97,7 +101,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
     return () => {
       cancelled = true;
     };
-  }, [mode, target.path, includeScope]);
+  }, [mode, target.path, includeScope, windows]);
 
   const apply = async () => {
     setBusy(true);

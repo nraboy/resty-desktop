@@ -6,13 +6,18 @@ import {
   treeListDir,
   treeScanCancel,
   treeScanStart,
+  treeEnv,
   treeSupported,
 } from "../lib/invoke";
 import {
   ancestorsOf,
+  baseName,
   displayState,
+  joinPath,
   flattenRows,
   reasonLines,
+  toCanonical,
+  toNative,
   topLevelSources,
   visibleWindow,
   type DisplayState,
@@ -22,9 +27,11 @@ import {
   type RuleProblem,
   type ScanResult,
   type SourceKind,
+  type TreeEnv,
   type TreeRulesInput,
 } from "../lib/planTree";
 import { ChevronDownIcon, ChevronRightIcon, CheckIcon, FileIcon, FolderIcon, LinkIcon, WarningIcon } from "./icons";
+import { isWindows } from "../lib/utils";
 import PlanTreeEditDialog, { type EditTarget } from "./PlanTreeEditDialog";
 import PlanTreeExportDialog from "./PlanTreeExportDialog";
 import type { EditOutcome } from "../lib/planTreeEdit";
@@ -40,7 +47,6 @@ const FLUSH_MS = 100;
 
 type RootMode = "sources" | "filesystem";
 
-const baseName = (path: string) => path.split("/").filter(Boolean).pop() ?? "/";
 
 interface ScanEventPayload extends ScanResult {
   scanId: number;
@@ -147,16 +153,27 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
+  // Where the tree starts (`/`, or a drive list on Windows) comes from the backend; the OS's
+  // spelling of paths decides how the plan's sources are read (`C:\\Users\\me` ↔ `C:/Users/me`).
+  const windows = isWindows();
+  const [env, setEnv] = useState<TreeEnv | null>(null);
   useEffect(() => {
     treeSupported().then(setSupported).catch(() => setSupported(false));
+    treeEnv().then(setEnv).catch(() => {});
   }, []);
 
   const roots = useMemo(
     () =>
       mode === "sources"
-        ? topLevelSources(activeRules.sources).map((p) => ({ path: p, name: p }))
-        : [{ path: "/", name: "Computer (/)" }],
-    [mode, activeRules.sources],
+        ? topLevelSources(activeRules.sources.map((s) => toCanonical(s, windows))).map((p) => ({
+            path: p,
+            // Shown the way the OS writes it.
+            name: toNative(p, windows),
+          }))
+        : env && env.roots.length > 0
+          ? env.roots.map((r) => ({ path: r.path, name: env.windows ? r.label : `${r.label} (${r.path})` }))
+          : [{ path: "/", name: "Computer (/)" }],
+    [mode, activeRules.sources, windows, env],
   );
 
   // ── data loading ──────────────────────────────────────────────────────────
@@ -202,10 +219,9 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
         bump();
         return;
       }
-      const base = path === "/" ? "" : path;
       const children: string[] = [];
       for (const e of listing.entries) {
-        const child = `${base}/${e.name}`;
+        const child = joinPath(path, e.name);
         children.push(child);
         if (!nodes.current.has(child)) nodes.current.set(child, { path: child, name: e.name, kind: e.kind });
       }
@@ -247,7 +263,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     // Open the roots (and, browsing the whole filesystem, the way down to each source).
     const toOpen = new Set<string>(roots.map((r) => r.path));
     if (mode === "filesystem") {
-      for (const s of topLevelSources(rulesRef.current.sources).slice(0, 10)) {
+      for (const s of topLevelSources(rulesRef.current.sources.map((x) => toCanonical(x, windows))).slice(0, 10)) {
         for (const a of ancestorsOf(s)) toOpen.add(a);
         toOpen.add(s);
       }
@@ -262,7 +278,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     if (gen !== generation.current) return;
     // Anything expanded but not yet listed (first open, or new roots).
     for (const p of toOpen) await listFolder(p);
-  }, [classify, listFolder, mode, roots]);
+  }, [classify, listFolder, mode, roots, windows]);
 
   // Start (and restart on any change of rules or roots) once the preview is open.
   useEffect(() => {
@@ -362,8 +378,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   };
 
   const openEdit = (path: string, kind: SourceKind) => {
-    const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
-    const isSource = rules.sources.some((s) => norm(s.trim()) === path);
+    const isSource = rules.sources.some((s) => toCanonical(s, windows) === path);
     setEditTarget({
       path,
       name: baseName(path),

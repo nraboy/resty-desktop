@@ -103,6 +103,7 @@ fn rules(sources: &[&str], patterns: &[&str]) -> PlanRules {
             .collect(),
         markers: vec![],
         exclude_caches: false,
+        style: PathStyle::Unix,
     }
 }
 
@@ -416,6 +417,27 @@ fn the_allocation_free_match_agrees_with_the_literal_port() {
 
 // ── against the real restic ─────────────────────────────────────────────────
 
+/// `canonicalize` without the `\\?\` prefix Windows adds (restic, and our paths, don't use it).
+fn plain_canonical(p: &std::path::Path) -> std::path::PathBuf {
+    let c = p.canonicalize().unwrap();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = c.to_string_lossy().strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    c
+}
+
+/// The `/` spelling of a native path — how the engine and the comparisons below see it.
+fn canon(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    }
+}
+
 fn restic_available() -> bool {
     std::process::Command::new("restic")
         .arg("version")
@@ -472,7 +494,7 @@ fn restic_paths(repo: &std::path::Path, root: &std::path::Path, args: &[String])
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|j| j["message_type"] == "verbose_status")
-        .filter_map(|j| j["item"].as_str().map(|i| i.trim_end_matches('/').to_string()))
+        .filter_map(|j| j["item"].as_str().map(|i| canon(i).trim_end_matches('/').to_string()))
         .collect()
 }
 
@@ -505,9 +527,9 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed * 1000 + case);
         let root = base.join(format!("tree{case}"));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = plain_canonical(&root);
         let nodes = make_tree(&mut rng, &root);
-        let root_str = root.to_str().unwrap().to_string();
+        let root_str = canon(root.to_str().unwrap());
 
         let n_rules = rng.gen_range(1..6);
         let mut rule_inputs = Vec::new();
@@ -539,6 +561,7 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
             rules: rule_inputs.clone(),
             markers,
             exclude_caches: false,
+            style: PathStyle::NATIVE,
         })
         .unwrap();
         let probe = FsProbe::default();
@@ -547,7 +570,8 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
         let mut all_nodes = nodes.clone();
         all_nodes.push(root.join(".nobackup"));
         for node in all_nodes.iter().filter(|p| p.exists()) {
-            let path = node.to_str().unwrap();
+            let path = canon(node.to_str().unwrap());
+            let path = path.as_str();
             let want = reported.contains(path);
             let got = engine.classify(path, &probe);
             assert_eq!(
@@ -589,6 +613,7 @@ fn engine_speed() {
         rules: rule_inputs,
         markers: vec![],
         exclude_caches: false,
+        style: PathStyle::Unix,
     })
     .unwrap();
     let probe = MockProbe::default();
@@ -618,4 +643,160 @@ fn engine_speed() {
             elapsed.as_nanos() as f64 / paths.len() as f64
         );
     }
+}
+
+// ── Windows path rules ──────────────────────────────────────────────────────
+//
+// restic converts every Windows path and pattern to `/`-separated components before matching
+// (`filepath.ToSlash`), so the matcher is shared; what differs is the path handling around it,
+// tested here as pure string logic so it runs on every platform. The end-to-end check against
+// real restic on Windows is the compatibility workflow (.github/workflows/restic-compat.yml).
+
+#[test]
+fn windows_clean_is_filepath_clean_then_to_slash() {
+    for (input, want) in [
+        ("", "."),
+        ("C:\\", "C:/"),
+        ("C:/", "C:/"),
+        ("C:", "C:."),
+        ("C:\\Users\\me\\", "C:/Users/me"),
+        ("C:\\Users\\\\me", "C:/Users/me"),
+        ("c:/a/../b", "c:/b"),
+        ("C:\\..\\x", "C:/x"),
+        ("C:\\a\\.\\b", "C:/a/b"),
+        ("\\foo\\bar", "/foo/bar"),
+        ("/foo/bar/", "/foo/bar"),
+        ("a\\b", "a/b"),
+        ("..\\a", "../a"),
+        ("C:foo", "C:foo"),
+    ] {
+        assert_eq!(PathStyle::Windows.clean(input), want, "Clean({input:?})");
+    }
+    // Unix keeps a backslash as an ordinary character.
+    assert_eq!(PathStyle::Unix.clean("a\\b/c"), "a\\b/c");
+}
+
+#[test]
+fn path_styles_join_split_and_spell_paths() {
+    let (u, w) = (PathStyle::Unix, PathStyle::Windows);
+    assert_eq!(u.join("/", "etc"), "/etc");
+    assert_eq!(u.join("/etc", "hosts"), "/etc/hosts");
+    assert_eq!(w.join("C:/", "Users"), "C:/Users");
+    assert_eq!(w.join("C:/Users", "me"), "C:/Users/me");
+
+    assert_eq!(u.parent("/etc"), "/");
+    assert_eq!(u.parent("/etc/hosts"), "/etc");
+    assert_eq!(w.parent("C:/Users"), "C:/");
+    assert_eq!(w.parent("C:/Users/me"), "C:/Users");
+    assert_eq!(w.parent("C:/"), "C:/");
+
+    assert_eq!(w.to_native("C:/Users/me"), "C:\\Users\\me");
+    assert_eq!(u.to_native("/etc/hosts"), "/etc/hosts");
+
+    assert_eq!(strip_source("C:/Users/me/x", "C:/Users/me"), Some("x"));
+    assert_eq!(strip_source("C:/Users/me", "C:/Users/me"), Some(""));
+    assert_eq!(strip_source("C:/Users/meow", "C:/Users/me"), None);
+    assert_eq!(strip_source("C:/Users", "C:/"), Some("Users"));
+    assert_eq!(strip_source("D:/x", "C:/"), None);
+    assert_eq!(strip_source("/etc/x", "/"), Some("etc/x"));
+}
+
+#[test]
+fn windows_escapes_a_bracket_with_a_class_because_backslash_is_a_separator() {
+    assert_eq!(PathStyle::Windows.escape_glob("C:/a/we[ird]"), "C:/a/we[[]ird]");
+    assert_eq!(PathStyle::Unix.escape_glob("/a/we[ird]"), "/a/we\\[ird\\]");
+    // The escaped Windows pattern really matches the literal name and nothing else.
+    let w = PathStyle::Windows;
+    let pat = w.escape_glob("C:/s/we[ird]");
+    assert_eq!(pattern_matches_styled(&pat, "C:/s/we[ird]/x", w), Ok(true));
+    assert_eq!(pattern_matches_styled(&pat, "C:/s/weird/x", w), Ok(false));
+}
+
+#[test]
+fn restic_pattern_tables_hold_under_windows_rules_too() {
+    // restic's own filter tests run on its Windows CI, so every row must hold there as well.
+    let w = PathStyle::Windows;
+    for (pattern, path, want) in RESTIC_MATCH {
+        if path.is_empty() {
+            continue;
+        }
+        assert_eq!(pattern_matches_styled(pattern, path, w), Ok(*want), "windows Match({pattern:?}, {path:?})");
+    }
+    for (pattern, path, want) in RESTIC_CHILD_MATCH {
+        if path.is_empty() {
+            continue;
+        }
+        assert_eq!(pattern_child_matches_styled(pattern, path, w), Ok(*want), "windows ChildMatch({pattern:?}, {path:?})");
+    }
+    for (patterns, path, want_match, want_child) in RESTIC_LIST {
+        let parsed: Vec<Pattern> =
+            patterns.iter().filter(|p| !p.is_empty()).map(|p| Pattern::parse_styled(p, w).unwrap()).collect();
+        let list = PatternList::new(parsed, false);
+        let out = list.evaluate(path);
+        assert_eq!((out.matched, out.child_may_match), (*want_match, *want_child), "windows List({patterns:?}, {path:?})");
+    }
+}
+
+fn win_rules(sources: &[&str], patterns: &[&str]) -> PlanRules {
+    PlanRules { style: PathStyle::Windows, ..rules(sources, patterns) }
+}
+
+#[test]
+fn a_windows_pattern_may_use_either_separator_and_any_spelling_of_the_path() {
+    let e = Engine::new(&win_rules(&["C:\\Users\\me"], &["node_modules", "C:\\Users\\me\\build", "*.log"])).unwrap();
+    // The same path in both spellings gives the same answer.
+    for p in ["C:\\Users\\me\\a\\node_modules\\x.js", "C:/Users/me/a/node_modules/x.js"] {
+        assert!(!included(&e, p), "{p}");
+    }
+    assert!(!included(&e, "C:\\Users\\me\\build\\out.o"));
+    assert!(!included(&e, "C:/Users/me/x.log"));
+    assert!(included(&e, "C:\\Users\\me\\src\\main.rs"));
+    // The source root itself is exempt; things outside every source are outside.
+    assert!(included(&e, "C:\\Users\\me"));
+    let v = e.classify("D:\\other\\x", &MockProbe::default());
+    assert_eq!(v.reason, Some(Reason::OutsideSources));
+    assert!(!included(&e, "C:\\Users\\meow\\x"));
+}
+
+#[test]
+fn windows_re_includes_and_carve_outs_follow_the_same_ordering_rules() {
+    let e = Engine::new(&win_rules(
+        &["C:\\s"],
+        &["C:\\s\\*", "!C:\\s\\a", "C:\\s\\a\\*", "!C:\\s\\a\\keep.txt"],
+    ))
+    .unwrap();
+    assert!(included(&e, "C:/s/a"));
+    assert!(included(&e, "C:/s/a/keep.txt"));
+    assert!(!included(&e, "C:/s/a/other.txt"));
+    assert!(!included(&e, "C:/s/b"));
+}
+
+#[test]
+fn a_drive_root_can_be_a_source_and_markers_use_the_drive_aware_parent() {
+    let mut r = win_rules(&["D:\\"], &[]);
+    r.markers = vec![".nobackup".to_string()];
+    let e = Engine::new(&r).unwrap();
+    let mut probe = MockProbe::default();
+    probe.markers.insert(("D:/".to_string(), ".nobackup".to_string()));
+    probe.markers.insert(("D:/data".to_string(), ".nobackup".to_string()));
+    // A marker in the drive root excludes its direct children (and so everything below them).
+    assert!(!e.classify("D:/data", &probe).included);
+    assert!(!e.classify("D:/data/x", &probe).included);
+    assert!(e.classify("D:/", &probe).included);
+    assert!(e.classify("D:/.nobackup", &probe).included);
+}
+
+#[test]
+fn windows_case_insensitive_rules_ignore_case_in_the_whole_path() {
+    let mut r = win_rules(&["C:\\Users\\me"], &["THUMBS.DB"]);
+    r.rules[0].ignore_case = true;
+    let e = Engine::new(&r).unwrap();
+    assert!(!included(&e, "C:/Users/me/Pictures/thumbs.db"));
+    assert!(included(&e, "C:/Users/me/Pictures/photo.jpg"));
+}
+
+#[test]
+fn windows_rejects_an_invalid_pattern_like_restic() {
+    assert!(Engine::new(&win_rules(&["C:\\s"], &["[oops"])).is_err());
+    assert!(Pattern::parse_styled("we[ird", PathStyle::Windows).is_err());
 }

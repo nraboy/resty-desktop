@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   ancestorsOf,
+  baseName,
+  isInside,
+  isRootPath,
+  joinPath,
+  rootOf,
+  toCanonical,
+  toNative,
   displayState,
   flattenRows,
   reasonLines,
@@ -159,5 +166,49 @@ describe("visibleWindow", () => {
     expect(visibleWindow(1000, 2600, 260, 26, 6)).toEqual({ start: 94, end: 116 });
     expect(visibleWindow(10, 0, 260, 26, 6)).toEqual({ start: 0, end: 10 });
     expect(visibleWindow(0, 0, 260, 26)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe("Windows paths", () => {
+  it("recognises roots — `/` and drives", () => {
+    expect(rootOf("/home/u")).toBe("/");
+    expect(rootOf("C:/Users/me")).toBe("C:/");
+    expect(rootOf("c:/")).toBe("c:/");
+    expect(rootOf("relative/x")).toBeNull();
+    expect(isRootPath("C:/")).toBe(true);
+    expect(isRootPath("C:/Users")).toBe(false);
+    expect(isRootPath("/")).toBe(true);
+  });
+
+  it("joins under a root without doubling the separator", () => {
+    expect(joinPath("/", "etc")).toBe("/etc");
+    expect(joinPath("C:/", "Users")).toBe("C:/Users");
+    expect(joinPath("C:/Users", "me")).toBe("C:/Users/me");
+  });
+
+  it("converts between the OS spelling and the tree's, only on Windows", () => {
+    expect(toCanonical("C:\\Users\\me\\", true)).toBe("C:/Users/me");
+    expect(toCanonical("C:\\", true)).toBe("C:/");
+    expect(toCanonical("  D:\\data  ", true)).toBe("D:/data");
+    // A backslash is an ordinary character in a Unix file name.
+    expect(toCanonical("/home/u/we\\ird/", false)).toBe("/home/u/we\\ird");
+    expect(toNative("C:/Users/me", true)).toBe("C:\\Users\\me");
+    expect(toNative("/home/u", false)).toBe("/home/u");
+  });
+
+  it("lists ancestors, nesting and relative paths per drive", () => {
+    expect(ancestorsOf("C:/Users/me/code")).toEqual(["C:/", "C:/Users", "C:/Users/me"]);
+    expect(ancestorsOf("D:/x")).toEqual(["D:/"]);
+    expect(ancestorsOf("relative")).toEqual([]);
+    expect(isInside("C:/Users/me", "C:/Users")).toBe(true);
+    expect(isInside("C:/Users", "C:/Users")).toBe(false);
+    expect(isInside("C:/Usersx", "C:/Users")).toBe(false);
+    expect(isInside("C:/Users", "C:/")).toBe(true);
+    expect(isInside("D:/Users", "C:/")).toBe(false);
+    expect(relativeTo("C:/Users/me/a", "C:/Users")).toBe("me/a");
+    expect(relativeTo("C:/a", "C:/")).toBe("a");
+    expect(baseName("C:/Users/me")).toBe("me");
+    expect(baseName("C:/")).toBe("C:");
+    expect(topLevelSources(["C:/", "C:/Users", "D:/data", "D:/data/x"])).toEqual(["C:/", "D:/data"]);
   });
 });

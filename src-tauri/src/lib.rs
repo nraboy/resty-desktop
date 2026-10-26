@@ -518,6 +518,7 @@ pub fn run() {
             repo::update_repo_read_only,
             // plan tree preview
             plan_tree::tree_supported,
+            plan_tree::tree_env,
             plan_tree::tree_kinds,
             plan_tree::tree_list_dir,
             plan_tree::tree_classify,

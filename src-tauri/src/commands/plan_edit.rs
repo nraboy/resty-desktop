@@ -16,24 +16,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::plan_rules::{clean_path, strip_source, Engine, Pattern, PlanRules, Probe, Reason};
+use super::plan_rules::{strip_source, Engine, PathStyle, Pattern, PlanRules, Probe, Reason};
 use super::plan_tree::{build_rules, BuiltRules, RuleOrigin, TreeRulesInput};
 
 pub(crate) type ReadFile<'a> = &'a dyn Fn(&str) -> std::io::Result<String>;
 pub(crate) type GetEnv<'a> = &'a dyn Fn(&str) -> String;
 
-/// Escapes the characters Go's `filepath.Match` treats specially (`\ [ ] * ?`) so a literal
-/// path can be used as a pattern. `!` is not an issue: patterns generated from a path start
-/// with `/`.
+/// Escapes the characters Go's `filepath.Match` treats specially so a literal path can be used
+/// as a pattern, Unix-style (`\ [ ] * ?` get a backslash). `!` is not an issue: patterns
+/// generated from a path start with `/` or a drive letter. See [`PathStyle::escape_glob`] for the
+/// Windows form.
+#[cfg(test)]
 pub fn escape_glob(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        if matches!(c, '\\' | '[' | ']' | '*' | '?') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    PathStyle::Unix.escape_glob(s)
 }
 
 /// What the user asked for in the tree.
@@ -98,25 +93,17 @@ fn explain(origins: &[RuleOrigin], reason: &Option<Reason>) -> String {
     }
 }
 
-fn join(dir: &str, name: &str) -> String {
-    if dir == "/" {
-        format!("/{name}")
-    } else {
-        format!("{dir}/{name}")
-    }
-}
-
 /// The re-include chain that carves `target` out of the excluded folder `x` while leaving the
 /// rest of `x` excluded: `!x`, then for each step down `cur/*` (exclude what's inside) and
 /// `!cur/next` (bring the next step back), ending in `!target`.
-pub(crate) fn carve_out_chain(x: &str, target: &str) -> Vec<String> {
+pub(crate) fn carve_out_chain(style: PathStyle, x: &str, target: &str) -> Vec<String> {
     let rel = strip_source(target, x).unwrap_or("");
-    let mut rules = vec![format!("!{}", escape_glob(x))];
+    let mut rules = vec![format!("!{}", style.escape_glob(x))];
     let mut cur = x.to_string();
     for comp in rel.split('/').filter(|c| !c.is_empty()) {
-        rules.push(format!("{}/*", escape_glob(&cur).trim_end_matches('/')));
-        cur = join(&cur, comp);
-        rules.push(format!("!{}", escape_glob(&cur)));
+        rules.push(format!("{}/*", style.escape_glob(&cur).trim_end_matches('/')));
+        cur = style.join(&cur, comp);
+        rules.push(format!("!{}", style.escape_glob(&cur)));
     }
     rules
 }
@@ -130,11 +117,12 @@ pub(crate) fn apply_edit(
     read: ReadFile,
     getenv: GetEnv,
 ) -> Result<EditOutcome, String> {
-    let path = clean_path(action.path.trim());
+    let style = input.style;
+    let path = style.clean(action.path.trim());
     let mut work = input.clone();
     let mut sources: Vec<String> = Vec::new();
     for s in &input.sources {
-        let c = clean_path(s.trim());
+        let c = style.clean(s.trim());
         if !s.trim().is_empty() && !sources.contains(&c) {
             sources.push(c);
         }
@@ -148,8 +136,13 @@ pub(crate) fn apply_edit(
     Ok(outcome)
 }
 
+/// The outcome in the spelling the plan stores: sources in the OS's own form (`C:\Users\me` on
+/// Windows) while patterns stay in the `/` form restic accepts everywhere.
 fn finish(work: TreeRulesInput, mut out: EditOutcome) -> EditOutcome {
-    out.sources = work.sources;
+    let style = work.style;
+    out.sources = work.sources.iter().map(|s| style.to_native(s)).collect();
+    out.added_sources = out.added_sources.iter().map(|s| style.to_native(s)).collect();
+    out.removed_sources = out.removed_sources.iter().map(|s| style.to_native(s)).collect();
     out.excludes = work.excludes;
     out
 }
@@ -172,7 +165,7 @@ fn do_exclude(
     if pattern.starts_with('#') {
         return Err("A pattern can't start with # (it would be read as a comment).".to_string());
     }
-    Pattern::parse(pattern).map_err(|_| format!("`{pattern}` isn't a valid pattern."))?;
+    Pattern::parse_styled(pattern, work.style).map_err(|_| format!("`{pattern}` isn't a valid pattern."))?;
 
     let (e0, _) = build_engine(&work, read, getenv)?;
     let before = e0.classify(path, probe);
@@ -189,7 +182,7 @@ fn do_exclude(
     let mut out = EditOutcome::default();
     // Excluding a source folder by its exact path means "stop backing it up": remove the source
     // (a pattern can't exclude a source itself).
-    if is_source && (pattern == path || pattern == escape_glob(path)) {
+    if is_source && (pattern == path || pattern == work.style.escape_glob(path)) {
         work.sources.retain(|s| s != path);
         out.removed_sources.push(path.to_string());
     } else {
@@ -262,9 +255,9 @@ fn do_include(
     }
     let x = v1.at.clone().unwrap_or_else(|| path.to_string());
     let rules = if whole_folder || x == path {
-        vec![format!("!{}", escape_glob(&x))]
+        vec![format!("!{}", work.style.escape_glob(&x))]
     } else {
-        carve_out_chain(&x, path)
+        carve_out_chain(work.style, &x, path)
     };
     for r in &rules {
         work.excludes.push(r.clone());
@@ -305,11 +298,20 @@ fn file_line(pattern: &str) -> String {
     pattern.replace('$', "$$")
 }
 
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-:=+@%,".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
+/// Quotes one argument for the shell the command is pasted into: single quotes for a POSIX shell;
+/// double quotes on Windows (cmd and PowerShell both honour them, and a Windows path cannot
+/// contain one).
+fn shell_quote(style: PathStyle, s: &str) -> String {
+    // A backslash is an ordinary character in a Windows path, but the shell's escape on Unix.
+    let plain = |c: char| {
+        c.is_ascii_alphanumeric() || "/._-:=+@%,".contains(c) || (style == PathStyle::Windows && c == '\\')
+    };
+    if !s.is_empty() && s.chars().all(plain) {
+        return s.to_string();
+    }
+    match style {
+        PathStyle::Unix => format!("'{}'", s.replace('\'', "'\\''")),
+        PathStyle::Windows => format!("\"{s}\""),
     }
 }
 
@@ -350,13 +352,13 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     }
     for m in &rules.markers {
         cmd.push("--exclude-if-present".to_string());
-        cmd.push(shell_quote(m));
+        cmd.push(shell_quote(rules.style, m));
     }
     if rules.exclude_caches {
         cmd.push("--exclude-caches".to_string());
     }
     for s in &rules.sources {
-        cmd.push(shell_quote(s));
+        cmd.push(shell_quote(rules.style, &rules.style.to_native(&rules.style.clean(s))));
     }
 
     let mut notes = vec![

@@ -279,6 +279,124 @@ pub fn clean_path(path: &str) -> String {
     }
 }
 
+/// How paths are written, spelled and cleaned. The matching rules themselves are the same on
+/// every platform — restic converts every path and pattern to `/`-separated components before it
+/// matches — so the difference is confined to the edges: which spellings mean the same path, what
+/// a root looks like, and whether a pattern can escape a glob character.
+///
+/// Windows (restic's `filepath` rules): `\` and `/` both separate, a path may start with a drive
+/// (`C:`), and `\` is *not* an escape in a pattern — a literal `[` is written `[[]`. Everything is
+/// kept internally in the `/` form (`C:/Users/me`), which the Windows APIs and restic both
+/// accept; [`PathStyle::to_native`] gives back the `\` spelling for display and for the plan's
+/// stored sources. UNC paths (`\\server\share`) are not supported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStyle {
+    Unix,
+    Windows,
+}
+
+impl PathStyle {
+    /// The style of the platform this build runs on.
+    pub const NATIVE: PathStyle = if cfg!(windows) { PathStyle::Windows } else { PathStyle::Unix };
+
+    /// Go's `filepath.Clean`, then `ToSlash`: the canonical `/`-separated spelling.
+    pub fn clean(self, path: &str) -> String {
+        match self {
+            PathStyle::Unix => clean_path(path),
+            PathStyle::Windows => clean_windows(path),
+        }
+    }
+
+    /// `name` inside `dir` (a root such as `/` or `C:/` already ends in a separator).
+    pub fn join(self, dir: &str, name: &str) -> String {
+        if dir.ends_with('/') {
+            format!("{dir}{name}")
+        } else {
+            format!("{dir}/{name}")
+        }
+    }
+
+    /// The directory containing a clean path; a root is its own parent.
+    pub fn parent(self, path: &str) -> String {
+        match path.rfind('/') {
+            Some(0) => "/".to_string(),
+            Some(i) if self == PathStyle::Windows && i == 2 && path.as_bytes()[1] == b':' => path[..3].to_string(),
+            Some(i) => path[..i].to_string(),
+            None => ".".to_string(),
+        }
+    }
+
+    /// The spelling the OS uses: `\` separators on Windows.
+    pub fn to_native(self, path: &str) -> String {
+        match self {
+            PathStyle::Unix => path.to_string(),
+            PathStyle::Windows => path.replace('/', "\\"),
+        }
+    }
+
+    /// Escapes glob metacharacters so a literal name can be used inside a pattern. Unix escapes
+    /// with a backslash; on Windows a backslash is a separator, so a literal `[` is written `[[]`
+    /// (`*` and `?` cannot occur in a Windows file name).
+    pub fn escape_glob(self, s: &str) -> String {
+        match self {
+            PathStyle::Unix => {
+                let mut out = String::with_capacity(s.len() + 2);
+                for c in s.chars() {
+                    if matches!(c, '\\' | '[' | ']' | '*' | '?') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out
+            }
+            PathStyle::Windows => s.replace('[', "[[]"),
+        }
+    }
+}
+
+impl Default for PathStyle {
+    fn default() -> Self {
+        PathStyle::NATIVE
+    }
+}
+
+/// `filepath.Clean` + `ToSlash` for Windows paths: both separators, an optional drive (`C:`),
+/// lexical `.`/`..`/repeated-separator handling. `C:\Users\me\` → `C:/Users/me`, `C:\` → `C:/`.
+pub fn clean_windows(path: &str) -> String {
+    let s = path.replace('\\', "/");
+    let b = s.as_bytes();
+    let (vol, rest) = if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        (&s[..2], &s[2..])
+    } else {
+        ("", &s[..])
+    };
+    if rest.is_empty() {
+        return if vol.is_empty() { ".".to_string() } else { format!("{vol}.") };
+    }
+    let rooted = rest.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for comp in rest.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                if out.last().is_some_and(|c| *c != "..") {
+                    out.pop();
+                } else if !rooted {
+                    out.push("..");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    let joined = out.join("/");
+    let body = match (rooted, joined.is_empty()) {
+        (true, _) => format!("/{joined}"),
+        (false, true) => ".".to_string(),
+        (false, false) => joined,
+    };
+    format!("{vol}{body}")
+}
+
 /// Splits a clean path into components; an absolute path's first component is `"/"`.
 fn split_path(p: &str) -> Vec<&str> {
     let mut parts: Vec<&str> = p.split('/').collect();
@@ -292,12 +410,18 @@ impl Pattern {
     /// Parses `pattern` (restic's `preparePattern`), rejecting what restic's
     /// `ValidatePatterns` rejects: a part that is a malformed glob.
     pub fn parse(pattern: &str) -> Result<Pattern, BadPattern> {
+        Pattern::parse_styled(pattern, PathStyle::Unix)
+    }
+
+    /// [`Pattern::parse`] with the path rules of `style` (Windows normalises `\` to `/` and
+    /// understands drive letters before splitting the pattern into components).
+    pub fn parse_styled(pattern: &str, style: PathStyle) -> Result<Pattern, BadPattern> {
         let original = pattern.to_string();
         let (negated, body) = match pattern.strip_prefix('!') {
             Some(rest) => (true, rest),
             None => (false, pattern),
         };
-        let cleaned = clean_path(body);
+        let cleaned = style.clean(body);
         let parts: Vec<Part> = split_path(&cleaned)
             .into_iter()
             .map(|part| {
@@ -528,24 +652,32 @@ fn child_match_parts(pattern: &Pattern, strs: &[&str]) -> Result<bool, BadPatter
 /// Restic's `filter.Match`/`ChildMatch` entry points: an empty pattern matches everything,
 /// an empty path is an error. Mostly for tests.
 pub fn pattern_matches(pattern: &str, path: &str) -> Result<bool, BadPattern> {
+    pattern_matches_styled(pattern, path, PathStyle::Unix)
+}
+
+pub fn pattern_matches_styled(pattern: &str, path: &str, style: PathStyle) -> Result<bool, BadPattern> {
     if pattern.is_empty() {
         return Ok(true);
     }
     if path.is_empty() {
         return Err(BadPattern);
     }
-    let p = Pattern::parse(pattern)?;
+    let p = Pattern::parse_styled(pattern, style)?;
     match_parts(&p.parts, &split_path(path))
 }
 
 pub fn pattern_child_matches(pattern: &str, path: &str) -> Result<bool, BadPattern> {
+    pattern_child_matches_styled(pattern, path, PathStyle::Unix)
+}
+
+pub fn pattern_child_matches_styled(pattern: &str, path: &str, style: PathStyle) -> Result<bool, BadPattern> {
     if pattern.is_empty() {
         return Ok(true);
     }
     if path.is_empty() {
         return Err(BadPattern);
     }
-    let p = Pattern::parse(pattern)?;
+    let p = Pattern::parse_styled(pattern, style)?;
     child_match_parts(&p, &split_path(path))
 }
 
@@ -807,6 +939,8 @@ pub struct PlanRules {
     /// `--exclude-if-present` specs.
     pub markers: Vec<String>,
     pub exclude_caches: bool,
+    /// How the paths and patterns above are spelled (the platform's, unless a test says otherwise).
+    pub style: PathStyle,
 }
 
 /// Why a node is excluded.
@@ -838,6 +972,7 @@ impl Verdict {
 }
 
 pub struct Engine {
+    style: PathStyle,
     sources: Vec<String>,
     /// Case-sensitive patterns (`--exclude`, `--exclude-file`), with the rule id of each.
     cs: PatternList,
@@ -860,7 +995,8 @@ impl Engine {
                 continue; // restic skips empty patterns
             }
             let text = if r.ignore_case { r.pattern.to_lowercase() } else { r.pattern.clone() };
-            let pat = Pattern::parse(&text).map_err(|_| format!("invalid pattern: {}", r.pattern))?;
+            let pat = Pattern::parse_styled(&text, rules.style)
+                .map_err(|_| format!("invalid pattern: {}", r.pattern))?;
             if r.ignore_case {
                 ci.push(pat);
                 ci_ids.push(r.id);
@@ -878,7 +1014,8 @@ impl Engine {
             .map(|s| Marker::parse(&s).map(|m| (m, s)))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Engine {
-            sources: rules.sources.iter().map(|s| clean_path(s)).collect(),
+            style: rules.style,
+            sources: rules.sources.iter().map(|s| rules.style.clean(s)).collect(),
             cs: PatternList::new(cs, false),
             cs_ids,
             ci: PatternList::new(ci, true),
@@ -889,6 +1026,11 @@ impl Engine {
 
     pub fn sources(&self) -> &[String] {
         &self.sources
+    }
+
+    /// How this engine's paths are spelled (see [`PathStyle`]).
+    pub fn style(&self) -> PathStyle {
+        self.style
     }
 
     /// Are there any patterns or markers at all? With none, every node under a source is
@@ -913,9 +1055,9 @@ impl Engine {
             }
         }
         let base = path.rsplit('/').next().unwrap_or(path);
-        let dir = parent_of(path);
+        let dir = self.style.parent(path);
         for (marker, spec) in &self.markers {
-            if base != marker.name && probe.has_marker(dir, marker) {
+            if base != marker.name && probe.has_marker(&dir, marker) {
                 return Some(Reason::Marker { spec: spec.clone() });
             }
         }
@@ -942,7 +1084,7 @@ impl Engine {
     /// restic does not descend into a rejected directory. A node under several sources is
     /// included if any of them includes it.
     pub fn classify(&self, path: &str, probe: &dyn Probe) -> Verdict {
-        let path = clean_path(path);
+        let path = self.style.clean(path);
         let mut first_rejection: Option<Verdict> = None;
         let mut under_any = false;
         for src in &self.sources {
@@ -954,10 +1096,7 @@ impl Engine {
             let mut current = src.clone();
             let mut rejected: Option<Verdict> = None;
             for comp in rel.split('/') {
-                if current != "/" {
-                    current.push('/');
-                }
-                current.push_str(comp);
+                current = self.style.join(&current, comp);
                 if let Some(reason) = self.judge_node(&current, probe) {
                     rejected = Some(Verdict {
                         included: false,
@@ -987,22 +1126,14 @@ impl Engine {
     }
 }
 
-/// The parent directory of a clean absolute path (`/` for a top-level entry).
-fn parent_of(path: &str) -> &str {
-    match path.rfind('/') {
-        Some(0) => "/",
-        Some(i) => &path[..i],
-        None => ".",
-    }
-}
-
-/// `path` relative to `src` when it is `src` or below it (`""` for `src` itself).
+/// `path` relative to `src` when it is `src` or below it (`""` for `src` itself). A root
+/// (`/`, `C:/`) already ends in a separator.
 pub(crate) fn strip_source<'a>(path: &'a str, src: &str) -> Option<&'a str> {
     if path == src {
         return Some("");
     }
-    if src == "/" {
-        return path.strip_prefix('/');
+    if src.ends_with('/') {
+        return path.strip_prefix(src);
     }
     path.strip_prefix(src).and_then(|rest| rest.strip_prefix('/'))
 }

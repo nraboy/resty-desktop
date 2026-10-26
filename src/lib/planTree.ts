@@ -10,6 +10,8 @@ export type EntryKind = "dir" | "file" | "symlink" | "other";
 export interface TreeEntry {
   name: string;
   kind: EntryKind;
+  /** Hidden by the platform's convention; still backed up like any other item. */
+  hidden?: boolean;
 }
 
 export interface TreeListing {
@@ -51,6 +53,18 @@ export interface NodeVerdict {
   reincludedBy?: number | null;
   /** Not backed up itself, but a source lies below it. */
   containsSources: boolean;
+}
+
+/** What the backend knows about this computer: where the tree starts and the home folder. */
+export interface TreeRoot {
+  label: string;
+  path: string;
+}
+
+export interface TreeEnv {
+  windows: boolean;
+  roots: TreeRoot[];
+  home?: string | null;
 }
 
 export interface Classification {
@@ -114,10 +128,55 @@ export function displayState(
   return scan.complete ? "included" : "unverified";
 }
 
+// ── paths ───────────────────────────────────────────────────────────────────
+//
+// The tree works on one spelling everywhere: `/` separators, with a drive root written `C:/` on
+// Windows. The backend accepts and returns that form (and the OS's own spelling for the plan's
+// sources — `toCanonical` bridges the two).
+
+/** The root a path starts at — `/` or a drive such as `C:/` — or null for a relative path. */
+export function rootOf(path: string): string | null {
+  const drive = /^[A-Za-z]:\//.exec(path);
+  if (drive) return drive[0];
+  return path.startsWith("/") ? "/" : null;
+}
+
+export const isRootPath = (path: string): boolean => rootOf(path) === path;
+
+/** `name` inside `dir` (a root already ends in a separator). */
+export function joinPath(dir: string, name: string): string {
+  return dir.endsWith("/") ? dir + name : `${dir}/${name}`;
+}
+
+/** Is `path` strictly inside `dir`? */
+export function isInside(path: string, dir: string): boolean {
+  if (path === dir) return false;
+  return dir.endsWith("/") ? path.startsWith(dir) : path.startsWith(dir + "/");
+}
+
+/** The tree's spelling of a path as the OS writes it: on Windows `\` becomes `/`; a trailing
+ * separator is dropped except on a root. */
+export function toCanonical(path: string, windows: boolean): string {
+  let p = path.trim();
+  if (windows) p = p.replace(/\\/g, "/");
+  if (p.length > 1 && p.endsWith("/") && !isRootPath(p)) p = p.replace(/\/+$/, "");
+  return p;
+}
+
+/** A canonical path as the OS spells it (`C:\Users\me` on Windows). */
+export function toNative(path: string, windows: boolean): string {
+  return windows ? path.replace(/\//g, "\\") : path;
+}
+
+/** The last component, or the path itself for a root. */
+export function baseName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+
 /** The path below `base` (or the whole path when it isn't below it). */
 export function relativeTo(path: string, base: string): string {
-  if (base !== "/" && path.startsWith(base + "/")) return path.slice(base.length + 1);
-  if (base === "/" && path.startsWith("/")) return path.slice(1);
+  if (isInside(path, base)) return path.slice(base.endsWith("/") ? base.length : base.length + 1);
   return path;
 }
 
@@ -235,13 +294,15 @@ export function flattenRows(
   return rows;
 }
 
-/** Every ancestor folder of `path`, from `/` down (excluding `path` itself). */
+/** Every ancestor folder of `path`, from its root down (excluding `path` itself). */
 export function ancestorsOf(path: string): string[] {
-  const parts = path.split("/").filter(Boolean);
-  const out = ["/"];
-  let cur = "";
+  const root = rootOf(path);
+  if (!root) return [];
+  const parts = path.slice(root.length).split("/").filter(Boolean);
+  const out = [root];
+  let cur = root;
   for (const p of parts.slice(0, -1)) {
-    cur += "/" + p;
+    cur = joinPath(cur, p);
     out.push(cur);
   }
   return out;
@@ -250,7 +311,7 @@ export function ancestorsOf(path: string): string[] {
 /** Sources that aren't inside another source: the roots a "Sources" view needs. */
 export function topLevelSources(sources: string[]): string[] {
   const clean = Array.from(new Set(sources.map((s) => s.trim()).filter(Boolean)));
-  return clean.filter((s) => !clean.some((o) => o !== s && (o === "/" || s.startsWith(o + "/"))));
+  return clean.filter((s) => !clean.some((o) => isInside(s, o)));
 }
 
 /** The window of rows to render for a scroll position (fixed row height, with overscan). */

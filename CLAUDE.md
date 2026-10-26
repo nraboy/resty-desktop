@@ -243,7 +243,9 @@ proposing a change — several are pinned by a named test or reference a confirm
   `filepath.Match`, `filter.Match/ChildMatch/List`, `RejectIfPresent`), including quirks such as the
   `**` expansion bound; it is verified against Go's/restic's own test tables and a differential test
   against the real restic. Don't "simplify" or "fix" it without re-running that test — see
-  docs/backup-plan-tree.md
+  docs/backup-plan-tree.md. Platform path rules live in `PathStyle` (Unix | Windows; UNC paths
+  unsupported); `.github/workflows/restic-compat.yml` runs the restic-backed `#[ignore]` tests on
+  Linux/macOS/Windows against restic 0.17.3 and 0.19.1
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`

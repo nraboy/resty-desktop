@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
-import type { Classification, TreeListing, TreeRulesInput } from "./planTree";
+import type { Classification, TreeEnv, TreeListing, TreeRulesInput } from "./planTree";
 import type { EditAction, EditOutcome, ExportOut, MatchPreview } from "./planTreeEdit";
 
 // ── auth ──────────────────────────────────────────────────────────────────
@@ -407,6 +407,10 @@ export const importBackrestConfig = (filePath: string): Promise<ExportSummary> =
 
 export const treeSupported = (): Promise<boolean> =>
   invoke("tree_supported");
+
+/** Where the tree starts (`/`, or one root per drive on Windows) and the home folder. */
+export const treeEnv = (): Promise<TreeEnv> =>
+  invoke("tree_env");
 
 /** `dir` / `file` / `symlink` / `other` / `missing` for each path (`follow`: a symlink reports its target). */
 export const treeKinds = (paths: string[], follow = false): Promise<string[]> =>

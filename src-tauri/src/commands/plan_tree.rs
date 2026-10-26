@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, State};
 use super::cache::ExcludeFile;
 use super::plan_edit::{apply_edit, export_rules, EditAction, EditOutcome, ExportOut};
 use super::plan_rules::{
-    clean_path, strip_source, Engine, FsProbe, Marker, Pattern, PlanRules, Probe, Reason, RuleInput,
+    strip_source, Engine, FsProbe, Marker, PathStyle, Pattern, PlanRules, Probe, Reason, RuleInput,
 };
 
 // ── building the engine from a plan ─────────────────────────────────────────
@@ -37,6 +37,10 @@ pub struct TreeRulesInput {
     pub exclude_caches: bool,
     #[serde(default)]
     pub exclude_files: Vec<ExcludeFile>,
+    /// How the paths above are spelled: always the platform's, set by the backend (a test can
+    /// override it to exercise the other platform's rules).
+    #[serde(skip)]
+    pub style: PathStyle,
 }
 
 /// Where a rule came from, so a verdict can say "excluded by line 12 of ~/.ignore".
@@ -136,7 +140,7 @@ pub(crate) fn build_rules(
     let mut push = |pattern: String, ignore_case: bool, file: Option<String>, line: Option<u32>,
                     problems: &mut Vec<RuleProblem>| {
         let probe = if ignore_case { pattern.to_lowercase() } else { pattern.clone() };
-        if Pattern::parse(&probe).is_err() {
+        if Pattern::parse_styled(&probe, input.style).is_err() {
             problems.push(RuleProblem {
                 what: match (&file, line) {
                     (Some(f), Some(l)) => format!("{f}:{l}"),
@@ -196,6 +200,7 @@ pub(crate) fn build_rules(
             rules,
             markers,
             exclude_caches: input.exclude_caches,
+            style: input.style,
         },
         origins,
         problems,
@@ -220,6 +225,10 @@ pub struct TreeEntry {
     pub name: String,
     /// `dir`, `file`, `symlink` (never followed — restic stores the link itself) or `other`.
     pub kind: &'static str,
+    /// Hidden by the platform's convention (a leading `.`; macOS's hidden flag; Windows'
+    /// hidden/system attribute). Hidden items are backed up like any other — this only lets the
+    /// view tuck them away.
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -233,15 +242,49 @@ pub struct TreeListing {
     pub error: Option<String>,
 }
 
+/// Folders with more entries than this skip the per-entry `stat` that macOS's hidden flag needs
+/// (a leading `.` is still recognised): keeping a huge folder's listing cheap matters more.
+const FLAG_CHECK_MAX_ENTRIES: usize = 5000;
+
+/// Is this entry hidden? Unix: a leading `.`; macOS also its `UF_HIDDEN` flag (how `~/Library`
+/// and `/usr` are hidden, needs an `lstat`); Windows: the hidden or system attribute (free — it
+/// comes with the directory read).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_variables))]
+fn entry_hidden(ent: &std::fs::DirEntry, name: &str, check_flags: bool) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const HIDDEN: u32 = 0x2;
+        const SYSTEM: u32 = 0x4;
+        return ent.metadata().map(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0).unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        if name.starts_with('.') {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if check_flags {
+            use std::os::macos::fs::MetadataExt;
+            const UF_HIDDEN: u32 = 0x8000;
+            return ent.metadata().map(|m| m.st_flags() & UF_HIDDEN != 0).unwrap_or(false);
+        }
+        false
+    }
+}
+
 /// Lists a folder: folders first, then the rest, each group case-insensitively by name, capped
-/// at `limit`. Reads names and entry types only — no `stat`, no file contents.
+/// at `limit`. Reads names and entry types only (plus one `lstat` per entry on macOS, for the
+/// hidden flag) — no file contents.
 pub(crate) fn list_dir(path: &str, limit: usize) -> TreeListing {
     let rd = match std::fs::read_dir(path) {
         Ok(rd) => rd,
         Err(e) => return TreeListing { entries: vec![], total: 0, truncated: false, error: Some(e.to_string()) },
     };
+    let dir_entries: Vec<std::fs::DirEntry> = rd.flatten().collect();
+    let check_flags = dir_entries.len() <= FLAG_CHECK_MAX_ENTRIES;
     let mut entries: Vec<TreeEntry> = Vec::new();
-    for ent in rd.flatten() {
+    for ent in &dir_entries {
         // A name that isn't valid UTF-8 can't round-trip through the UI as a path.
         let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
         let kind = match ent.file_type() {
@@ -250,7 +293,8 @@ pub(crate) fn list_dir(path: &str, limit: usize) -> TreeListing {
             Ok(t) if t.is_file() => "file",
             _ => "other",
         };
-        entries.push(TreeEntry { name, kind });
+        let hidden = entry_hidden(ent, &name, check_flags);
+        entries.push(TreeEntry { name, kind, hidden });
     }
     entries.sort_by(|a, b| {
         (a.kind != "dir")
@@ -310,7 +354,7 @@ pub(crate) fn classify_paths(engine: &Engine, probe: &dyn Probe, paths: &[String
     paths
         .iter()
         .map(|p| {
-            let path = clean_path(p);
+            let path = engine.style().clean(p);
             let v = engine.classify(&path, probe);
             let contains_sources = !v.included
                 && engine
@@ -398,7 +442,7 @@ pub(crate) fn scan_dir(
                 out.unreadable = true;
                 continue;
             };
-            let path = if current == "/" { format!("/{name}") } else { format!("{current}/{name}") };
+            let path = engine.style().join(&current, &name);
             if engine.judge_node(&path, probe).is_some() {
                 out.partial = true;
                 out.complete = true;
@@ -449,7 +493,7 @@ pub(crate) fn count_matches(
         if !is_dir {
             continue; // a source file is exempt from patterns
         }
-        let mut queue: VecDeque<String> = VecDeque::from([clean_path(src)]);
+        let mut queue: VecDeque<String> = VecDeque::from([base.style().clean(src)]);
         while let Some(current) = queue.pop_front() {
             let Ok(rd) = std::fs::read_dir(&current) else { continue };
             for ent in rd.flatten() {
@@ -461,7 +505,7 @@ pub(crate) fn count_matches(
                     return out;
                 }
                 let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
-                let path = if current == "/" { format!("/{name}") } else { format!("{current}/{name}") };
+                let path = base.style().join(&current, &name);
                 if base.judge_node(&path, probe).is_some() {
                     continue; // already left out, with everything below it
                 }
@@ -515,10 +559,67 @@ const SCAN_THREADS: usize = 3;
 
 // ── commands ────────────────────────────────────────────────────────────────
 
-/// The tree preview needs Unix path semantics (see plan_rules.rs); Windows keeps the old editor.
+/// The tree preview works on every platform now (see `PathStyle` in plan_rules.rs).
 #[tauri::command]
 pub fn tree_supported() -> bool {
-    cfg!(unix)
+    true
+}
+
+/// A place the tree can start from: `/` on Unix, one per drive on Windows.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeRoot {
+    pub label: String,
+    /// In the `/`-separated form the tree uses everywhere (`C:/`, never `C:\`).
+    pub path: String,
+}
+
+/// What the tree needs to know about this computer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeEnv {
+    pub windows: bool,
+    pub roots: Vec<TreeRoot>,
+    /// The user's home folder, for the "Home" jump (`/Users/me`, `C:/Users/me`).
+    pub home: Option<String>,
+}
+
+#[cfg(windows)]
+fn drive_roots() -> Vec<TreeRoot> {
+    extern "system" {
+        fn GetLogicalDrives() -> u32;
+    }
+    // SAFETY: GetLogicalDrives takes no arguments and only returns a bitmask of drive letters.
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| {
+            let letter = (b'A' + i) as char;
+            TreeRoot { label: format!("{letter}:"), path: format!("{letter}:/") }
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn drive_roots() -> Vec<TreeRoot> {
+    Vec::new()
+}
+
+pub(crate) fn tree_environment(home_var: Option<String>) -> TreeEnv {
+    let style = PathStyle::NATIVE;
+    let windows = style == PathStyle::Windows;
+    let roots = if windows {
+        drive_roots()
+    } else {
+        vec![TreeRoot { label: "Computer".to_string(), path: "/".to_string() }]
+    };
+    let home = home_var.filter(|h| !h.is_empty()).map(|h| style.clean(&h));
+    TreeEnv { windows, roots, home }
+}
+
+#[tauri::command]
+pub fn tree_env() -> TreeEnv {
+    tree_environment(std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok())
 }
 
 #[tauri::command]
@@ -585,7 +686,7 @@ pub async fn tree_scan_start(
                     }
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     let Some(dir) = dirs.get(i) else { break };
-                    let o = scan_dir(&engine, &probe, &clean_path(dir), limits, &cancel);
+                    let o = scan_dir(&engine, &probe, &engine.style().clean(dir), limits, &cancel);
                     if cancel.load(Ordering::Relaxed) && !o.complete {
                         break; // superseded mid-folder: don't report a half-done result
                     }

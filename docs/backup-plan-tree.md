@@ -43,6 +43,30 @@ Don't "simplify" it: every oddity below was found by running restic.
 - File-based patterns have environment variables expanded and `#`/blank lines skipped; `--exclude`
   flag patterns are used verbatim. (The file reader is not part of this module yet.)
 
+## Windows and Unix path rules (`PathStyle`)
+
+The matcher works on path *components*, so the only platform-specific parts are isolated in
+`PathStyle` (`Unix` | `Windows`, `PathStyle::NATIVE` for the build target); `PlanRules.style`
+selects it, and the tree/edit commands take the app's native style. On Windows:
+
+- `\` and `/` are both separators and are normalised to `/`; a path may start with a drive
+  (`C:`). Internally every path is **canonical** (`C:/Users/me`, drive roots `C:/`); `to_native`
+  gives the OS spelling back, and `plan_edit`'s `finish` converts every source it hands to the
+  frontend (and every exported one) to the native spelling, so the plan keeps `C:\Users\me`.
+- There is no backslash escape in a pattern (it is a separator), so a literal `[` is written as the
+  class `[[]` (`escape_glob`). The frontend mirrors this (`escapeGlob(s, windows)`).
+- Drive-letter patterns match like restic's "relative-style" patterns (a window of components, not
+  anchored to the root); a pattern such as `C:/` hits restic's empty-part-as-`**` quirk, which is
+  mirrored. **UNC paths (`\\server\share`) are not supported.**
+- CLI export quotes with double quotes on Windows (backslash is plain) and single quotes on Unix.
+- Case: matching stays case-sensitive (restic's behaviour); only `--iexclude*` rules fold case.
+
+The Windows rules are pure string logic, so they are unit-tested on every OS, including restic's
+own pattern tables re-run under Windows rules (`restic_pattern_tables_hold_under_windows_rules_too`).
+What a macOS/Linux machine cannot prove is the end-to-end behaviour on a real Windows filesystem
+(drive enumeration, hidden attribute, real restic dry runs): that is what
+`.github/workflows/restic-compat.yml` is for.
+
 ## API
 
 - `Engine::new(&PlanRules)` compiles sources + ordered `RuleInput`s (`id`, `pattern`, `ignore_case`) +
@@ -68,7 +92,12 @@ Don't "simplify" it: every oddity below was found by running restic.
   `**`, anchored, case-insensitive, markers), engine vs. a dry run, node by node. Run:
   `cargo test restic_agrees -- --ignored --nocapture` (`RESTY_DIFF_SEED`, `RESTY_DIFF_CASES`).
   Last run: ~11,000 nodes over ~900 random cases across several seeds, zero disagreements.
-  CI does not install restic yet, so this is a local/manual gate — run it after touching the engine.
+  The ordinary test job has no restic, so these are skipped there; `.github/workflows/restic-compat.yml`
+  installs restic 0.17.3 (the supported minimum) and 0.19.1 on Linux, macOS and Windows and runs
+  every `plan_` and `restic_` test with `--include-ignored` (on PRs/pushes touching `plan_*` files,
+  or on demand via "Run workflow"). Still worth running locally after touching the engine.
+  The harnesses are platform-aware (`PathStyle::NATIVE`), so on Windows they compare the Windows
+  rules against real Windows restic.
 
 ## Performance (single thread, release build, 13 rules)
 
@@ -82,16 +111,20 @@ folders, a per-folder time budget with a "not fully checked" state.
 
 `components/PlanTreePreview.tsx` is a "Preview" card in the plan editor (open by default, collapsible) (after the
 exclude sections). It is **additive**: the existing source/exclude editors are unchanged, and the
-card is hidden where `tree_supported` is false (Windows, until the engine handles Windows paths)
-and shows a message for plans that use path-list files.
+card shows a message for plans that use path-list files. `tree_supported` is now true on every
+platform (kept as the single switch should a platform need turning off).
 
 - **Roots:** *Sources* (each source not nested in another; nested ones appear inside their parent)
-  or *Whole filesystem* (`/`, auto-expanded down to each source). Rows are marked **included**
+  or *Whole filesystem* (`/` on Unix; on Windows one root per drive, from `tree_env`, auto-expanded
+  down to each source). Rows are marked **included**
   (filled box), **partly included** (dash: backed up, but something inside is excluded),
   **excluded** (empty box, greyed), plus *contains backed-up items* for a folder that sits above a
   source (shown as partly), and *not fully checked* for a huge included folder the scan couldn't
   finish within its budget. Hover a name for the reason in plain language ("Excluded because its
   folder X is excluded by `node_modules`", "…by line 12 of ~/.ignore", "Re-included by `!…`").
+- **`tree_env`** reports the platform (`windows`), the roots (`/`, or the logical drives via
+  `GetLogicalDrives`) and the home folder; entries carry a `hidden` flag (dot-name on Unix/macOS,
+  the hidden attribute on Windows) for the planned "show hidden files" toggle.
 - **Backend (`commands/plan_tree.rs`):** `tree_list_dir` (names + entry types only, folders first,
   capped at 3000 with a "…and N more" note), `tree_kinds` (is a source a folder, file or gone),
   `tree_classify` (verdicts for a batch of paths, plus each rule's origin: plan pattern, or file
@@ -159,12 +192,12 @@ text keeps its comments). Include patterns (the `.env`-anywhere idea) are delibe
 
 ## Status / roadmap
 
-1. **Engine + tests (`plan_rules.rs`)** — done. Windows path semantics (`C:` components, `\`
-   separators) are not handled yet.
+1. **Engine + tests (`plan_rules.rs`)** — done, including Windows path semantics (`PathStyle`);
+   the Windows end-to-end run is delegated to the `restic-compat` workflow (not yet seen green).
 2. **Read-only tree** — done (this section); keyboard navigation (arrow keys) and a filter box for
    huge folders are not yet.
 3. Editing — slice 1 done (above): click to include/exclude with the pattern dialog, verified edits,
    undo, CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
    Paths/Exclude editors, and (deferred) include patterns resolved to an explicit
    `--files-from-verbatim` list at backup time (restic has no include patterns).
-4. Polish: size estimates, Windows, keyboard/accessibility.
+4. Polish: size estimates, keyboard/accessibility; verifying on a real Windows machine.

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::commands::plan_rules::{FsProbe, Marker};
+use crate::commands::plan_rules::{FsProbe, Marker, PathStyle};
 
 #[derive(Default)]
 struct MockProbe {
@@ -26,6 +26,7 @@ fn input(sources: &[&str], excludes: &[&str]) -> TreeRulesInput {
     TreeRulesInput {
         sources: sources.iter().map(|s| s.to_string()).collect(),
         excludes: excludes.iter().map(|s| s.to_string()).collect(),
+        style: PathStyle::Unix,
         ..Default::default()
     }
 }
@@ -62,12 +63,12 @@ fn escape_glob_escapes_exactly_the_glob_metacharacters() {
 
 #[test]
 fn the_carve_out_chain_is_the_gitignore_style_sequence() {
-    assert_eq!(carve_out_chain("/s/a", "/s/a"), ["!/s/a"]);
+    assert_eq!(carve_out_chain(PathStyle::Unix, "/s/a", "/s/a"), ["!/s/a"]);
     assert_eq!(
-        carve_out_chain("/s/a", "/s/a/b/c"),
+        carve_out_chain(PathStyle::Unix, "/s/a", "/s/a/b/c"),
         ["!/s/a", "/s/a/*", "!/s/a/b", "/s/a/b/*", "!/s/a/b/c"]
     );
-    assert_eq!(carve_out_chain("/", "/x"), ["!/", "/*", "!/x"]);
+    assert_eq!(carve_out_chain(PathStyle::Unix, "/", "/x"), ["!/", "/*", "!/x"]);
 }
 
 // ── exclude ─────────────────────────────────────────────────────────────────
@@ -307,6 +308,87 @@ fn an_exported_file_reads_back_to_the_same_rules() {
     assert_eq!(a, b);
 }
 
+// ── Windows paths (pure string logic, so it runs on every platform) ─────────
+
+fn win_input(sources: &[&str], excludes: &[&str]) -> TreeRulesInput {
+    TreeRulesInput { style: PathStyle::Windows, ..input(sources, excludes) }
+}
+
+#[test]
+fn windows_edits_keep_sources_native_and_patterns_in_slash_form() {
+    let i = win_input(&["C:\\Users\\me"], &[]);
+    let o = edit(&i, &exclude("C:\\Users\\me\\docs\\old", "C:/Users/me/docs/old")).unwrap();
+    // The plan keeps the OS spelling for sources; patterns use the form restic accepts on Windows.
+    assert_eq!(o.sources, ["C:\\Users\\me"]);
+    assert_eq!(o.added_rules, ["C:/Users/me/docs/old"]);
+    assert!(!included_after(&i, &o, "C:\\Users\\me\\docs\\old\\x.txt"));
+    assert!(included_after(&i, &o, "C:\\Users\\me\\docs\\new\\x.txt"));
+}
+
+#[test]
+fn windows_excludes_a_folder_with_a_bracket_using_a_character_class() {
+    let i = win_input(&["C:\\s"], &[]);
+    let path = "C:/s/we[ird]";
+    let o = edit(&i, &exclude(path, &PathStyle::Windows.escape_glob(path))).unwrap();
+    assert_eq!(o.added_rules, ["C:/s/we[[]ird]"]);
+    assert!(!included_after(&i, &o, "C:/s/we[ird]/inner"));
+    assert!(included_after(&i, &o, "C:/s/weird"));
+}
+
+#[test]
+fn windows_including_inside_an_excluded_folder_carves_it_out() {
+    let i = win_input(&["C:\\Users\\me\\app"], &["node_modules"]);
+    let o = edit(&i, &include("C:\\Users\\me\\app\\node_modules\\lib\\index.js", None)).unwrap();
+    assert_eq!(
+        o.added_rules,
+        [
+            "!C:/Users/me/app/node_modules",
+            "C:/Users/me/app/node_modules/*",
+            "!C:/Users/me/app/node_modules/lib",
+            "C:/Users/me/app/node_modules/lib/*",
+            "!C:/Users/me/app/node_modules/lib/index.js",
+        ]
+    );
+    assert!(included_after(&i, &o, "C:/Users/me/app/node_modules/lib/index.js"));
+    assert!(!included_after(&i, &o, "C:/Users/me/app/node_modules/lib/other.js"));
+}
+
+#[test]
+fn windows_adds_and_removes_sources_in_the_native_spelling() {
+    let i = win_input(&["D:\\data\\a", "D:\\data\\b"], &[]);
+    let o = edit(&i, &include("D:\\data", None)).unwrap();
+    assert_eq!(o.added_sources, ["D:\\data"]);
+    assert_eq!(o.removed_sources, ["D:\\data\\a", "D:\\data\\b"]);
+    assert_eq!(o.sources, ["D:\\data"]);
+
+    let o = edit(&win_input(&["C:\\s", "C:\\t"], &[]), &exclude("C:\\t", "C:/t")).unwrap();
+    assert_eq!(o.removed_sources, ["C:\\t"]);
+    assert_eq!(o.sources, ["C:\\s"]);
+}
+
+#[test]
+fn windows_export_quotes_with_double_quotes_and_writes_slash_patterns() {
+    let mut i = win_input(&["C:\\Program Files\\App", "D:\\data"], &["node_modules", "C:/s/cost$5"]);
+    i.exclude_if_present = vec![".nobackup".into()];
+    let built = build_rules(&i, &no_read, &no_env);
+    let out = export_rules(&built.rules);
+    assert_eq!(
+        out.command,
+        "restic backup --exclude-file restic-excludes.txt --exclude-if-present .nobackup \
+         \"C:\\Program Files\\App\" D:\\data"
+    );
+    let lines: Vec<&str> = out.exclude_file.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(lines, ["node_modules", "C:/s/cost$$5"]);
+}
+
+#[test]
+fn unix_quoting_still_single_quotes_a_path_with_a_backslash() {
+    // A backslash is the shell's escape on Unix, so it must be quoted there.
+    let i = input(&["/a/b\\c d"], &[]);
+    let out = export_rules(&build_rules(&i, &no_read, &no_env).rules);
+    assert_eq!(out.command, "restic backup '/a/b\\c d'");
+}
+
 // ── against the real restic ─────────────────────────────────────────────────
 
 fn restic_available() -> bool {
@@ -319,13 +401,39 @@ fn restic_available() -> bool {
         .unwrap_or(false)
 }
 
+/// `canonicalize` without the `\\?\` prefix Windows adds (restic, and our paths, don't use it).
+fn plain_canonical(p: &std::path::Path) -> std::path::PathBuf {
+    let c = p.canonicalize().unwrap();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = c.to_string_lossy().strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    c
+}
+
+/// The `/` spelling of a native path — how the engine and the comparisons below see it.
+fn canon(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    }
+}
+
+/// A literal name or path as a pattern, escaped the way the platform's restic wants.
+fn esc(s: &str) -> String {
+    PathStyle::NATIVE.escape_glob(s)
+}
+
 fn scratch(label: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("resty-plan-edit-{}-{label}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    plain_canonical(&dir)
 }
 
 /// Paths restic reports for a dry run over `sources` with the given extra args.
@@ -344,7 +452,7 @@ fn restic_included(repo: &std::path::Path, sources: &[String], args: &[String], 
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|j| j["message_type"] == "verbose_status")
-        .filter_map(|j| j["item"].as_str().map(|i| i.trim_end_matches('/').to_string()))
+        .filter_map(|j| j["item"].as_str().map(|i| canon(i).trim_end_matches('/').to_string()))
         .collect()
 }
 
@@ -394,24 +502,24 @@ fn restic_confirms_every_edit_the_engine_offers() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed * 1000 + case);
         let root = base.join(format!("t{case}"));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = plain_canonical(&root);
         let mut nodes = Vec::new();
         grow(&mut rng, &root, 0, &mut nodes);
         if nodes.is_empty() {
             continue;
         }
-        let rs = root.to_str().unwrap().to_string();
+        let rs = canon(root.to_str().unwrap());
 
         // An existing plan: a few random patterns (names, exact paths, contents-of, a re-include).
         let mut excludes: Vec<String> = Vec::new();
         for _ in 0..rng.gen_range(1..5) {
-            let n = nodes[rng.gen_range(0..nodes.len())].to_str().unwrap().to_string();
+            let n = canon(nodes[rng.gen_range(0..nodes.len())].to_str().unwrap());
             let name = n.rsplit('/').next().unwrap().to_string();
             excludes.push(match rng.gen_range(0..5) {
-                0 => escape_glob(&name),
-                1 => escape_glob(&n),
-                2 => format!("{}/*", escape_glob(&n)),
-                3 => format!("!{}", escape_glob(&n)),
+                0 => esc(&name),
+                1 => esc(&n),
+                2 => format!("{}/*", esc(&n)),
+                3 => format!("!{}", esc(&n)),
                 _ => "*.log".to_string(),
             });
         }
@@ -428,14 +536,14 @@ fn restic_confirms_every_edit_the_engine_offers() {
         let excluded_nodes: Vec<&std::path::PathBuf> =
             nodes.iter().filter(|p| !before.classify(p.to_str().unwrap(), &probe).included).collect();
         let target = if !excluded_nodes.is_empty() && rng.gen_range(0..10) < 7 {
-            excluded_nodes[rng.gen_range(0..excluded_nodes.len())].to_str().unwrap().to_string()
+            canon(excluded_nodes[rng.gen_range(0..excluded_nodes.len())].to_str().unwrap())
         } else {
-            nodes[rng.gen_range(0..nodes.len())].to_str().unwrap().to_string()
+            canon(nodes[rng.gen_range(0..nodes.len())].to_str().unwrap())
         };
         let target_included = before.classify(&target, &probe).included;
         let name = target.rsplit('/').next().unwrap().to_string();
         let action = if target_included {
-            let pattern = if rng.gen_range(0..2) == 0 { escape_glob(&target) } else { escape_glob(&name) };
+            let pattern = if rng.gen_range(0..2) == 0 { esc(&target) } else { esc(&name) };
             exclude(&target, &pattern)
         } else {
             include(&target, if rng.gen_range(0..3) == 0 { Some("folder") } else { None })
@@ -468,7 +576,8 @@ fn restic_confirms_every_edit_the_engine_offers() {
         let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..Default::default() };
         let (after, _) = build_engine(&after_plan, &read, &no_env).unwrap();
         for node in nodes.iter().filter(|p| p.exists()) {
-            let p = node.to_str().unwrap();
+            let p = canon(node.to_str().unwrap());
+            let p = p.as_str();
             assert_eq!(
                 after.classify(p, &probe).included,
                 reported.contains(p),
@@ -503,23 +612,23 @@ fn restic_confirms_exported_files_match_the_gui_flags() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(77_000 + case);
         let root = base.join(format!("t{case}"));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = plain_canonical(&root);
         let mut nodes = Vec::new();
         grow(&mut rng, &root, 0, &mut nodes);
         if nodes.is_empty() {
             continue;
         }
-        let rs = root.to_str().unwrap().to_string();
+        let rs = canon(root.to_str().unwrap());
         let mut excludes = Vec::new();
         for _ in 0..rng.gen_range(1..5) {
-            let n = nodes[rng.gen_range(0..nodes.len())].to_str().unwrap().to_string();
+            let n = canon(nodes[rng.gen_range(0..nodes.len())].to_str().unwrap());
             let name = n.rsplit('/').next().unwrap().to_string();
             excludes.push(match rng.gen_range(0..6) {
-                0 => escape_glob(&name),
-                1 => escape_glob(&n),
-                2 => format!("{}/*", escape_glob(&n)),
-                3 => format!("!{}", escape_glob(&n)),
-                4 => format!("**/{}", escape_glob(&name)),
+                0 => esc(&name),
+                1 => esc(&n),
+                2 => format!("{}/*", esc(&n)),
+                3 => format!("!{}", esc(&n)),
+                4 => format!("**/{}", esc(&name)),
                 _ => "*.log".to_string(),
             });
         }

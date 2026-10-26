@@ -56,3 +56,21 @@ describe("summarizeEdit", () => {
     expect(summarizeEdit({ ...base, addedSources: ["/n"] })).toBe("added source /n");
   });
 });
+
+describe("Windows", () => {
+  it("escapes a bracket as a class, since a backslash is a separator there", () => {
+    expect(escapeGlob("C:/a/we[ird]", true)).toBe("C:/a/we[[]ird]");
+    expect(escapeGlob("C:/a/b c", true)).toBe("C:/a/b c");
+  });
+
+  it("offers the same scopes, rooted at the drive", () => {
+    const opts = scopeOptions("C:/Users/me/code/app/node_modules", "dir", ["C:/Users/me/code"], true);
+    expect(opts.map((o) => o.id)).toEqual(["exact", "contents", "name", "under:C:/Users/me/code/app", "under:C:/Users/me/code"]);
+    expect(opts[0].pattern).toBe("C:/Users/me/code/app/node_modules");
+    expect(opts[3].pattern).toBe("C:/Users/me/code/app/**/node_modules");
+    // A drive-root source works too; like `/` on Unix, the root itself isn't offered as a scope
+    // (it would say the same as "named x.log anywhere").
+    const d = scopeOptions("D:/data/x.log", "file", ["D:/"], true).map((o) => o.id);
+    expect(d).toEqual(["exact", "name", "under:D:/data", "ext"]);
+  });
+});

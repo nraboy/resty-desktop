@@ -25,6 +25,7 @@ fn input(sources: &[&str], excludes: &[&str]) -> TreeRulesInput {
     TreeRulesInput {
         sources: sources.iter().map(|s| s.to_string()).collect(),
         excludes: excludes.iter().map(|s| s.to_string()).collect(),
+        style: PathStyle::Unix,
         ..Default::default()
     }
 }
@@ -120,6 +121,7 @@ fn unreadable_files_and_invalid_patterns_are_reported_not_fatal() {
 
 // ── listing ─────────────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn list_dir_sorts_folders_first_case_insensitively_and_caps() {
     let dir = scratch("list");
@@ -206,11 +208,12 @@ fn a_scan_that_finds_nothing_reports_a_completely_included_folder() {
 
 #[test]
 fn with_no_rules_nothing_is_read_at_all() {
-    let engine = Engine::new(&PlanRules { sources: vec!["/nonexistent".into()], ..Default::default() }).unwrap();
+    let engine = Engine::new(&PlanRules { sources: vec!["/nonexistent".into()], style: PathStyle::Unix, ..Default::default() }).unwrap();
     let o = scan_dir(&engine, &FsProbe::default(), "/nonexistent", GENEROUS, &AtomicBool::new(false));
     assert_eq!((o.partial, o.complete, o.scanned), (false, true, 0));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_scan_does_not_enter_excluded_directories_or_follow_symlinks() {
     let root = scratch("skip");
@@ -264,6 +267,7 @@ fn an_exhausted_budget_or_a_cancel_leaves_the_verdict_incomplete() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_folder_means_nothing_can_be_asserted() {
     use std::os::unix::fs::PermissionsExt;
@@ -281,6 +285,7 @@ fn an_unreadable_folder_means_nothing_can_be_asserted() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn kinds_reports_what_each_path_is() {
     let dir = scratch("kinds");
@@ -347,4 +352,56 @@ fn a_pattern_preview_stops_at_its_budget_and_says_so() {
     let p = count_matches(&base, &with, &FsProbe::default(), &[root.to_str().unwrap().to_string()], tight, &AtomicBool::new(false));
     assert!(p.capped && p.count == 0);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── hidden entries and the environment ──────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn dotfiles_are_flagged_hidden_but_still_listed_and_sorted_like_any_other() {
+    let dir = scratch("hidden");
+    touch(&dir.join(".env"));
+    touch(&dir.join("app.py"));
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let l = list_dir(dir.to_str().unwrap(), 100);
+    let got: Vec<(&str, &str, bool)> = l.entries.iter().map(|e| (e.name.as_str(), e.kind, e.hidden)).collect();
+    assert_eq!(
+        got,
+        [(".git", "dir", true), ("src", "dir", false), (".env", "file", true), ("app.py", "file", false)]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_environment_names_the_root_and_a_clean_home() {
+    let env = tree_environment(Some("/Users/me/".to_string()));
+    assert!(!env.windows);
+    assert_eq!(env.roots, [TreeRoot { label: "Computer".into(), path: "/".into() }]);
+    assert_eq!(env.home.as_deref(), Some("/Users/me"));
+    assert_eq!(tree_environment(None).home, None);
+    assert_eq!(tree_environment(Some(String::new())).home, None);
+}
+
+#[test]
+fn windows_style_classification_reports_ancestors_of_sources_per_drive() {
+    let mut i = input(&["C:\\Users\\me\\code"], &["node_modules"]);
+    i.style = PathStyle::Windows;
+    let built = build_rules(&i, &no_files, &no_env);
+    let engine = Engine::new(&built.rules).unwrap();
+    let probe = FsProbe::default();
+    let paths: Vec<String> =
+        ["C:/Users/me/code", "C:\\Users\\me\\code\\app\\node_modules\\x.js", "C:/", "C:/Users", "D:/", "C:/Users/me/code/app"]
+            .map(String::from)
+            .to_vec();
+    let v = classify_paths(&engine, &probe, &paths);
+    assert!(v[0].included);
+    assert!(!v[1].included);
+    assert_eq!(v[1].at.as_deref(), Some("C:/Users/me/code/app/node_modules"));
+    // The drive root and its folders above the source contain a source; another drive does not.
+    assert!(!v[2].included && v[2].contains_sources);
+    assert!(!v[3].included && v[3].contains_sources);
+    assert!(!v[4].included && !v[4].contains_sources);
+    assert!(v[5].included);
 }
