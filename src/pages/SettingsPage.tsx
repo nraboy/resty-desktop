@@ -154,7 +154,7 @@ export default function SettingsPage() {
       setSavedRetention(d.policy);
       setRetentionFields(retentionToFields(d.policy));
       setDefaultRetentionLoaded(true);
-    }).catch(() => {});
+    }).catch((e) => setRetentionError(String(e)));
     getResticVersion()
       .then((v) => { setResticVersion(v); setVersionError(""); })
       .catch((e) => { setResticVersion(null); setVersionError(String(e)); });

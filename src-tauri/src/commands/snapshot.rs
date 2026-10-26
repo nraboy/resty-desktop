@@ -159,10 +159,15 @@ pub async fn delete_snapshot(
     master_key: State<'_, MasterKey>,
     repo_locks: State<'_, RepoLocks>,
     repo_id: String,
-    snapshot_id: String,
+    snapshot_ids: Vec<String>,
     prune: bool,
 ) -> Result<(), String> {
-    validate_snapshot_id(&snapshot_id)?;
+    if snapshot_ids.is_empty() {
+        return Err("No snapshots selected.".to_string());
+    }
+    for id in &snapshot_ids {
+        validate_snapshot_id(id)?;
+    }
     let key = master_key.get()?;
     let repo = db.get_full_repo(&repo_id, &key)?;
     let restic_path = super::get_restic_path(&db);
@@ -170,7 +175,11 @@ pub async fn delete_snapshot(
         app,
         TaskKind::Forget,
         repo_id.clone(),
-        Some(snapshot_id.clone()),
+        // A batch has no single target; only the one-snapshot case names it.
+        match snapshot_ids.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        },
         TaskOrigin::Manual,
         None,
     );
@@ -180,10 +189,8 @@ pub async fn delete_snapshot(
         task_ctx.failed(e.clone());
         return Err(e);
     }
-    let mut args = vec!["forget".to_string(), snapshot_id.clone()];
-    if prune {
-        args.push("--prune".to_string());
-    }
+    // One `forget id1 id2 …` for the whole selection, so `--prune` runs once, not once per id.
+    let args = build_forget_args(&snapshot_ids, prune);
     // `forget` (with or without --prune) takes restic's exclusive lock — wait for the
     // repo to go idle first (see CLAUDE.md's Concurrency section / repo_locks.rs).
     let _wg = repo_locks.write(&repo.path).await;
@@ -199,8 +206,21 @@ pub async fn delete_snapshot(
     // Keeps the repo's cached snapshot list accurate immediately, without an unbounded
     // browse_cache_files delete or wiping the rest of the repo's cache — see
     // remove_snapshot_from_cache's doc comment (cache.rs) and docs/decisions.md.
-    let _ = db.remove_snapshot_from_cache(&repo_id, &snapshot_id);
+    for id in &snapshot_ids {
+        let _ = db.remove_snapshot_from_cache(&repo_id, id);
+    }
     Ok(())
+}
+
+/// `restic forget <ids…> [--prune]`. Restic validates every id before deleting any, so a bad
+/// id fails the whole batch with nothing removed.
+fn build_forget_args(snapshot_ids: &[String], prune: bool) -> Vec<String> {
+    let mut args = vec!["forget".to_string()];
+    args.extend(snapshot_ids.iter().cloned());
+    if prune {
+        args.push("--prune".to_string());
+    }
+    args
 }
 
 #[tauri::command]
@@ -1142,8 +1162,8 @@ pub async fn execute_backup(
             }
 
             // Exit 11 only (restic >= 0.17, this app's minimum): matching stderr text could re-run an
-                    // hour-long backup that failed late for an unrelated reason.
-                    let is_lock = status.code() == Some(11);
+            // hour-long backup that failed late for an unrelated reason.
+            let is_lock = status.code() == Some(11);
             if lock_retry_step(lock_retries, is_lock, 1) == LockRetry::UnlockStaleThenRetry {
                 lock_retries += 1;
                 // `ensure_writable` already refused a read-only repo above, so this never runs
@@ -2503,6 +2523,15 @@ mod tests {
     fn retention_args_always_starts_with_forget_prune_json() {
         let args = build_retention_args(&[], &[], &all_retention(), true);
         assert_eq!(&args[..3], &["forget", "--prune", "--json"]);
+    }
+
+    #[test]
+    fn forget_args_single_and_batch() {
+        assert_eq!(super::build_forget_args(&strs(&["abc"]), false), vec!["forget", "abc"]);
+        assert_eq!(
+            super::build_forget_args(&strs(&["abc", "123", "xyz"]), true),
+            vec!["forget", "abc", "123", "xyz", "--prune"]
+        );
     }
 
     #[test]

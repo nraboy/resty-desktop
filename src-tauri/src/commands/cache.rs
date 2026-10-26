@@ -3407,9 +3407,9 @@ pub(crate) async fn run_cleanup(app: tauri::AppHandle, origin: TaskOrigin) -> Re
 }
 
 /// "Clean Orphaned Data" button — thin wrapper over `run_cleanup` with `origin: Manual`,
-/// plus the DB-size readout the Settings UI shows afterward. Signature and return shape
-/// (`rows_deleted`, `db_size_bytes`) are unchanged from before extraction, so the
-/// `invoke.ts` wrapper and Settings UI need no changes.
+/// plus the DB-size readout the Settings UI shows afterward. Returns
+/// `(rows_deleted, DbSize)` — total and reclaimable bytes, which Settings uses for its
+/// compress hint.
 #[tauri::command]
 pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, DbSize), String> {
     let removed = run_cleanup(app.clone(), TaskOrigin::Manual).await?;

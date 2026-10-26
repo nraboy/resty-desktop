@@ -217,7 +217,11 @@ export const refreshSnapshots = (repoId: string): Promise<Snapshot[]> =>
   invoke("refresh_snapshots", { repoId });
 
 export const deleteSnapshot = (repoId: string, snapshotId: string, prune: boolean): Promise<void> =>
-  invoke("delete_snapshot", { repoId, snapshotId, prune });
+  deleteSnapshots(repoId, [snapshotId], prune);
+
+/** One `restic forget id1 id2 …`, so `prune` runs once for the whole batch. */
+export const deleteSnapshots = (repoId: string, snapshotIds: string[], prune: boolean): Promise<void> =>
+  invoke("delete_snapshot", { repoId, snapshotIds, prune });
 
 export const tagSnapshot = (
   repoId: string,

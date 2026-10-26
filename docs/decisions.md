@@ -982,16 +982,18 @@ Retention is per-repo opt-out of `--prune` (`repositories.defer_prune`); see doc
 - **Backrest import leaves it off.** Backrest's prune policy is a schedule; Resty has none, so
   deferring on import would leave the repo never pruning by itself.
 
-**Known gap, not fixed:** `SnapshotsPage.handleMultiDelete` calls `deleteSnapshot(repoId, id,
-prune)` once per selected snapshot, so with "prune" ticked it runs a full `restic prune` *per
-snapshot* — expensive on a cloud repo. Planned fix (unbuilt): delete each with `prune = false`,
-then one `pruneRepo(repoId)` at the end (reuses the lock, cancel, Activity-panel row and
-`last_pruned_at` handling). Things to handle when doing it: `PruneHandle.busy` can reject the final
-call ("A prune is already in progress") — report it as "deleted, prune failed", not a delete
-failure; give the trailing prune its own progress/Hide state (it can run for minutes); skip the
-prune after a mid-batch delete failure and say so. A batch `restic forget id1 id2 …` command was
-considered and rejected as roughly double the work for no extra benefit. Unscheduled prune
-(a schedule action for "prune repo X") is the other open follow-up.
+**Bulk delete is a single batched `forget`.** `delete_snapshot` takes `snapshot_ids: Vec<String>`
+and runs `restic forget id1 id2 … [--prune]` (`build_forget_args`), so a ticked "prune" runs once
+for the whole selection instead of once per snapshot (which was expensive on a cloud repo).
+`SnapshotsPage.handleMultiDelete` makes one `deleteSnapshots` call; the single-delete path is the
+one-id case (`deleteSnapshot` wraps it). Restic validates every id before removing any, so a bad id
+fails the whole batch with nothing deleted — there is no half-deleted state and no per-snapshot
+progress (the modal shows an indeterminate bar). An empty list is rejected up front. The task
+event's `targetId` is the snapshot id only for a one-id call, `None` for a batch. This replaced an
+earlier plan (forget each with `prune = false`, then one trailing `pruneRepo`), which would have
+needed `PruneHandle.busy` handling and its own prune progress/Hide state for no benefit; the
+earlier "batch forget rejected as double the work" judgement was wrong. A schedule action for
+"prune repo X" is the remaining open follow-up.
 
 ## Linux GPU Compatibility
 

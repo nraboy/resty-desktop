@@ -389,8 +389,8 @@ proposing a change — several are pinned by a named test or reference a confirm
   per plan or global (cloud early-deletion fees depend on where the repo lives), and explicit
   "Prune…"/"Prune All" still prune a deferred repo. A failed flag lookup **fails closed** (no prune);
   a read-only repo keeps its stored choice but the row hides the badge. `last_pruned_at` is
-  best-effort bookkeeping. Known unfixed gap: bulk snapshot delete with "prune" ticked prunes once
-  *per snapshot* — planned fix and rejected alternative in docs/decisions.md
+  best-effort bookkeeping. Bulk snapshot delete is one `restic forget id1 id2 … [--prune]` (the
+  `delete_snapshot` command takes a list), so a ticked "prune" runs once — see docs/decisions.md
 - Controls use the native arrow cursor, not the web-style hand, with **no Settings toggle** (issue
   #35): a base-layer rule in `index.css` (`button, [role="button"] { cursor: default }`) overrides
   Tailwind preflight's `cursor: pointer`, no `cursor-pointer` classes remain, and the sidebar's

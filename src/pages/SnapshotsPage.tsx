@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
+import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot, deleteSnapshot, deleteSnapshots, getRemoteAutoRefresh, getRestorePath, getSnapshotStats, getSnapshotIndexStatus, indexSnapshot, listRepos, listSnapshots, refreshSnapshots, restoreSnapshot, tagSnapshot, unlockRepo } from "../lib/invoke";
 import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
@@ -77,7 +77,6 @@ export default function SnapshotsPage() {
   const [multiDeleteOpen, setMultiDeleteOpen] = useState(false);
   const [multiDeletePrune, setMultiDeletePrune] = useState(true);
   const [multiDeleting, setMultiDeleting] = useState(false);
-  const [multiDeleteProgress, setMultiDeleteProgress] = useState({ current: 0, total: 0 });
   const [multiDeleteDone, setMultiDeleteDone] = useState(false);
   const [multiDeleteError, setMultiDeleteError] = useState("");
 
@@ -340,23 +339,15 @@ export default function SnapshotsPage() {
     const ids = Array.from(selectedIds);
     setMultiDeleting(true);
     setMultiDeleteError("");
-    setMultiDeleteProgress({ current: 0, total: ids.length });
-    for (let i = 0; i < ids.length; i++) {
-      setMultiDeleteProgress({ current: i, total: ids.length });
-      try {
-        await deleteSnapshot(repoId, ids[i], multiDeletePrune);
-      } catch (err: any) {
-        setMultiDeleteError(String(err));
-        setMultiDeleting(false);
-        // ids[0..i) were already deleted: drop them from the selection so a retry doesn't
-        // re-target gone snapshots, and reload (a cache read — delete_snapshot updates it) so
-        // they leave the list. Mirrors BackupPlansPage/SchedulesPage's identical error path.
-        setSelectedIds(new Set(ids.slice(i)));
-        await load();
-        return;
-      }
+    // One `restic forget id1 id2 …` (+ one `--prune`): restic checks every id before removing
+    // any, so a failure leaves the selection intact and nothing deleted.
+    try {
+      await deleteSnapshots(repoId, ids, multiDeletePrune);
+    } catch (err: any) {
+      setMultiDeleteError(String(err));
+      setMultiDeleting(false);
+      return;
     }
-    setMultiDeleteProgress({ current: ids.length, total: ids.length });
     setMultiDeleting(false);
     setMultiDeleteDone(true);
     setSelectedIds(new Set());
@@ -850,19 +841,14 @@ export default function SnapshotsPage() {
                 className="rounded bg-gray-700 border-gray-600"
                 disabled={multiDeleting}
               />
-              Also run <span className="font-mono text-xs">restic prune</span> after each forget
+              Also run <span className="font-mono text-xs">restic prune</span> once after forgetting
             </label>
             {multiDeleting && (
               <div className="mb-4">
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <span>Deleting snapshot {multiDeleteProgress.current + 1} of {multiDeleteProgress.total}…</span>
-                </div>
-                <div className="w-full bg-gray-800 rounded-full h-2">
-                  <div
-                    className="bg-red-500 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${Math.round((multiDeleteProgress.current / multiDeleteProgress.total) * 100)}%` }}
-                  />
-                </div>
+                <p className="text-xs text-gray-400 mb-1">
+                  Deleting {selectedIds.size} snapshot{selectedIds.size !== 1 ? "s" : ""}…
+                </p>
+                <ProgressBar indeterminate colorClass="bg-red-500" heightClass="h-2" />
               </div>
             )}
             <div className="flex justify-end gap-2">
