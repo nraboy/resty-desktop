@@ -393,12 +393,16 @@ fn windows_export_never_lets_powershell_expand_or_split_a_name() {
         "C:\\x\\%TEMP%",
         "C:\\x\\a,b",
         "C:\\x\\it's",
+        // PowerShell also reads the typographic single quotes as quote characters.
+        "C:\\x\\it\u{2019}s; calc",
+        "C:\\x\\\u{2018}a\u{201A}b\u{201B}",
     ];
     let i = win_input(&names, &[]);
     let out = export_rules(&build_rules(&i, &no_read, &no_env).rules);
     assert_eq!(
         out.command,
-        "restic backup 'C:\\x\\$(calc)' 'C:\\x\\$env:USERNAME' 'C:\\x\\a`b' 'C:\\x\\%TEMP%' 'C:\\x\\a,b' 'C:\\x\\it''s'"
+        "restic backup 'C:\\x\\$(calc)' 'C:\\x\\$env:USERNAME' 'C:\\x\\a`b' 'C:\\x\\%TEMP%' 'C:\\x\\a,b' 'C:\\x\\it''s' \
+         'C:\\x\\it\u{2019}\u{2019}s; calc' 'C:\\x\\\u{2018}\u{2018}a\u{201A}\u{201A}b\u{201B}\u{201B}'"
     );
 }
 
@@ -412,6 +416,10 @@ fn an_argument_no_shell_can_carry_safely_leaves_the_command_out() {
     assert_eq!(out.command, "");
     assert!(out.notes.iter().any(|n| n.contains("No command is shown") && n.contains("we\\\"ird")));
     assert!(out.exclude_file.contains("node_modules"));
+
+    // The Unicode line/paragraph separators count too.
+    let out = export_rules(&build_rules(&win_input(&["C:\\a\u{2028}b"], &[]), &no_read, &no_env).rules);
+    assert_eq!(out.command, "");
 
     let out = export_rules(&build_rules(&input(&["/a\nb"], &[]), &no_read, &no_env).rules);
     assert_eq!(out.command, "");

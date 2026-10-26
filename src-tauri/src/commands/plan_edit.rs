@@ -302,15 +302,24 @@ fn file_line(pattern: &str) -> String {
 /// `None` when no quoting can promise that. The shell is POSIX `sh` on Unix and PowerShell on
 /// Windows; in both, single quotes are fully literal (no `$`, backtick or `%` expansion), so
 /// everything but a conservative set of plain characters goes inside them, with `'` doubled
-/// (`''`) in PowerShell and written `'\''` in `sh`. Plain characters exclude the ones PowerShell
+/// (`''`; see `POWERSHELL_QUOTES`) in PowerShell and written `'\''` in `sh`. Plain characters exclude the ones PowerShell
 /// treats specially even unquoted (`,` builds an array, a leading `@` splats, `%` and `$` expand).
 ///
-/// A control character (newline, escape…) is refused everywhere — pasted into a terminal it can do
-/// more than name a file — and so is `"` on Windows, which Windows PowerShell mangles when passing
-/// an argument to a native program. The caller then omits the command and says why. A Windows path
-/// can't contain `"`; only a hand-typed marker name could.
+/// PowerShell reads the typographic single quotes (U+2018 ‘, U+2019 ’, U+201A ‚, U+201B ‛) as
+/// single-quote characters too — a folder called `it’s` would end the literal early — so inside
+/// its single quotes every one of them is doubled, like the ASCII one.
+const POWERSHELL_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+
+/// A control character (newline, escape…, and the Unicode line/paragraph separators) is refused
+/// everywhere — pasted into a terminal it can do more than name a file — and so is `"` on Windows,
+/// which Windows PowerShell mangles when passing an argument to a native program. The caller then
+/// omits the command and says why. A Windows path can't contain `"`; only a hand-typed marker name
+/// could.
 fn shell_quote(style: PathStyle, s: &str) -> Option<String> {
-    if s.chars().any(|c| c.is_control() || (style == PathStyle::Windows && c == '"')) {
+    let unsafe_char = |c: char| {
+        c.is_control() || c == '\u{2028}' || c == '\u{2029}' || (style == PathStyle::Windows && c == '"')
+    };
+    if s.chars().any(unsafe_char) {
         return None;
     }
     let plain = |c: char| match style {
@@ -323,7 +332,17 @@ fn shell_quote(style: PathStyle, s: &str) -> Option<String> {
     }
     Some(match style {
         PathStyle::Unix => format!("'{}'", s.replace('\'', "'\\''")),
-        PathStyle::Windows => format!("'{}'", s.replace('\'', "''")),
+        PathStyle::Windows => {
+            let mut out = String::from("'");
+            for c in s.chars() {
+                if POWERSHELL_QUOTES.contains(&c) {
+                    out.push(c);
+                }
+                out.push(c);
+            }
+            out.push('\'');
+            out
+        }
     })
 }
 
