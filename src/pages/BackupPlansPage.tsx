@@ -12,6 +12,7 @@ import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import ContextMenu, { type ContextMenuItemDef } from "../components/ContextMenu";
 import Spinner from "../components/Spinner";
 import BackupWarningsList from "../components/BackupWarningsList";
@@ -187,6 +188,9 @@ export default function BackupPlansPage() {
   // Backup and retention both write to the repo — unavailable once it's read-only
   // (or was deleted out from under the plan, matching the existing "no valid repo" case).
   const planRepoReadOnly = (plan: BackupPlan) => repos.find((r) => r.id === plan.repoId)?.readOnly ?? false;
+  const retentionDeferred = retentionPlan
+    ? repos.find((r) => r.id === retentionPlan.repoId)?.deferPrune ?? false
+    : false;
 
   const openRetentionModal = (plan: BackupPlan) => {
     setRetentionPlan(plan);
@@ -301,7 +305,7 @@ export default function BackupPlansPage() {
         try {
           await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention, backupPlan.id);
         } catch (pruneErr: any) {
-          setBackupError("Backup succeeded but pruning failed: " + String(pruneErr));
+          setBackupError("Backup succeeded but applying retention failed: " + String(pruneErr));
           return;
         } finally {
           setApplyingRetention(false);
@@ -332,7 +336,7 @@ export default function BackupPlansPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Backup Plans</h1>
           <p className="text-sm text-gray-500 mt-0.5">Define and run backup configurations.</p>
@@ -418,7 +422,7 @@ export default function BackupPlansPage() {
                 className="group flex-1 min-w-0"
                 onClick={() => selectMode ? toggleSelectOne(plan.id) : navigate(`/backup-plans/${plan.id}`)}
               >
-                <p className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate">{plan.name}</p>
+                <TruncatedText as="p" text={plan.name} className="text-sm font-medium text-gray-100 group-hover:text-blue-400 transition-colors truncate" />
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {repoName(plan.repoId)} &middot;{" "}
                   {formatPlanSources(plan)}
@@ -576,8 +580,9 @@ export default function BackupPlansPage() {
             </div>
 
             <p className="text-xs text-gray-500">
-              Runs <code className="text-gray-400">restic forget --prune</code> with the plan's retention rules.
+              Runs <code className="text-gray-400">restic forget{retentionDeferred ? "" : " --prune"}</code> with the plan's retention rules.
               Snapshots outside the policy will be permanently removed.
+              {retentionDeferred && " Pruning is deferred for this repository; storage is reclaimed the next time you prune it."}
             </p>
 
             <div className="min-h-[48px] flex flex-col justify-center">

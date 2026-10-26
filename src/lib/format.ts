@@ -1,6 +1,6 @@
 // Shared display formatters used across pages.
 
-import type { BackupPlan, ResticStats } from "./types";
+import type { BackupPlan, DbSize, ResticStats } from "./types";
 
 /** Human-readable byte size (e.g. "1.5 MB"). */
 export function formatBytes(bytes: number): string {
@@ -10,6 +10,36 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   if (bytes < 1024 ** 4) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
+}
+
+/** Reclaimable space below this (or below DB_COMPRESS_MIN_FRACTION of the file) isn't worth a VACUUM. */
+export const DB_COMPRESS_MIN_BYTES = 100 * 1024 ** 2;
+export const DB_COMPRESS_MIN_FRACTION = 0.1;
+/** A database this big with nothing to reclaim is live index data, not slack. */
+export const DB_LARGE_BYTES = 1024 ** 3;
+
+/**
+ * What the Settings cache card should tell the user about the database size:
+ * "compress" when Compress Database would give back a meaningful share (and how much
+ * free disk it needs while it runs — VACUUM writes a full temporary copy of the live
+ * data), "large" when the file is big but is all live rows so compressing won't help,
+ * otherwise null.
+ */
+export type DbSizeHint =
+  | { kind: "compress"; reclaimableBytes: number; neededBytes: number }
+  | { kind: "large" }
+  | null;
+
+export function dbSizeHint(size: DbSize): DbSizeHint {
+  const { totalBytes, reclaimableBytes } = size;
+  if (
+    reclaimableBytes >= DB_COMPRESS_MIN_BYTES &&
+    reclaimableBytes >= totalBytes * DB_COMPRESS_MIN_FRACTION
+  ) {
+    return { kind: "compress", reclaimableBytes, neededBytes: totalBytes - reclaimableBytes };
+  }
+  if (totalBytes >= DB_LARGE_BYTES) return { kind: "large" };
+  return null;
 }
 
 /** Like formatBytes but renders missing/zero sizes as an em dash. */

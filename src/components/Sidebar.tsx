@@ -72,8 +72,25 @@ interface SidebarProps {
   onToggleActivity: () => void;
 }
 
+// True below Tailwind's `xl` (1280px), where the sidebar is an icon rail. The nav links' hover
+// title is only needed there (the label is hidden); a plain `title` would also show a redundant
+// tooltip over the visible label at full width, which the compact tier must not change.
+function useIsCompact(): boolean {
+  const query = "(min-width: 1280px)"; // = Tailwind `xl`; pinned by src/lib/breakpoints.test.ts
+  const [compact, setCompact] = useState(() => !window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setCompact(!mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return compact;
+}
+
 export default function Sidebar({ onLock, activityOpen, onToggleActivity }: SidebarProps) {
   const [appVersion, setAppVersion] = useState("");
+  const compact = useIsCompact();
   const activity = useActivity();
   // Same shared counter the panel's own empty-state derives from (see activity.tsx), so the
   // status strip can never disagree with what the drawer shows. Includes queued batches/mirrors.
@@ -93,8 +110,10 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
       key={item.to}
       to={item.to}
       end={item.to === "/"}
+      title={compact ? item.label : undefined}
+      aria-label={item.label}
       className={({ isActive }) =>
-        `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-default ${
+        `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-default max-xl:justify-center max-xl:px-0 ${
           isActive
             ? "bg-blue-600/20 text-blue-400 font-medium"
             : "text-gray-400 hover:text-gray-200 hover:bg-gray-800"
@@ -102,16 +121,16 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
       }
     >
       {item.icon}
-      {item.label}
+      <span className="max-xl:hidden">{item.label}</span>
     </NavLink>
   );
 
   return (
-    <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
-      <div className="px-4 py-4 border-b border-gray-800">
-        <div className="flex items-center gap-2">
+    <aside className="w-56 max-xl:w-16 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
+      <div className="px-4 py-4 border-b border-gray-800 max-xl:px-0">
+        <div className="flex items-center gap-2 max-xl:justify-center">
           <img src="/icon.svg" alt="" className="w-7 h-7 flex-shrink-0" />
-          <div>
+          <div className="max-xl:hidden">
             <h1 className="text-base font-bold text-gray-50 tracking-tight">Resty Desktop</h1>
           </div>
         </div>
@@ -124,10 +143,10 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
             onClick={onLock}
             title="Lock Now"
             aria-label="Lock Now"
-            className="flex w-full items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+            className="flex w-full items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors max-xl:justify-center max-xl:px-0"
           >
             <LockIcon className="w-5 h-5" />
-            Lock
+            <span className="max-xl:hidden">Lock</span>
           </button>
         )}
       </nav>
@@ -139,7 +158,7 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
           aria-expanded={activityOpen}
           aria-label={`Activity: ${activityLabel}`}
           title={activityOpen ? "Hide activity" : "Show activity"}
-          className={`flex w-full items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors ${
+          className={`flex w-full items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors max-xl:justify-center max-xl:gap-1 max-xl:px-0 ${
             activityOpen ? "bg-gray-800 text-gray-200" : "hover:bg-gray-800"
           }`}
         >
@@ -149,19 +168,22 @@ export default function Sidebar({ onLock, activityOpen, onToggleActivity }: Side
           >
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2 12h4l2.5-6 4 12 2.5-6h5" />
           </svg>
-          <span className={`text-xs truncate ${activityCount > 0 ? "text-gray-400" : "text-gray-500"}`}>
+          <span className={`text-xs truncate max-xl:hidden ${activityCount > 0 ? "text-gray-400" : "text-gray-500"}`}>
             {activityLabel}
           </span>
+          {activityCount > 0 && (
+            <span className="xl:hidden text-[10px] tabular-nums text-blue-400">{activityCount}</span>
+          )}
           <ChevronRightIcon
-            className={`w-3.5 h-3.5 ml-auto flex-shrink-0 text-gray-500 transition-transform ${activityOpen ? "rotate-180" : "rotate-0"}`}
+            className={`w-3.5 h-3.5 ml-auto flex-shrink-0 text-gray-500 transition-transform max-xl:hidden ${activityOpen ? "rotate-180" : "rotate-0"}`}
           />
         </button>
         {activityCount > 0 && <ProgressBar indeterminate heightClass="h-0.5" className="mt-1.5" />}
       </div>
 
       {appVersion && (
-        <div className="px-4 py-3 border-t border-gray-800">
-          <p className="text-xs text-gray-500 text-center">VER {appVersion}</p>
+        <div className="px-4 py-3 border-t border-gray-800 max-xl:px-1">
+          <p className="text-xs text-gray-500 text-center max-xl:truncate"><span className="max-xl:hidden">VER </span>{appVersion}</p>
         </div>
       )}
     </aside>
