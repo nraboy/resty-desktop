@@ -1,0 +1,98 @@
+<!doctype html><html><head><meta charset="utf-8"><script src="/mock.js"></script></head><body><pre id="o">running</pre><script>
+const M = window.__MOCK_DATA__;
+const s0 = M.snapshots[0].id, s1 = M.snapshots[1].id;
+const qs = new URLSearchParams(location.search);
+const ROUTES = (qs.get("routes") ? qs.get("routes").split(",") : [
+  "/", "/snapshots/repo-1", "/snapshots/repo-1/search", `/snapshots/repo-1/${s0}/browse`, `/snapshots/repo-1/${s0}/search`,
+  `/snapshots/repo-1/diff/${s0}/${s1}`, "/backup-plans", "/backup-plans/plan-1", "/backup-plans/new", "/schedules", "/schedules/s1",
+  "/schedules/new", "/logs", "/settings",
+]);
+const WIDTHS = (qs.get("widths") || "1024,1100,1152,1200,1279,1280,1366,1536,1600").split(",").map(Number);
+const PROBE = qs.get("probe");
+const out = [];
+// Pages that show nothing useful until the user acts get driven into their populated state, so the
+// result rows (long names!) are what get measured, not the empty prompt.
+const typeInto = async (d, w, sel, text) => {
+  const el = d.querySelector(sel); if (!el) return;
+  Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set.call(el, text);
+  el.dispatchEvent(new w.Event("input", { bubbles: true }));
+};
+const clickText = async (d, text) => { const b = [...d.querySelectorAll("main button")].find((x) => x.textContent.trim() === text); if (b) b.click(); };
+const ACT = {
+  // Expand every error/warning row so the (long, unbroken) error text and warning list are measured too.
+  "/logs": async (d) => { d.querySelectorAll("main tbody tr").forEach((tr) => tr.click()); await sleep(700); },
+  "/snapshots/repo-1/search": async (d, w) => { await typeInto(d, w, "main input", "report"); await sleep(900); },
+  [`/snapshots/repo-1/${s0}/search`]: async (d, w) => { await typeInto(d, w, "main input", "report"); await sleep(900); },
+  [`/snapshots/repo-1/diff/${s0}/${s1}`]: async (d) => { await clickText(d, "Users"); await sleep(300); await clickText(d, "someone"); await sleep(300); },
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const short = (el) => (el.tagName.toLowerCase() + (typeof el.className === "string" && el.className ? "." + el.className.split(/\s+/).slice(0, 3).join(".") : "") + ":" + (el.textContent || "").trim().slice(0, 24)).slice(0, 90);
+
+function measure(f) {
+  const w = f.contentWindow, d = f.contentDocument, res = { crashed: false, hscroll: [], clipped: [], wraps: [] };
+  res.crashed = d.body.innerText.includes("Something went wrong");
+  const vis = (el) => el.offsetParent !== null || getComputedStyle(el).position === "fixed";
+  for (const el of d.querySelectorAll("*")) {
+    const cs = w.getComputedStyle(el);
+    if ((cs.overflowX === "auto" || cs.overflowX === "scroll") && el.scrollWidth > el.clientWidth + 1 && vis(el)) res.hscroll.push(short(el) + ` (+${el.scrollWidth - el.clientWidth})`);
+  }
+  // Silent clipping: an overflow:hidden box whose content is wider than it is (no scrollbar, no ellipsis)
+  // hides data without any visible cue — the failure mode of the rounded `overflow-hidden` tables.
+  // Boxes that truncate on purpose (text-overflow: ellipsis) and progress bars are expected to overflow.
+  res.silent = [];
+  for (const el of d.querySelectorAll("*")) {
+    const cs = w.getComputedStyle(el);
+    if (cs.overflowX !== "hidden" && cs.overflowX !== "clip") continue;
+    if (cs.textOverflow === "ellipsis" || el.getAttribute("role") === "progressbar" || !vis(el)) continue;
+    if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0) res.silent.push(short(el) + ` (+${el.scrollWidth - el.clientWidth})`);
+  }
+  if (d.documentElement.scrollWidth > w.innerWidth + 1) res.hscroll.push(`document (+${d.documentElement.scrollWidth - w.innerWidth})`);
+  const fixedAnc = (el) => { for (let a = el; a && a !== d.body; a = a.parentElement) if (w.getComputedStyle(a).position === "fixed") return true; return false; };
+  for (const el of d.querySelectorAll("button, input, select, textarea, a[href]")) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height || fixedAnc(el)) continue;
+    let bad = r.right > w.innerWidth + 1 || r.left < -1 ? "viewport" : "";
+    for (let a = el.parentElement; a && !bad && a !== d.documentElement; a = a.parentElement) {
+      const cs = w.getComputedStyle(a);
+      if (cs.overflowX !== "visible") { const ar = a.getBoundingClientRect(); if (r.right > ar.right + 1 || r.left < ar.left - 1) bad = "clipped by " + short(a); }
+    }
+    if (bad) res.clipped.push(short(el) + " -> " + bad);
+  }
+  for (const el of d.querySelectorAll("body *")) {
+    if (el.children.length || !el.textContent.trim() || el.textContent.trim().length > 45 || !vis(el) || fixedAnc(el)) continue;
+    if (["OPTION", "TEXTAREA", "PRE", "CODE", "SCRIPT", "STYLE"].includes(el.tagName)) continue;
+    const rg = d.createRange(); rg.selectNodeContents(el);
+    const tops = new Set([...rg.getClientRects()].map((x) => Math.round(x.top / 4)));
+    if (tops.size > 1) res.wraps.push(short(el));
+  }
+  res.culprits = [];
+  const mainEl = d.querySelector("main");
+  if (res.hscroll.length && mainEl) {
+    const mr = mainEl.getBoundingClientRect();
+    const over = [...mainEl.querySelectorAll("*")].filter((e) => e.getBoundingClientRect().right > mr.right + 1 && e.getBoundingClientRect().width > 0 && !fixedAnc(e));
+    res.culprits = over.filter((e) => ![...e.children].some((c) => over.includes(c))).slice(0, 6).map((e) => short(e) + " right=" + Math.round(e.getBoundingClientRect().right) + " w=" + Math.round(e.getBoundingClientRect().width));
+  }
+  // A shrinkable (max-w-0) column squeezed to almost nothing renders every name as "…" while
+  // overflow/wrap checks still pass — flag any that end up narrower than a few characters.
+  res.squeezed = [...d.querySelectorAll("th, td")].filter((e) => /(^|\s)max-w-0(\s|$)/.test(e.className) && e.offsetParent !== null && e.getBoundingClientRect().width < 90).map((e) => short(e) + " w=" + Math.round(e.getBoundingClientRect().width));
+  res.unmocked = [...new Set(w.__unmocked || [])].filter((c) => !["set_menu_auth_state","activate_tray","deactivate_tray","show_main_window"].includes(c));
+  res.textLen = d.querySelector("main") ? d.querySelector("main").innerText.length : -1; res.mainText = d.querySelector("main") ? d.querySelector("main").innerText.replace(/\s+/g, " ").slice(0, 160) : ""; res.rows = d.querySelectorAll("tbody tr").length;
+  return res;
+}
+
+(async () => {
+  for (const route of ROUTES) for (const width of WIDTHS) {
+    const f = document.createElement("iframe");
+    f.style.cssText = `width:${width}px;height:760px;border:0;position:absolute;left:0;top:0`;
+    f.src = route; document.body.appendChild(f);
+    await new Promise((r) => (f.onload = r));
+    await sleep(1800);
+    if (ACT[route]) { try { await ACT[route](f.contentDocument, f.contentWindow); } catch (e) {} await sleep(400); }
+    let r; try { r = measure(f); } catch (e) { r = { error: String(e) }; }
+    if (PROBE && !r.error) r.probe = [...f.contentDocument.querySelectorAll(PROBE)].filter((e) => e.offsetParent !== null).map((e) => (e.textContent.trim().slice(0, 12) || "·") + "=" + Math.round(e.getBoundingClientRect().width));
+    out.push({ route: route.replace(s0, "S0").replace(s1, "S1"), width, ...r });
+    f.remove();
+  }
+  document.getElementById("o").textContent = "RESULT" + JSON.stringify(out) + "END";
+})();
+</script></body></html>
