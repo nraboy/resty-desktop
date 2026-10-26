@@ -116,24 +116,53 @@ the tree should use `judge_node` incrementally). `cargo test engine_speed --rele
 < 100 ms, expanding a 10k-entry folder < 200 ms, virtualised rows, scans that never enter excluded
 folders, a per-folder time budget with a "not fully checked" state.
 
-## The tree preview (phase 2, read-only)
+## The tree in the Files tab (phase 2 preview, now also the source editor)
 
-`components/PlanTreePreview.tsx` is a "Preview" card in the plan editor (open by default, collapsible) (after the
-exclude sections). It is **additive**: the existing source/exclude editors are unchanged, and the
-card shows a message for plans that use path-list files. `tree_supported` is now true on every
-platform (kept as the single switch should a platform need turning off).
+`components/PlanTreePreview.tsx` is the first card of the plan editor's **Files** tab (the plan form,
+tabs and undo history live in `components/plan/` and `lib/planForm.ts`; see docs/frontend.md). The
+sources of a plan are **the folders and files picked in this tree** — `SourcesCard` (a plain path
+list) only renders when `tree_supported` is false, which no platform does today. It is shown for
+every plan; one with path-list files gets a note that their entries aren't in the tree yet (planned:
+shown read-only with a "from list file X, line N" mark). The tree starts at the whole filesystem
+(`/`, or the drives on Windows), expands down to each source, and the plan with no source starts
+with nothing selected; a "Sources only" view is a shortcut for deep sources. Save needs at least one
+source (a folder/file or a path-list file).
 
-- **Roots:** *Sources* (each source not nested in another; nested ones appear inside their parent)
-  or *Whole filesystem* (`/` on Unix; on Windows one root per drive, from `tree_env`, auto-expanded
-  down to each source). Rows are marked **included**
-  (filled box), **partly included** (dash: backed up, but something inside is excluded),
-  **excluded** (empty box, greyed), plus *contains backed-up items* for a folder that sits above a
-  source (shown as partly), and *not fully checked* for a huge included folder the scan couldn't
-  finish within its budget. Hover a name for the reason in plain language ("Excluded because its
-  folder X is excluded by `node_modules`", "…by line 12 of ~/.ignore", "Re-included by `!…`").
+- **Clicking a box.** `boxClick` (pure, tested) decides: a **source** is removed in one click; an
+  item **outside every source** becomes one in one click (`tree_plan_edit` computes and verifies it
+  first); anything **inside a source** opens the dialog to pick the pattern scope (exclude) or the
+  carve-out (include). A click that would **swallow existing sources** (the folder holds them) or
+  that needs extra patterns opens the dialog too, which lists exactly what is added and replaced —
+  that is the only confirmation. Clicks are ignored while the verdicts on screen lag the last edit
+  (`settled`), so a quick second click can't act on stale state.
+- **Undo** is a stack (20 deep) kept by `FilesTab`: each record holds the sources/patterns before and
+  after. The line under the toolbar undoes the latest and says how many earlier ones remain. Any
+  change to the sources or patterns made another way (typing a pattern, the fallback list) empties
+  the stack, because restoring an older state would throw that change away.
+- **Source pill and states.** A source row carries a "Source" pill. A folder that is not backed up
+  itself but holds a source has its own look (dashed outline + dot, "holds a source") so it can't be
+  mistaken for "partly included" (backed up, but something inside is left out).
+- **Hidden files.** A "Show hidden files" switch (off by default; not persisted, so the warning is
+  seen). While off, hidden entries (`TreeEntry.hidden`: dot-names on Unix/macOS, the hidden
+  attribute on Windows) are left out of the rows — except sources and the folders leading to one
+  (`pinnedPaths`) — and each folder ends with "N hidden items not shown — M are backed up" and a
+  Show link. A "!" on the switch says hidden items in the folders opened so far *are* backed up
+  (`hiddenSummary`); hiding never changes what is backed up, only what is listed.
+- **Navigation.** "Home" opens every folder down to the home folder (`tree_env().home`) and scrolls
+  to it (the tree is windowed, so a reveal expands, then scrolls once the row exists). The tree
+  height is user-resizable (drag the bar under it, or Arrow Up/Down on it; remembered per viewer in
+  `localStorage`) and starts taller than the old fixed 340 px.
+- **Roots:** *Whole filesystem* — `/` on Unix, one root per drive on Windows (from `tree_env`),
+  auto-expanded down to each source — or *Sources only* (each source not nested in another; nested
+  ones appear inside their parent). Rows are marked **included** (filled box), **partly included**
+  (dash: backed up, but something inside is excluded), **holds a source** (a folder that is not
+  backed up itself but sits above a source), **excluded** (empty box, greyed), and *not fully
+  checked* for a huge included folder the scan couldn't finish within its budget. Hover a name for
+  the reason in plain language ("Excluded because its folder X is excluded by `node_modules`",
+  "…by line 12 of ~/.ignore", "Re-included by `!…`").
 - **`tree_env`** reports the platform (`windows`), the roots (`/`, or the logical drives via
   `GetLogicalDrives`) and the home folder; entries carry a `hidden` flag (dot-name on Unix/macOS,
-  the hidden attribute on Windows) for the planned "show hidden files" toggle.
+  the hidden attribute on Windows) for the "Show hidden files" switch.
 - **Backend (`commands/plan_tree.rs`):** `tree_list_dir` (names + entry types only, folders first,
   capped at 3000 with a "…and N more" note), `tree_kinds` (is a source a folder, file or gone),
   `tree_classify` (verdicts for a batch of paths, plus each rule's origin: plan pattern, or file
@@ -158,10 +187,10 @@ platform (kept as the single switch should a platform need turning off).
 
 ## Editing from the tree (phase 3, slice 1)
 
-Clicking a row's box opens a dialog (`PlanTreeEditDialog`); nothing changes until the user confirms,
-and the Preview card shows "Updated your plan: … Undo" afterwards. The existing Paths/Exclude
-editors stay in place and simply show the result (the old Simple list is the rules list; Expert
-text keeps its comments). Include patterns (the `.env`-anywhere idea) are deliberately deferred.
+Clicking a row's box inside a source opens a dialog (`PlanTreeEditDialog`); nothing changes until the user confirms,
+and the card shows "Updated your plan: … Undo" afterwards. The exclude editors stay in place and
+simply show the result (the Simple list is the rules list; Expert text keeps its comments). Adding
+or removing a *source* skips the dialog (see above) unless it would absorb other sources. Include patterns (the `.env`-anywhere idea) are deliberately deferred.
 
 - **Exclude** offers pattern scopes for the clicked path — this exact item, a folder's contents
   only, the name anywhere, the name under a nearer ancestor (never above the source), a file
@@ -205,8 +234,12 @@ text keeps its comments). Include patterns (the `.env`-anywhere idea) are delibe
    the Windows end-to-end run is delegated to the `restic-compat` workflow (not yet seen green).
 2. **Read-only tree** — done (this section); keyboard navigation (arrow keys) and a filter box for
    huge folders are not yet.
-3. Editing — slice 1 done (above): click to include/exclude with the pattern dialog, verified edits,
-   undo, CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
-   Paths/Exclude editors, and (deferred) include patterns resolved to an explicit
+3. Editing — done: the tree is the source editor (one-click add/remove, multi-step undo, hidden-files
+   switch, Home, resizable), plus the pattern dialog for items inside a source, verified edits and
+   the CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
+   exclude editors, and (deferred) include patterns resolved to an explicit
    `--files-from-verbatim` list at backup time (restic has no include patterns).
+3b. Path-list files in the tree — not yet: parse the list, expand globs like restic (`filepath.Glob`,
+   `**` = a single `*`), show the entries read-only with their source file and line, later edit with a
+   warning. Until then the tree notes that a plan has list files.
 4. Polish: size estimates, keyboard/accessibility; verifying on a real Windows machine.

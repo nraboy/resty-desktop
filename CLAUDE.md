@@ -49,11 +49,12 @@ src/
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
-    plan/                 # The plan editor's pieces: PlanHeader (editable title, repo, actions), PlanTabs (accessible tablist), FilesTab (SourcesCard, ExcludeCard, MarkersCard + the preview), RetentionTab, AdvancedTab (+ WebhooksCard), TagsTab
+    plan/                 # The plan editor's pieces: PlanHeader (editable title, repo, actions), PlanTabs (accessible tablist), FilesTab (the file tree, ListFilesCard, FdaNotice, ExcludeCard, MarkersCard; SourcesCard = plain path list, fallback only), RetentionTab, AdvancedTab (+ WebhooksCard), TagsTab
     SegmentedToggle.tsx   # Bordered two/three-way switch used inside cards
     PlanTreeEditDialog.tsx # Include/exclude dialog behind a click in the plan tree: pattern scopes + live match count, or the exact rules an include will add
     PlanTreeExportDialog.tsx # "Use with restic CLI": the exclude file(s) and restic command for the plan
-    PlanTreePreview.tsx   # Backup-plan editor's read-only file-tree preview: included / partly included / excluded, with the reason per row — see docs/backup-plan-tree.md
+    PlanTreeParts.tsx     # The tree's checkbox-style state marker (incl. the distinct "holds a source" look), Source pill and state labels
+    PlanTreePreview.tsx   # The plan editor's file tree: where sources are picked (one click adds/removes, click inside a source opens the dialog) and a preview of what's included, with the reason per row — see docs/backup-plan-tree.md
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
@@ -355,10 +356,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   distro restic lags (Ubuntu ships 0.18.x) and an unknown flag fails the whole backup; see
   docs/decisions.md before widening it
 - Plans can source from `--files-from` list files and exclude via `--exclude-file`/`--iexclude-file`
-  files (no version/platform gate — all predate restic 0.17). **Sources are either/or in the
-  editor only** (Paths | List files tabs; only the active tab is saved) while **excludes are
-  deliberately combinable** (patterns + exclude files apply together); the backend and imports stay
-  permissive, so an imported plan holding both still runs. A list-file plan **must have a tag**,
+  files (no version/platform gate — all predate restic 0.17). **Sources and excludes are both
+  combinable in the editor**: folders picked in the tree and path-list files save together (the old
+  Paths | List files either/or tabs saved only the active side; they went when the tree became the
+  source editor), as do exclude patterns and exclude files. A plan **with any list file must have a tag**,
   retention or not (editor error + `validate_plan_sources`): its snapshots' paths live in the list
   files, so a tag is the only handle retention has, and requiring it from the first save means adding
   retention later still covers the plan's whole history. `apply_retention`'s `check_retention_scope`

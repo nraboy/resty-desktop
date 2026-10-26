@@ -9,7 +9,11 @@ import {
   toCanonical,
   toNative,
   displayState,
+  boxClick,
   flattenRows,
+  hiddenNoteText,
+  hiddenSummary,
+  pinnedPaths,
   reasonLines,
   relativeTo,
   topLevelSources,
@@ -210,5 +214,84 @@ describe("Windows paths", () => {
     expect(baseName("C:/Users/me")).toBe("me");
     expect(baseName("C:/")).toBe("C:");
     expect(topLevelSources(["C:/", "C:/Users", "D:/data", "D:/data/x"])).toEqual(["C:/", "D:/data"]);
+  });
+});
+
+describe("hidden files", () => {
+  const nodes = () =>
+    new Map<string, NodeInfo>([
+      ["/h", { path: "/h", name: "h", kind: "dir", children: ["/h/.cache", "/h/.rc", "/h/docs", "/h/.config"] }],
+      ["/h/.cache", { path: "/h/.cache", name: ".cache", kind: "dir", hidden: true }],
+      ["/h/.rc", { path: "/h/.rc", name: ".rc", kind: "file", hidden: true }],
+      ["/h/docs", { path: "/h/docs", name: "docs", kind: "dir" }],
+      ["/h/.config", { path: "/h/.config", name: ".config", kind: "dir", hidden: true, children: ["/h/.config/app"] }],
+      ["/h/.config/app", { path: "/h/.config/app", name: "app", kind: "dir" }],
+    ]);
+  const included = (p: string) => p !== "/h/.cache";
+  const names = (rows: ReturnType<typeof flattenRows>) =>
+    rows.map((r) => (r.type === "node" ? r.name : `[${r.text}]`));
+
+  it("shows everything when hidden items are on, or when no option is given", () => {
+    const open = new Set(["/h"]);
+    expect(names(flattenRows([{ path: "/h" }], nodes(), open))).toEqual(["h", ".cache", ".rc", "docs", ".config"]);
+    expect(
+      names(flattenRows([{ path: "/h" }], nodes(), open, { showHidden: true, pinned: new Set() })),
+    ).toEqual(["h", ".cache", ".rc", "docs", ".config"]);
+  });
+
+  it("leaves hidden items out when off, with a note saying how many are backed up", () => {
+    const rows = flattenRows([{ path: "/h" }], nodes(), new Set(["/h"]), {
+      showHidden: false,
+      pinned: new Set(),
+      included,
+    });
+    expect(names(rows)).toEqual(["h", "docs", "[3 hidden items not shown — 2 are backed up]"]);
+    const note = rows[rows.length - 1];
+    expect(note.type === "note" && note.action).toBe("showHidden");
+  });
+
+  it("keeps a hidden source, or a hidden folder on the way to one, visible", () => {
+    const pinned = pinnedPaths(["/h/.config/app"]);
+    const rows = flattenRows([{ path: "/h" }], nodes(), new Set(["/h", "/h/.config"]), {
+      showHidden: false,
+      pinned,
+      included,
+    });
+    expect(names(rows)).toEqual(["h", "docs", ".config", "app", "[2 hidden items not shown — 1 is backed up]"]);
+    // Sorted listing order is kept: the pinned folder sits where it was, the others are summarised after.
+  });
+
+  it("words the note for none / one / all being backed up", () => {
+    expect(hiddenNoteText(2, 0)).toBe("2 hidden items not shown — none are backed up");
+    expect(hiddenNoteText(1, 1)).toBe("1 hidden item not shown — it is backed up");
+    expect(hiddenNoteText(4, 4)).toBe("4 hidden items not shown — all are backed up");
+    expect(hiddenNoteText(1200, 3)).toBe("1,200 hidden items not shown — 3 are backed up");
+  });
+
+  it("counts hidden items and the backed-up ones across everything listed", () => {
+    expect(hiddenSummary(nodes(), included)).toEqual({ hidden: 3, backedUp: 2 });
+    expect(hiddenSummary(new Map(), included)).toEqual({ hidden: 0, backedUp: 0 });
+  });
+
+  it("pins a source and every folder above it", () => {
+    expect([...pinnedPaths(["/a/b/c", "C:/x"])].sort()).toEqual(["/", "/a", "/a/b", "/a/b/c", "C:/", "C:/x"]);
+  });
+});
+
+describe("boxClick", () => {
+  it("removes a source in one click, adds an item outside every source in one click", () => {
+    expect(boxClick(true, verdict())).toBe("removeSource");
+    expect(boxClick(false, verdict({ included: false, reason: { kind: "outsideSources" } }))).toBe("addSource");
+    // A folder above a source is outside every source too — adding it asks first, but via the same path.
+    expect(boxClick(false, verdict({ included: false, containsSources: true, reason: { kind: "outsideSources" } }))).toBe(
+      "addSource",
+    );
+  });
+
+  it("asks for a scope inside a source: excluding an included item, including an excluded one", () => {
+    expect(boxClick(false, verdict())).toBe("dialog");
+    expect(boxClick(false, verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" }))).toBe("dialog");
+    expect(boxClick(false, verdict({ included: false, reason: { kind: "marker", spec: "x" } }))).toBe("dialog");
+    expect(boxClick(false, undefined)).toBe("dialog");
   });
 });

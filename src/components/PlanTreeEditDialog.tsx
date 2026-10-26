@@ -121,8 +121,16 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
     }
   };
 
+  // An item outside every source being added (it holds existing sources, so the click asked first).
+  const addingSource = mode === "include" && target.verdict?.reason?.kind === "outsideSources";
   const title =
-    mode === "exclude" ? `Exclude “${target.name}”` : mode === "removeSource" ? "Remove from backup sources" : `Include “${target.name}”`;
+    mode === "exclude"
+      ? `Exclude “${target.name}”`
+      : mode === "removeSource"
+        ? "Stop backing up this item"
+        : addingSource
+          ? `Back up “${target.name}”`
+          : `Include “${target.name}”`;
   const canApply =
     mode === "exclude" ? pattern.trim() !== "" && !busy : !!outcome && !error && !busy;
 
@@ -246,7 +254,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={apply} loading={busy} disabled={!canApply}>
-            {mode === "exclude" ? "Exclude" : mode === "removeSource" ? "Remove" : "Include"}
+            {mode === "exclude" ? "Exclude" : mode === "removeSource" ? "Remove" : addingSource ? "Back up" : "Include"}
           </Button>
         </div>
       </div>

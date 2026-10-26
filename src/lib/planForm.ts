@@ -21,7 +21,6 @@ export function isPlanTab(v: string | null | undefined): v is PlanTab {
   return !!v && (PLAN_TABS as string[]).includes(v);
 }
 
-export type SourceMode = "paths" | "files";
 export type ExcludeMode = "simple" | "expert";
 
 /** Everything the editor holds. Typed-but-uncommitted text boxes that don't affect saving
@@ -29,10 +28,9 @@ export type ExcludeMode = "simple" | "expert";
 export interface PlanFormState {
   name: string;
   repoId: string;
+  /** Folders and files to back up, edited from the tree. */
   paths: string[];
-  /** Which sources the editor shows and saves — either/or in the editor only (the backend
-   * accepts both); see docs/decisions.md. */
-  sourceMode: SourceMode;
+  /** Text files listing more paths (`--files-from`); combinable with `paths`. */
   filesFrom: string[];
   excludeFiles: ExcludeFile[];
   tags: string[];
@@ -63,7 +61,6 @@ export function emptyForm(): PlanFormState {
     name: "",
     repoId: "",
     paths: [],
-    sourceMode: "paths",
     filesFrom: [],
     excludeFiles: [],
     tags: [],
@@ -88,8 +85,7 @@ export function emptyForm(): PlanFormState {
 }
 
 /** The form for a saved plan. `repoStillExists` false clears the repository (the page then asks
- * for a new one). Sources are either/or in the editor: it opens on the list-file tab only when
- * that's all the plan has; a plan holding both (only possible via import) opens on Paths. */
+ * for a new one). */
 export function formFromPlan(plan: BackupPlan, repoStillExists: boolean): PlanFormState {
   const filesFrom = plan.filesFrom ?? [];
   return {
@@ -97,7 +93,6 @@ export function formFromPlan(plan: BackupPlan, repoStillExists: boolean): PlanFo
     name: plan.name,
     repoId: repoStillExists ? plan.repoId : "",
     paths: plan.paths,
-    sourceMode: filesFrom.length > 0 && plan.paths.length === 0 ? "files" : "paths",
     filesFrom,
     excludeFiles: plan.excludeFiles ?? [],
     tags: plan.tags,
@@ -118,10 +113,6 @@ export function formFromPlan(plan: BackupPlan, repoStillExists: boolean): PlanFo
     webhooks: plan.webhooks ?? [],
   };
 }
-
-/** Only the active source mode's entries are saved (and shown to the Full Disk Access check). */
-export const activePaths = (f: PlanFormState): string[] => (f.sourceMode === "paths" ? f.paths : []);
-export const activeFilesFrom = (f: PlanFormState): string[] => (f.sourceMode === "files" ? f.filesFrom : []);
 
 /** The tags that will be saved: the list plus a typed-but-not-added tag. State is left alone,
  * so a failed save leaves the form exactly as the user had it. */
@@ -189,13 +180,10 @@ export interface FormIssue {
 export function validatePlanForm(f: PlanFormState): FormIssue | null {
   if (!f.name.trim()) return { where: "header", message: "Plan name is required." };
   if (!f.repoId) return { where: "header", message: "Select a target repository." };
-  if (f.sourceMode === "paths" && f.paths.length === 0) {
-    return { where: "files", message: "Add at least one source path." };
+  if (f.paths.length === 0 && f.filesFrom.length === 0) {
+    return { where: "files", message: "Pick at least one folder or file to back up." };
   }
-  if (f.sourceMode === "files" && f.filesFrom.length === 0) {
-    return { where: "files", message: "Add at least one path-list file." };
-  }
-  if (f.sourceMode === "files" && effectiveTags(f).length === 0) {
+  if (f.filesFrom.length > 0 && effectiveTags(f).length === 0) {
     return {
       where: "tags",
       message: "Add at least one tag — a plan that uses path-list files needs one so its snapshots can be identified.",
@@ -231,7 +219,7 @@ export function buildPlan(f: PlanFormState, id: string): BackupPlan {
     id,
     name: f.name.trim(),
     repoId: f.repoId,
-    paths: activePaths(f),
+    paths: f.paths,
     tags: effectiveTags(f),
     excludes: savedExcludes(f),
     excludeIfPresent: f.excludeIfPresent,
@@ -243,7 +231,7 @@ export function buildPlan(f: PlanFormState, id: string): BackupPlan {
     packSize: "value" in pack ? pack.value : undefined,
     excludeCloudFiles: f.excludeCloudFiles,
     useFsSnapshot: f.useFsSnapshot,
-    filesFrom: activeFilesFrom(f),
+    filesFrom: f.filesFrom,
     excludeFiles: f.excludeFiles,
   };
 }

@@ -1,7 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  activeFilesFrom,
-  activePaths,
   advancedIsCustom,
   buildPlan,
   effectiveTags,
@@ -55,30 +53,28 @@ describe("validatePlanForm", () => {
   it("checks in the editor's long-standing order, each naming where to fix it", () => {
     expect(validatePlanForm(valid({ name: "  " }))).toEqual({ where: "header", message: "Plan name is required." });
     expect(validatePlanForm(valid({ repoId: "" }))).toEqual({ where: "header", message: "Select a target repository." });
-    expect(validatePlanForm(valid({ paths: [] }))).toEqual({ where: "files", message: "Add at least one source path." });
+    expect(validatePlanForm(valid({ paths: [] }))).toEqual({ where: "files", message: "Pick at least one folder or file to back up." });
     // Name is checked before the repository, and both before sources.
     expect(validatePlanForm(valid({ name: "", repoId: "", paths: [] }))?.message).toBe("Plan name is required.");
   });
 
-  it("requires a list file and a tag in list-file mode", () => {
-    expect(validatePlanForm(valid({ sourceMode: "files", paths: [], filesFrom: [] }))).toEqual({
+  it("needs at least one source — a path or a list file — and a tag whenever list files are used", () => {
+    expect(validatePlanForm(valid({ paths: [], filesFrom: [] }))).toEqual({
       where: "files",
-      message: "Add at least one path-list file.",
+      message: "Pick at least one folder or file to back up.",
     });
-    const noTag = validatePlanForm(valid({ sourceMode: "files", paths: [], filesFrom: ["/l.txt"] }));
+    const noTag = validatePlanForm(valid({ paths: [], filesFrom: ["/l.txt"] }));
     expect(noTag?.where).toBe("tags");
     expect(noTag?.message).toContain("needs one so its snapshots can be identified");
     // A typed-but-not-added tag counts.
-    expect(validatePlanForm(valid({ sourceMode: "files", paths: [], filesFrom: ["/l.txt"], tagInput: " nightly " }))).toBeNull();
-    expect(validatePlanForm(valid({ sourceMode: "files", paths: [], filesFrom: ["/l.txt"], tags: ["t"] }))).toBeNull();
+    expect(validatePlanForm(valid({ paths: [], filesFrom: ["/l.txt"], tagInput: " nightly " }))).toBeNull();
+    expect(validatePlanForm(valid({ paths: [], filesFrom: ["/l.txt"], tags: ["t"] }))).toBeNull();
   });
 
-  it("does not need paths in list-file mode, nor list files in paths mode", () => {
-    expect(validatePlanForm(valid({ sourceMode: "paths", filesFrom: [] }))).toBeNull();
-    // Sources of the inactive mode are ignored for validation.
-    expect(validatePlanForm(valid({ sourceMode: "files", paths: ["/x"], filesFrom: [] }))?.message).toBe(
-      "Add at least one path-list file.",
-    );
+  it("lets paths and list files be combined, and only asks for a tag when list files are present", () => {
+    expect(validatePlanForm(valid({ paths: ["/x"], filesFrom: [] }))).toBeNull();
+    expect(validatePlanForm(valid({ paths: ["/x"], filesFrom: ["/l.txt"] }))?.where).toBe("tags");
+    expect(validatePlanForm(valid({ paths: ["/x"], filesFrom: ["/l.txt"], tags: ["t"] }))).toBeNull();
   });
 
   it("rejects a webhook that isn't http(s), and a bad pack size, on the Advanced tab", () => {
@@ -145,12 +141,9 @@ describe("buildPlan", () => {
     });
   });
 
-  it("saves only the active source mode's entries", () => {
+  it("saves paths and list files together", () => {
     const f = valid({ paths: ["/a"], filesFrom: ["/l.txt"], tags: ["t"] });
-    expect(buildPlan(f, "i")).toMatchObject({ paths: ["/a"], filesFrom: [] });
-    expect(buildPlan({ ...f, sourceMode: "files" }, "i")).toMatchObject({ paths: [], filesFrom: ["/l.txt"] });
-    expect(activePaths({ ...f, sourceMode: "files" })).toEqual([]);
-    expect(activeFilesFrom(f)).toEqual([]);
+    expect(buildPlan(f, "i")).toMatchObject({ paths: ["/a"], filesFrom: ["/l.txt"] });
   });
 
   it("saves expert text as trimmed patterns without comments or blanks, in order", () => {
@@ -199,9 +192,10 @@ describe("formFromPlan", () => {
     expect(formFromPlan(plan(), true).repoId).toBe("r1");
   });
 
-  it("opens on the list-file mode only when that's all the plan has", () => {
-    expect(formFromPlan(plan({ paths: [], filesFrom: ["/l.txt"] }), true).sourceMode).toBe("files");
-    expect(formFromPlan(plan({ paths: ["/a"], filesFrom: ["/l.txt"] }), true).sourceMode).toBe("paths");
+  it("keeps both kinds of source, and tolerates a plan saved before list files existed", () => {
+    const both = formFromPlan(plan({ paths: ["/a"], filesFrom: ["/l.txt"] }), true);
+    expect(both.paths).toEqual(["/a"]);
+    expect(both.filesFrom).toEqual(["/l.txt"]);
     expect(formFromPlan(plan({ filesFrom: undefined as unknown as string[] }), true).filesFrom).toEqual([]);
   });
 

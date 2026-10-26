@@ -1,47 +1,84 @@
-import { useState } from "react";
-import { treeRulesFromForm } from "../../lib/planForm";
+import { useEffect, useState } from "react";
+import { treeSupported } from "../../lib/invoke";
+import { treeRulesFromForm, type PlanFormState } from "../../lib/planForm";
 import { summarizeEdit, type EditOutcome } from "../../lib/planTreeEdit";
 import PlanTreePreview from "../PlanTreePreview";
 import ExcludeCard from "./ExcludeCard";
+import FdaNotice from "./FdaNotice";
+import ListFilesCard from "./ListFilesCard";
 import MarkersCard from "./MarkersCard";
 import SourcesCard from "./SourcesCard";
 import type { FormProps } from "./types";
 
-/** What gets backed up: the sources, a preview of the result, and the exclusion rules. */
-export default function FilesTab({ form, update, active }: FormProps & { active: boolean }) {
-  // The last include/exclude made from the preview, with a way to take it back.
-  const [lastEdit, setLastEdit] = useState<{ summary: string; onUndo: () => void } | null>(null);
+/** The part of the form the tree edits. */
+type Edited = Pick<PlanFormState, "paths" | "excludeItems" | "excludeText">;
+const editedOf = (f: PlanFormState): Edited => ({ paths: f.paths, excludeItems: f.excludeItems, excludeText: f.excludeText });
 
-  // Applies an edit confirmed in the preview tree: the verified new sources and patterns replace
-  // the editor's, and the previous state is kept so the change can be undone.
+/** One change made from the tree, with the state either side so it can be taken back. */
+interface EditRecord {
+  summary: string;
+  before: Edited;
+  after: Edited;
+}
+
+/** How many tree edits can be undone. */
+const HISTORY_LIMIT = 20;
+
+/** What gets backed up: the file tree (which is also where sources are picked), then the rules
+ * that leave things out. */
+export default function FilesTab({ form, update, active }: FormProps & { active: boolean }) {
+  const [supported, setSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    treeSupported().then(setSupported).catch(() => setSupported(false));
+  }, []);
+
+  // Edits made from the tree, oldest first. Undo steps back through them.
+  const [history, setHistory] = useState<EditRecord[]>([]);
+
+  // Applies an edit confirmed in the tree: the verified new sources and patterns replace the
+  // editor's, and the previous state is kept so the change can be undone.
   const applyEdit = (o: EditOutcome) => {
-    const before = { paths: form.paths, excludeItems: form.excludeItems, excludeText: form.excludeText };
-    update({
+    const before = editedOf(form);
+    const patch: Partial<Edited> = {
       paths: o.sources,
       // Expert mode keeps the user's text (comments, blank lines) — the outcome preserves it.
       ...(form.excludeMode === "expert" ? { excludeText: o.excludes.join("\n") } : { excludeItems: o.excludes }),
-    });
-    setLastEdit({
-      summary: summarizeEdit(o),
-      onUndo: () => {
-        update(before);
-        setLastEdit(null);
-      },
-    });
+    };
+    update(patch);
+    setHistory((h) => [...h.slice(-(HISTORY_LIMIT - 1)), { summary: summarizeEdit(o), before, after: { ...before, ...patch } }]);
   };
+
+  const undo = () => {
+    const last = history[history.length - 1];
+    if (!last) return;
+    update(last.before);
+    setHistory((h) => h.slice(0, -1));
+  };
+
+  // Once the sources or patterns are changed any other way (typing a pattern, picking a folder in
+  // the fallback list), the recorded states no longer describe what's on screen; undoing them
+  // would throw those changes away, so the history starts over.
+  const editedKey = JSON.stringify(editedOf(form));
+  useEffect(() => {
+    setHistory((h) => (h.length > 0 && JSON.stringify(h[h.length - 1].after) !== editedKey ? [] : h));
+  }, [editedKey]);
 
   return (
     <>
-      <SourcesCard form={form} update={update} />
-      <PlanTreePreview
-        rules={treeRulesFromForm(form)}
-        active={active}
-        onApplyEdit={form.sourceMode === "paths" ? applyEdit : undefined}
-        lastEdit={lastEdit}
-        unavailableReason={
-          form.sourceMode === "files" ? "The preview isn't available for plans that use path-list files yet." : undefined
-        }
-      />
+      {supported === false ? (
+        <SourcesCard form={form} update={update} />
+      ) : supported ? (
+        <PlanTreePreview
+          rules={treeRulesFromForm(form)}
+          active={active}
+          onApplyEdit={applyEdit}
+          history={history}
+          onUndo={undo}
+          listFileCount={form.filesFrom.length}
+        />
+      ) : null}
+      <ListFilesCard form={form} update={update} />
+      <FdaNotice form={form} />
       <ExcludeCard form={form} update={update} />
       <MarkersCard form={form} update={update} />
     </>

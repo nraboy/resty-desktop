@@ -2,24 +2,28 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { listen } from "@tauri-apps/api/event";
 import {
   treeClassify,
+  treeEnv,
   treeKinds,
   treeListDir,
+  treePlanEdit,
   treeScanCancel,
   treeScanStart,
-  treeEnv,
-  treeSupported,
 } from "../lib/invoke";
 import {
   ancestorsOf,
   baseName,
+  boxClick,
   displayState,
-  joinPath,
   flattenRows,
+  hiddenSummary,
+  joinPath,
+  pinnedPaths,
   reasonLines,
   toCanonical,
   toNative,
   topLevelSources,
   visibleWindow,
+  type BoxClick,
   type DisplayState,
   type NodeInfo,
   type NodeVerdict,
@@ -30,23 +34,27 @@ import {
   type TreeEnv,
   type TreeRulesInput,
 } from "../lib/planTree";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, FileIcon, FolderIcon, LinkIcon, WarningIcon } from "./icons";
+import { escapeGlob, type EditOutcome } from "../lib/planTreeEdit";
 import { isWindows } from "../lib/utils";
+import { CARD } from "./plan/types";
+import { ChevronDownIcon, ChevronRightIcon, FileIcon, FolderIcon, LinkIcon, WarningIcon } from "./icons";
 import PlanTreeEditDialog, { type EditTarget } from "./PlanTreeEditDialog";
 import PlanTreeExportDialog from "./PlanTreeExportDialog";
-import type { EditOutcome } from "../lib/planTreeEdit";
+import { SourcePill, STATE_LABEL, StateBox } from "./PlanTreeParts";
 import Spinner from "./Spinner";
 import Tooltip from "./Tooltip";
 
 const ROW_H = 26;
-const VIEW_H = 340;
+const DEFAULT_VIEW_H = 440;
+const MIN_VIEW_H = 180;
+const MAX_VIEW_H = 1100;
+const HEIGHT_KEY = "resty.planTree.height";
 /** Paths classified per backend call. */
 const CLASSIFY_CHUNK = 1500;
 /** How often streamed scan results are folded into the view. */
 const FLUSH_MS = 100;
 
 type RootMode = "sources" | "filesystem";
-
 
 interface ScanEventPayload extends ScanResult {
   scanId: number;
@@ -55,78 +63,73 @@ interface ScanEventPayload extends ScanResult {
 
 interface Props {
   rules: TreeRulesInput;
-  /** Set when the plan can't be previewed (e.g. it uses path-list files); shown instead of the tree. */
-  unavailableReason?: string;
-  /** Called with the plan's new sources and patterns when the user confirms an include/exclude
-   * from the tree. When absent the tree is read-only. */
+  /** Called with the plan's new sources and patterns when the user confirms (or one-clicks) an
+   * include/exclude from the tree. When absent the tree is read-only. */
   onApplyEdit?: (outcome: EditOutcome) => void;
-  /** The last edit made from the tree, with a way to take it back. */
-  lastEdit?: { summary: string; onUndo: () => void } | null;
+  /** Edits made from the tree, oldest first, each with a summary; `onUndo` takes back the latest. */
+  history?: { summary: string }[];
+  onUndo?: () => void;
+  /** How many path-list files the plan has: their entries aren't in the tree yet. */
+  listFileCount?: number;
   /** False while the preview's tab is hidden: nothing is loaded or scanned until it's shown
    * (the component stays mounted so its state survives a tab switch). Defaults to true. */
   active?: boolean;
 }
 
-const STATE_LABEL: Record<DisplayState, string> = {
-  included: "Included",
-  partial: "Partly included",
-  excluded: "Excluded",
-  contains: "Contains backed-up items",
-  unverified: "Included (not fully checked)",
-  pending: "Checking",
-};
+const clampHeight = (h: number) => Math.min(MAX_VIEW_H, Math.max(MIN_VIEW_H, Math.round(h)));
 
-/** The checkbox-style marker: filled = included, dash = partly, empty = excluded. Read-only. */
-function StateBox({ state }: { state: DisplayState }) {
-  const base = "inline-flex items-center justify-center w-4 h-4 rounded-[3px] border flex-shrink-0";
-  switch (state) {
-    case "included":
-      return (
-        <span className={`${base} bg-blue-600 border-blue-600 text-white`} aria-hidden="true">
-          <CheckIcon className="w-3 h-3" />
-        </span>
-      );
-    case "unverified":
-      return (
-        <span className={`${base} bg-blue-600/70 border-blue-500 border-dashed text-white`} aria-hidden="true">
-          <CheckIcon className="w-3 h-3" />
-        </span>
-      );
-    case "partial":
-    case "contains":
-      return (
-        <span className={`${base} border-blue-500 bg-blue-900/40`} aria-hidden="true">
-          <span className="block w-2 h-[2px] bg-blue-400 rounded" />
-        </span>
-      );
-    case "pending":
-      return <span className={`${base} border-gray-600 animate-pulse`} aria-hidden="true" />;
-    default:
-      return <span className={`${base} border-gray-600`} aria-hidden="true" />;
+function storedHeight(): number {
+  try {
+    const n = Number(localStorage.getItem(HEIGHT_KEY));
+    return n ? clampHeight(n) : DEFAULT_VIEW_H;
+  } catch {
+    return DEFAULT_VIEW_H;
   }
 }
 
+function boxTitle(click: BoxClick, included: boolean | undefined, kind: SourceKind): string {
+  const what = kind === "dir" ? "folder" : "file";
+  if (click === "removeSource") return `Stop backing up this ${what}`;
+  if (click === "addSource") return `Back up this ${what}`;
+  return included ? "Exclude…" : "Include…";
+}
+
 /**
- * Read-only preview of what a backup plan includes: a filesystem tree whose rows are marked
- * included / partly included / excluded, computed by restic's own matching rules (the Rust
- * engine in plan_rules.rs), with a tooltip saying which rule decided each row.
+ * The plan's file tree: what to back up, and a preview of exactly what that includes. It starts
+ * at the whole filesystem (`/`, or the drives on Windows) and the plan's sources are the folders
+ * and files you pick in it. Each row is marked included / partly included / excluded by restic's
+ * own matching rules (the Rust engine in plan_rules.rs), with a tooltip saying which rule decided.
+ *
+ * Clicking a box edits the plan: a folder outside every source becomes one in a single click (and
+ * a source goes away the same way); inside a source a click opens a dialog to pick the pattern.
+ * Every edit is computed and verified by the backend and can be undone.
  *
  * Nothing is persisted. Listings and verdicts live in refs for the lifetime of this component;
  * only the visible window of rows is rendered, so a folder with thousands of entries stays
  * cheap, and subtree scans (is anything inside excluded?) run in the backend only for the
  * included folders you can see.
  */
-export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit, lastEdit, active = true }: Props) {
-  const [supported, setSupported] = useState<boolean | null>(null);
-  // Open by default: the preview is the point of the card. It can still be collapsed, and nothing
-  // is read from disk until the card is open and the plan has sources.
-  const [open, setOpen] = useState(true);
-  const [mode, setMode] = useState<RootMode>("sources");
+export default function PlanTreePreview({
+  rules,
+  onApplyEdit,
+  history = [],
+  onUndo,
+  listFileCount = 0,
+  active = true,
+}: Props) {
+  // The whole filesystem is the starting point; "Sources only" is a shortcut for a plan whose
+  // sources are buried deep.
+  const [mode, setMode] = useState<RootMode>("filesystem");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [scrollTop, setScrollTop] = useState(0);
+  const [viewH, setViewH] = useState(storedHeight);
+  const [showHidden, setShowHidden] = useState(false);
   const [problems, setProblems] = useState<RuleProblem[]>([]);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [revealTarget, setRevealTarget] = useState<string | null>(null);
   // The data lives in refs and a counter forces a re-render: scan results stream in at a high
   // rate and each one would otherwise copy these maps.
   const [, bump] = useReducer((n: number) => n + 1, 0);
@@ -145,6 +148,8 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   const activeRules = useMemo(() => JSON.parse(activeKey) as TreeRulesInput, [activeKey]);
   const rulesRef = useRef(activeRules);
   rulesRef.current = activeRules;
+  /** The verdicts on screen were computed for the rules being edited right now. */
+  const settled = activeKey === rulesKey;
 
   const generation = useRef(0);
   const inflight = useRef(new Set<string>());
@@ -158,14 +163,25 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   const windows = isWindows();
   const [env, setEnv] = useState<TreeEnv | null>(null);
   useEffect(() => {
-    treeSupported().then(setSupported).catch(() => setSupported(false));
-    treeEnv().then(setEnv).catch(() => {});
-  }, []);
+    treeEnv()
+      .then(setEnv)
+      .catch(() => setEnv({ windows, roots: [], home: null }));
+  }, [windows]);
+  const ready = env !== null;
+
+  /** The plan's sources in the tree's spelling: as edited now, and as the verdicts on screen know them. */
+  const sourcesNow = useMemo(() => new Set(rules.sources.map((s) => toCanonical(s, windows))), [rules.sources, windows]);
+  const shownSources = useMemo(
+    () => Array.from(new Set(activeRules.sources.map((s) => toCanonical(s, windows)))),
+    [activeRules.sources, windows],
+  );
+  const shownSourceSet = useMemo(() => new Set(shownSources), [shownSources]);
+  const pinned = useMemo(() => pinnedPaths(shownSources), [shownSources]);
 
   const roots = useMemo(
     () =>
       mode === "sources"
-        ? topLevelSources(activeRules.sources.map((s) => toCanonical(s, windows))).map((p) => ({
+        ? topLevelSources(shownSources).map((p) => ({
             path: p,
             // Shown the way the OS writes it.
             name: toNative(p, windows),
@@ -173,7 +189,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
         : env && env.roots.length > 0
           ? env.roots.map((r) => ({ path: r.path, name: env.windows ? r.label : `${r.label} (${r.path})` }))
           : [{ path: "/", name: "Computer (/)" }],
-    [mode, activeRules.sources, windows, env],
+    [mode, shownSources, windows, env],
   );
 
   // ── data loading ──────────────────────────────────────────────────────────
@@ -223,7 +239,9 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
       for (const e of listing.entries) {
         const child = joinPath(path, e.name);
         children.push(child);
-        if (!nodes.current.has(child)) nodes.current.set(child, { path: child, name: e.name, kind: e.kind });
+        if (!nodes.current.has(child)) {
+          nodes.current.set(child, { path: child, name: e.name, kind: e.kind, hidden: e.hidden });
+        }
       }
       info.children = children;
       info.total = listing.total;
@@ -276,15 +294,16 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
 
     await classify(Array.from(nodes.current.keys()), gen);
     if (gen !== generation.current) return;
-    // Anything expanded but not yet listed (first open, or new roots).
+    // Anything expanded but not yet listed (first open, or new roots). A source that is a file has
+    // nothing to list (`listFolder` skips it).
     for (const p of toOpen) await listFolder(p);
   }, [classify, listFolder, mode, roots, windows]);
 
-  // Start (and restart on any change of rules or roots) once the preview is open.
+  // Start (and restart on any change of rules or roots) once the tab is showing.
   useEffect(() => {
-    if (!open || !supported || !active) return;
+    if (!ready || !active) return;
     refresh();
-  }, [open, supported, active, activeKey, mode, refresh]);
+  }, [ready, active, activeKey, mode, refresh]);
 
   // Cancel any running scan when the component goes away.
   useEffect(
@@ -298,7 +317,7 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
   // ── streamed scan results ─────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!open || !supported || !active) return;
+    if (!ready || !active) return;
     let buffer: ScanEventPayload[] = [];
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -327,18 +346,23 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
       unlisten?.();
       clearInterval(timer);
     };
-  }, [open, supported, active]);
+  }, [ready, active]);
 
   // ── what to render ────────────────────────────────────────────────────────
 
-  const rows = flattenRows(roots, nodes.current, expanded);
-  const { start, end } = visibleWindow(rows.length, scrollTop, VIEW_H, ROW_H);
+  const rows = flattenRows(roots, nodes.current, expanded, {
+    showHidden,
+    pinned,
+    included: (p) => verdicts.current.get(p)?.included,
+  });
+  const { start, end } = visibleWindow(rows.length, scrollTop, viewH, ROW_H);
+  const hidden = showHidden ? null : hiddenSummary(nodes.current, (p) => verdicts.current.get(p)?.included);
 
   // Scan the included folders in view (plus overscan) that haven't been checked yet. A new scan
   // supersedes the running one in the backend, so everything still unresolved is re-sent.
   const scanKey = `${start}:${end}:${rows.length}:${scans.current.size}:${verdicts.current.size}`;
   useEffect(() => {
-    if (!open || !supported || !active) return;
+    if (!ready || !active) return;
     if (scanTimer.current) clearTimeout(scanTimer.current);
     scanTimer.current = setTimeout(async () => {
       const gen = generation.current;
@@ -365,7 +389,9 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     };
     // `rows` is derived from the refs, so `scanKey` stands in for it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, supported, active, scanKey]);
+  }, [ready, active, scanKey]);
+
+  // ── navigation ────────────────────────────────────────────────────────────
 
   const toggle = (path: string) => {
     setExpanded((prev) => {
@@ -377,15 +403,114 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     if (!expanded.has(path)) listFolder(path);
   };
 
+  /** Opens every folder down to `path` and scrolls it into view. */
+  const reveal = useCallback(
+    async (path: string) => {
+      const chain = [...ancestorsOf(path), path];
+      for (let i = 0; i < chain.length - 1; i++) {
+        const dir = chain[i];
+        if (!nodes.current.has(dir)) return;
+        setExpanded((prev) => (prev.has(dir) ? prev : new Set(prev).add(dir)));
+        await listFolder(dir);
+        // A listing already under way (started elsewhere) isn't awaited by `listFolder`.
+        for (let n = 0; n < 40 && nodes.current.get(dir)?.loading; n++) await new Promise((r) => setTimeout(r, 50));
+        if (!nodes.current.has(chain[i + 1])) return;
+      }
+      setRevealTarget(path);
+      setTimeout(() => setRevealTarget((cur) => (cur === path ? null : cur)), 3000);
+    },
+    [listFolder],
+  );
+
+  // Scrolls to the row being revealed once it is part of the flattened tree.
+  useEffect(() => {
+    if (!revealTarget) return;
+    const idx = rows.findIndex((r) => r.type === "node" && r.path === revealTarget);
+    if (idx < 0) return;
+    const el = viewportRef.current;
+    if (el) el.scrollTop = Math.max(0, idx * ROW_H - viewH / 3);
+    setRevealTarget(null);
+    // `rows` is rebuilt on every render, so this also re-checks after each listing arrives.
+  }, [revealTarget, rows, viewH]);
+
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = viewH;
+    let latest = startH;
+    const move = (ev: PointerEvent) => {
+      latest = clampHeight(startH + ev.clientY - startY);
+      setViewH(latest);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      try {
+        localStorage.setItem(HEIGHT_KEY, String(latest));
+      } catch {
+        /* a per-viewer convenience only */
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const resizeByKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const h = clampHeight(viewH + (e.key === "ArrowDown" ? 40 : -40));
+    setViewH(h);
+    try {
+      localStorage.setItem(HEIGHT_KEY, String(h));
+    } catch {
+      /* a per-viewer convenience only */
+    }
+  };
+
+  // ── editing ───────────────────────────────────────────────────────────────
+
   const openEdit = (path: string, kind: SourceKind) => {
-    const isSource = rules.sources.some((s) => toCanonical(s, windows) === path);
     setEditTarget({
       path,
       name: baseName(path),
       kind,
       verdict: verdicts.current.get(path),
-      isSource,
+      isSource: sourcesNow.has(path),
     });
+  };
+
+  /**
+   * A click on a row's box. Sources and items outside every source change in one step (the edit is
+   * computed and verified first, and can be undone); anything that needs a choice, or that would
+   * swallow existing sources, goes through the dialog, which shows exactly what will change.
+   */
+  const onBox = async (path: string, kind: SourceKind) => {
+    // Wait for the verdicts to catch up with the last edit, or the click would act on stale state.
+    if (!onApplyEdit || !settled || busy) return;
+    const click = boxClick(sourcesNow.has(path), verdicts.current.get(path));
+    if (click === "dialog") {
+      openEdit(path, kind);
+      return;
+    }
+    setActionError(null);
+    setBusy(true);
+    try {
+      const outcome = await treePlanEdit(
+        rules,
+        click === "removeSource"
+          ? { kind: "exclude", path, pattern: escapeGlob(path, windows) }
+          : { kind: "include", path, scope: "item" },
+      );
+      if (click === "addSource" && (outcome.removedSources.length > 0 || outcome.addedRules.length > 0)) {
+        openEdit(path, kind);
+      } else {
+        onApplyEdit(outcome);
+      }
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const reload = () => {
@@ -393,203 +518,281 @@ export default function PlanTreePreview({ rules, unavailableReason, onApplyEdit,
     refresh();
   };
 
-  if (supported === false) return null;
-
   const emptySources = mode === "sources" && roots.length === 0;
+  const nothingPicked = rules.sources.length === 0 && listFileCount === 0;
   const visible = rows.slice(start, end);
+  const latest = history[history.length - 1];
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between text-left"
-        aria-expanded={open}
-      >
-        <span>
-          <span className="block text-sm font-medium text-gray-300">Preview</span>
-          <span className="block text-xs text-gray-500 mt-0.5">
-            See exactly which folders and files this plan backs up, and why anything is left out.
-          </span>
-        </span>
-        <span className="text-gray-500 flex-shrink-0 ml-3">
-          {open ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
-        </span>
-      </button>
+    <div className={CARD}>
+      <div className="mb-4">
+        <h2 className="text-sm font-medium text-gray-300">Files and folders</h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Pick what to back up: click the box next to a folder or file. Inside a folder you picked, click a box to leave
+          something out — or to bring it back.
+        </p>
+      </div>
 
-      {open && (
-        <div className="mt-4">
-          {unavailableReason ? (
-            <p className="text-sm text-gray-500">{unavailableReason}</p>
-          ) : (
-            <>
-              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-                <div className="flex rounded-lg overflow-hidden border border-gray-700">
-                  {(["sources", "filesystem"] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setMode(m)}
-                      className={`px-3 py-1 text-xs font-medium transition-colors ${
-                        mode === m ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"
-                      }`}
-                    >
-                      {m === "sources" ? "Sources" : "Whole filesystem"}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-center gap-4 text-xs text-gray-500">
-                  <span className="inline-flex items-center gap-1.5"><StateBox state="included" /> Included</span>
-                  <span className="inline-flex items-center gap-1.5"><StateBox state="partial" /> Partly</span>
-                  <span className="inline-flex items-center gap-1.5"><StateBox state="excluded" /> Excluded</span>
-                  <button type="button" onClick={reload} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
-                    Refresh
-                  </button>
-                  <button type="button" onClick={() => setExportOpen(true)} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
-                    Use with restic CLI…
-                  </button>
-                </div>
-              </div>
-
-              {lastEdit && (
-                <p className="mb-3 text-xs text-gray-400" role="status">
-                  Updated your plan: {lastEdit.summary}.{" "}
-                  <button type="button" onClick={lastEdit.onUndo} className="text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline">
-                    Undo
-                  </button>
-                </p>
-              )}
-
-              {problems.length > 0 && (
-                <ul className="mb-3 space-y-1">
-                  {problems.map((p, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-xs text-amber-400">
-                      <WarningIcon className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
-                      <span><span className="font-mono">{p.what}</span>: {p.error}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              {emptySources ? (
-                <p className="text-sm text-gray-500 text-center py-6">
-                  Add a source folder above to preview what will be backed up, or browse the whole filesystem.
-                </p>
-              ) : (
-                <div
-                  ref={viewportRef}
-                  role="tree"
-                  aria-label="Files and folders in this backup plan"
-                  className="relative overflow-auto rounded-lg border border-gray-800 bg-gray-950/40"
-                  style={{ height: VIEW_H }}
-                  onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-                >
-                  <div style={{ height: rows.length * ROW_H, position: "relative", minWidth: "max-content" }}>
-                    {visible.map((row, i) => {
-                      const top = (start + i) * ROW_H;
-                      const indent = 8 + row.depth * 16;
-                      if (row.type === "note") {
-                        return (
-                          <div
-                            key={row.key}
-                            className={`absolute left-0 right-0 flex items-center text-xs ${
-                              row.tone === "error" ? "text-amber-400" : "text-gray-500"
-                            }`}
-                            style={{ top, height: ROW_H, paddingLeft: indent + 22 }}
-                          >
-                            {row.text}
-                          </div>
-                        );
-                      }
-                      const verdict = verdicts.current.get(row.path);
-                      const scan = scans.current.get(row.path);
-                      const missing = row.kind === "missing";
-                      const state: DisplayState = missing ? "excluded" : displayState(row.kind, verdict, scan);
-                      const lines = reasonLines(state, row.path, verdict, scan, origins.current, row.kind);
-                      const dim = state === "excluded" || missing;
-                      const isDir = row.kind === "dir";
-                      return (
-                        <div
-                          key={row.path}
-                          role="treeitem"
-                          aria-level={row.depth + 1}
-                          aria-expanded={isDir ? row.expanded : undefined}
-                          aria-label={`${row.name}: ${missing ? "missing" : STATE_LABEL[state]}`}
-                          className="absolute left-0 right-0 flex items-center gap-1.5 hover:bg-gray-800/40"
-                          style={{ top, height: ROW_H, paddingLeft: indent }}
-                        >
-                          {isDir ? (
-                            <button
-                              type="button"
-                              onClick={() => toggle(row.path)}
-                              className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-gray-300 flex-shrink-0"
-                              aria-label={row.expanded ? `Collapse ${row.name}` : `Expand ${row.name}`}
-                            >
-                              {row.loading ? (
-                                <Spinner className="w-3 h-3 text-blue-400" />
-                              ) : row.expanded ? (
-                                <ChevronDownIcon className="w-3.5 h-3.5" />
-                              ) : (
-                                <ChevronRightIcon className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          ) : (
-                            <span className="w-4 flex-shrink-0" />
-                          )}
-                          {onApplyEdit && state !== "pending" ? (
-                            <button
-                              type="button"
-                              onClick={() => openEdit(row.path, row.kind)}
-                              className="rounded-[3px] hover:ring-2 hover:ring-blue-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 flex-shrink-0"
-                              title={
-                                verdict?.included
-                                  ? rules.sources.some((src) => src.trim() === row.path)
-                                    ? "Remove this source…"
-                                    : "Exclude…"
-                                  : "Include…"
-                              }
-                              aria-label={`${row.name}: ${verdict?.included ? "exclude…" : "include…"}`}
-                            >
-                              <StateBox state={state} />
-                            </button>
-                          ) : (
-                            <StateBox state={state} />
-                          )}
-                          <span className={`flex-shrink-0 ${dim ? "text-gray-500" : "text-gray-400"}`}>
-                            {row.kind === "symlink" ? (
-                              <LinkIcon className="w-4 h-4" />
-                            ) : isDir ? (
-                              <FolderIcon className="w-4 h-4" />
-                            ) : (
-                              <FileIcon className="w-4 h-4" />
-                            )}
-                          </span>
-                          <Tooltip content={<div className="space-y-1">{lines.map((l, j) => <p key={j}>{l}</p>)}</div>}>
-                            <span
-                              className={`text-sm truncate cursor-help ${dim ? "text-gray-500" : "text-gray-200"} ${
-                                row.kind === "symlink" ? "italic" : ""
-                              }`}
-                              style={{ maxWidth: 520 }}
-                            >
-                              {row.name}
-                            </span>
-                          </Tooltip>
-                          {missing && <span className="text-xs text-amber-400 ml-1">doesn&apos;t exist</span>}
-                          {state === "unverified" && <span className="text-xs text-gray-500 ml-1">not fully checked</span>}
-                          {state === "partial" && <span className="text-xs text-gray-500 ml-1">some items excluded</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              <p className="text-xs text-gray-500 mt-2">
-                Computed with the same rules restic applies. Hover a name to see why{onApplyEdit ? "; click a box to include or exclude it" : ""}.
-              </p>
-            </>
+      <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg overflow-hidden border border-gray-700">
+            {(["filesystem", "sources"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={`px-3 py-1 text-xs font-medium transition-colors ${
+                  mode === m ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                {m === "sources" ? "Sources only" : "Whole filesystem"}
+              </button>
+            ))}
+          </div>
+          {mode === "filesystem" && env?.home && (
+            <button
+              type="button"
+              onClick={() => reveal(env.home!)}
+              className="px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-50 transition-colors"
+              title="Jump to your home folder"
+            >
+              Home
+            </button>
           )}
         </div>
+
+        <div className="flex items-center gap-4 text-xs text-gray-500">
+          <span className="inline-flex items-center gap-2 select-none">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showHidden}
+              aria-label="Show hidden files"
+              onClick={() => setShowHidden((v) => !v)}
+              className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                showHidden ? "bg-blue-600" : "bg-gray-700"
+              }`}
+            >
+              <span
+                className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                  showHidden ? "translate-x-3.5" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+            <span>Show hidden files</span>
+            {hidden && hidden.backedUp > 0 && (
+              <Tooltip
+                content={
+                  <p>
+                    Hidden files are backed up too — {hidden.backedUp.toLocaleString()} hidden{" "}
+                    {hidden.backedUp === 1 ? "item" : "items"} in the folders you&apos;ve opened. Turn this on to see{" "}
+                    {hidden.backedUp === 1 ? "it" : "them"}.
+                  </p>
+                }
+              >
+                <span
+                  className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-900/40 border border-amber-500/50 text-amber-400 text-[11px] font-bold leading-none cursor-help"
+                  aria-label="Hidden files are backed up too"
+                >
+                  !
+                </span>
+              </Tooltip>
+            )}
+          </span>
+          <button type="button" onClick={reload} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
+            Refresh
+          </button>
+          <button type="button" onClick={() => setExportOpen(true)} className="text-gray-400 hover:text-gray-50 underline-offset-2 hover:underline">
+            Use with restic CLI…
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 mb-3 text-xs text-gray-500 flex-wrap">
+        <span className="inline-flex items-center gap-1.5"><StateBox state="included" /> Backed up</span>
+        <span className="inline-flex items-center gap-1.5"><StateBox state="partial" /> Backed up, some items left out</span>
+        <span className="inline-flex items-center gap-1.5"><StateBox state="contains" /> Holds a source</span>
+        <span className="inline-flex items-center gap-1.5"><StateBox state="excluded" /> Not backed up</span>
+      </div>
+
+      {history.length > 0 && latest && onUndo && (
+        <p className="mb-3 text-xs text-gray-400" role="status">
+          Updated your plan: {latest.summary}.{" "}
+          <button type="button" onClick={onUndo} className="text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline">
+            Undo
+          </button>
+          {history.length > 1 && (
+            <span className="text-gray-500"> · {history.length - 1} earlier {history.length === 2 ? "change" : "changes"} can be undone after this</span>
+          )}
+        </p>
       )}
+
+      {actionError && (
+        <p className="mb-3 text-xs text-amber-400 whitespace-pre-wrap break-words" role="alert">
+          {actionError}
+        </p>
+      )}
+
+      {problems.length > 0 && (
+        <ul className="mb-3 space-y-1">
+          {problems.map((p, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-xs text-amber-400">
+              <WarningIcon className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+              <span><span className="font-mono">{p.what}</span>: {p.error}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {nothingPicked && !emptySources && (
+        <p className="mb-3 text-xs text-gray-400">Nothing is selected yet. Open a folder and click its box to back it up.</p>
+      )}
+      {listFileCount > 0 && (
+        <p className="mb-3 text-xs text-gray-500">
+          This plan also backs up everything listed in {listFileCount === 1 ? "its path-list file" : `its ${listFileCount} path-list files`}.
+          Those entries aren&apos;t shown in the tree yet.
+        </p>
+      )}
+
+      {emptySources ? (
+        <p className="text-sm text-gray-500 text-center py-6">
+          No sources yet. Switch to <span className="text-gray-300">Whole filesystem</span> and click the box next to a folder or file to back it up.
+        </p>
+      ) : (
+        <>
+          <div
+            ref={viewportRef}
+            role="tree"
+            aria-label="Files and folders in this backup plan"
+            className="relative overflow-auto rounded-t-lg border border-gray-800 bg-gray-950/40"
+            style={{ height: viewH }}
+            onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+          >
+            <div style={{ height: rows.length * ROW_H, position: "relative", minWidth: "max-content" }}>
+              {visible.map((row, i) => {
+                const top = (start + i) * ROW_H;
+                const indent = 8 + row.depth * 16;
+                if (row.type === "note") {
+                  return (
+                    <div
+                      key={row.key}
+                      className={`absolute left-0 right-0 flex items-center text-xs ${
+                        row.tone === "error" ? "text-amber-400" : "text-gray-500"
+                      }`}
+                      style={{ top, height: ROW_H, paddingLeft: indent + 22 }}
+                    >
+                      {row.text}
+                      {row.action === "showHidden" && (
+                        <button
+                          type="button"
+                          onClick={() => setShowHidden(true)}
+                          className="ml-2 text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline"
+                        >
+                          Show
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                const verdict = verdicts.current.get(row.path);
+                const scan = scans.current.get(row.path);
+                const missing = row.kind === "missing";
+                const state: DisplayState = missing ? "excluded" : displayState(row.kind, verdict, scan);
+                const lines = reasonLines(state, row.path, verdict, scan, origins.current, row.kind);
+                const dim = state === "excluded" || missing;
+                const isDir = row.kind === "dir";
+                const isSource = shownSourceSet.has(row.path);
+                const click = boxClick(isSource, verdict);
+                return (
+                  <div
+                    key={row.path}
+                    role="treeitem"
+                    aria-level={row.depth + 1}
+                    aria-expanded={isDir ? row.expanded : undefined}
+                    aria-label={`${row.name}: ${missing ? "missing" : STATE_LABEL[state]}${isSource ? " (backup source)" : ""}`}
+                    className="absolute left-0 right-0 flex items-center gap-1.5 hover:bg-gray-800/40"
+                    style={{ top, height: ROW_H, paddingLeft: indent }}
+                  >
+                    {isDir ? (
+                      <button
+                        type="button"
+                        onClick={() => toggle(row.path)}
+                        className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-gray-300 flex-shrink-0"
+                        aria-label={row.expanded ? `Collapse ${row.name}` : `Expand ${row.name}`}
+                      >
+                        {row.loading ? (
+                          <Spinner className="w-3 h-3 text-blue-400" />
+                        ) : row.expanded ? (
+                          <ChevronDownIcon className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronRightIcon className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    ) : (
+                      <span className="w-4 flex-shrink-0" />
+                    )}
+                    {onApplyEdit && state !== "pending" ? (
+                      <button
+                        type="button"
+                        onClick={() => onBox(row.path, row.kind)}
+                        className="rounded-[3px] hover:ring-2 hover:ring-blue-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 flex-shrink-0"
+                        title={boxTitle(click, verdict?.included, row.kind)}
+                        aria-label={`${row.name}: ${boxTitle(click, verdict?.included, row.kind).toLowerCase()}`}
+                      >
+                        <StateBox state={state} />
+                      </button>
+                    ) : (
+                      <StateBox state={state} />
+                    )}
+                    <span className={`flex-shrink-0 ${dim ? "text-gray-500" : "text-gray-400"}`}>
+                      {row.kind === "symlink" ? (
+                        <LinkIcon className="w-4 h-4" />
+                      ) : isDir ? (
+                        <FolderIcon className="w-4 h-4" />
+                      ) : (
+                        <FileIcon className="w-4 h-4" />
+                      )}
+                    </span>
+                    <Tooltip content={<div className="space-y-1">{lines.map((l, j) => <p key={j}>{l}</p>)}</div>}>
+                      <span
+                        className={`text-sm truncate cursor-help ${dim ? "text-gray-500" : "text-gray-200"} ${
+                          row.kind === "symlink" ? "italic" : ""
+                        }`}
+                        style={{ maxWidth: 520 }}
+                      >
+                        {row.name}
+                      </span>
+                    </Tooltip>
+                    {isSource && <SourcePill />}
+                    {missing && <span className="text-xs text-amber-400 ml-1">doesn&apos;t exist</span>}
+                    {state === "unverified" && <span className="text-xs text-gray-500 ml-1">not fully checked</span>}
+                    {state === "partial" && <span className="text-xs text-gray-500 ml-1">some items excluded</span>}
+                    {state === "contains" && <span className="text-xs text-gray-500 ml-1">holds a source</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize the file tree"
+            aria-valuemin={MIN_VIEW_H}
+            aria-valuemax={MAX_VIEW_H}
+            aria-valuenow={viewH}
+            tabIndex={0}
+            onPointerDown={startResize}
+            onKeyDown={resizeByKey}
+            title="Drag to resize"
+            className="group flex items-center justify-center h-3 rounded-b-lg border border-t-0 border-gray-800 bg-gray-900 cursor-row-resize touch-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <span className="block w-8 h-[3px] rounded bg-gray-700 group-hover:bg-gray-500" />
+          </div>
+        </>
+      )}
+      <p className="text-xs text-gray-500 mt-2">
+        Computed with the same rules restic applies. Hover a name to see why it is or isn&apos;t backed up.
+      </p>
 
       {onApplyEdit && (
         <PlanTreeEditDialog target={editTarget} rules={rules} onClose={() => setEditTarget(null)} onApply={onApplyEdit} />

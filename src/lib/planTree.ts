@@ -98,6 +98,8 @@ export interface NodeInfo {
   truncated?: boolean;
   /** Why the folder couldn't be listed. */
   error?: string | null;
+  /** Hidden by the platform's convention (dot-name, or the Windows hidden attribute). */
+  hidden?: boolean;
 }
 
 export type DisplayState =
@@ -245,19 +247,47 @@ export function reasonLines(
 /** One line of the flattened tree. */
 export type Row =
   | { type: "node"; path: string; name: string; kind: SourceKind; depth: number; expanded: boolean; loading: boolean }
-  | { type: "note"; key: string; text: string; depth: number; tone: "info" | "error" };
+  | {
+      type: "note";
+      key: string;
+      text: string;
+      depth: number;
+      tone: "info" | "error";
+      /** The note offers to show the hidden items it counts. */
+      action?: "showHidden";
+    };
+
+/** How hidden items are treated when flattening the tree. */
+export interface HiddenOptions {
+  showHidden: boolean;
+  /** Hidden items that are shown regardless: sources and the folders leading to them. */
+  pinned: ReadonlySet<string>;
+  /** Is this path backed up? Unknown (undefined) until its verdict arrives. */
+  included?: (path: string) => boolean | undefined;
+}
+
+/** "3 hidden items not shown — 2 are backed up". */
+export function hiddenNoteText(hidden: number, backedUp: number): string {
+  const items = `${hidden.toLocaleString()} hidden ${hidden === 1 ? "item" : "items"} not shown`;
+  if (backedUp === 0) return `${items} — none are backed up`;
+  if (backedUp === hidden) return `${items} — ${hidden === 1 ? "it is" : "all are"} backed up`;
+  return `${items} — ${backedUp.toLocaleString()} ${backedUp === 1 ? "is" : "are"} backed up`;
+}
 
 /**
  * Flattens the visible part of the tree — roots, plus the children of every expanded folder
  * that has been listed — into rows. `roots` are shown in order; a folder's `children` come from
- * its listing and are already sorted.
+ * its listing and are already sorted. With `showHidden` off, hidden children are left out (unless
+ * pinned) and the folder ends with a note saying how many, and how many of those are backed up.
  */
 export function flattenRows(
   roots: { path: string; name?: string }[],
   nodes: Map<string, NodeInfo>,
   expanded: Set<string>,
+  hiddenOpts?: HiddenOptions,
 ): Row[] {
   const rows: Row[] = [];
+  const hideHidden = !!hiddenOpts && !hiddenOpts.showHidden;
   const visit = (path: string, depth: number, nameOverride?: string) => {
     const info = nodes.get(path);
     if (!info) return;
@@ -276,7 +306,26 @@ export function flattenRows(
       rows.push({ type: "note", key: `${path}\0error`, text: `Can't read this folder: ${info.error}`, depth: depth + 1, tone: "error" });
       return;
     }
-    for (const child of info.children ?? []) visit(child, depth + 1);
+    let hiddenCount = 0;
+    let hiddenBackedUp = 0;
+    for (const child of info.children ?? []) {
+      if (hideHidden && nodes.get(child)?.hidden && !hiddenOpts!.pinned.has(child)) {
+        hiddenCount++;
+        if (hiddenOpts!.included?.(child)) hiddenBackedUp++;
+        continue;
+      }
+      visit(child, depth + 1);
+    }
+    if (hiddenCount > 0) {
+      rows.push({
+        type: "note",
+        key: `${path}\0hidden`,
+        text: hiddenNoteText(hiddenCount, hiddenBackedUp),
+        depth: depth + 1,
+        tone: "info",
+        action: "showHidden",
+      });
+    }
     if (info.truncated && info.total != null) {
       const shown = info.children?.length ?? 0;
       rows.push({
@@ -292,6 +341,47 @@ export function flattenRows(
   };
   for (const r of roots) visit(r.path, 0, r.name);
   return rows;
+}
+
+/**
+ * Across every folder listed so far: how many hidden items there are and how many of those are
+ * backed up — what the "show hidden files" toggle's "!" is based on. Only items whose verdict is
+ * known count as backed up.
+ */
+export function hiddenSummary(
+  nodes: Map<string, NodeInfo>,
+  included: (path: string) => boolean | undefined,
+): { hidden: number; backedUp: number } {
+  let hidden = 0;
+  let backedUp = 0;
+  for (const info of nodes.values()) {
+    if (!info.hidden) continue;
+    hidden++;
+    if (included(info.path)) backedUp++;
+  }
+  return { hidden, backedUp };
+}
+
+/** Folders that must stay visible even when hidden files are off: the sources and every folder
+ * on the way down to one. */
+export function pinnedPaths(sources: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of sources) {
+    out.add(s);
+    for (const a of ancestorsOf(s)) out.add(a);
+  }
+  return out;
+}
+
+/** What a click on a row's box does. A source toggles off in one click; an item outside every
+ * source becomes one in one click; anything inside a source needs a choice of scope (a pattern
+ * to write, or what to carve out), so it opens the dialog. */
+export type BoxClick = "removeSource" | "addSource" | "dialog";
+
+export function boxClick(isSource: boolean, verdict: NodeVerdict | undefined): BoxClick {
+  if (isSource) return "removeSource";
+  if (!verdict || verdict.included) return "dialog";
+  return verdict.reason?.kind === "outsideSources" ? "addSource" : "dialog";
 }
 
 /** Every ancestor folder of `path`, from its root down (excluding `path` itself). */
