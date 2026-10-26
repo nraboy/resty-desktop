@@ -71,8 +71,8 @@ pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
 /// Parses `restic stats --mode raw-data --json` stdout into the on-disk stored-size figure
 /// (post-dedup, post-compression). Pure, mirroring `parse_stats_json` — same last-nonblank-line
 /// handling, same tolerance for restic emitting other NDJSON lines before the summary. Kept
-/// separate from `parse_stats_json` rather than folded in behind a mode flag: that function is
-/// shared with `get_snapshot_stats` in snapshot.rs, which never calls raw-data mode.
+/// separate from `parse_stats_json` rather than folded in behind a mode flag: the two share
+/// only `last_nonblank_line`, which `get_snapshot_stats` (snapshot.rs) also uses.
 pub(crate) fn parse_raw_data_size(stdout: &str) -> Result<u64, String> {
     let last_line = last_nonblank_line(stdout).ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;

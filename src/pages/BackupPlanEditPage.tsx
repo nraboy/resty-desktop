@@ -17,6 +17,7 @@ import type { BackupPlan, ExcludeFile, PlanWebhook, Repository, WebhookPreview, 
 import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "../lib/config";
 import { EMPTY_RETENTION_FIELDS, isWindows, needsFullDiskAccess, parsePackSize, parseRetention, planReadPaths, retentionToFields } from "../lib/utils";
 import type { RetentionFields as RetentionFieldValues } from "../lib/utils";
+import ActionButton from "../components/ActionButton";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
@@ -1221,24 +1222,20 @@ export default function BackupPlanEditPage() {
                     )}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => openEditWebhookModal(w)}
-                      className="text-gray-500 hover:text-blue-400"
+                    <ActionButton
+                      label="Edit"
                       title="Edit webhook"
-                    >
-                      <PencilIcon className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeWebhook(w.id)}
-                      className="text-gray-500 hover:text-blue-400"
+                      tone="blue"
+                      onClick={() => openEditWebhookModal(w)}
+                      icon={<PencilIcon className="w-4 h-4" />}
+                    />
+                    <ActionButton
+                      label="Remove"
                       title="Remove webhook"
-                    >
-                      <XIcon className="w-4 h-4" />
-                    </Button>
+                      tone="red"
+                      onClick={() => removeWebhook(w.id)}
+                      icon={<XIcon className="w-4 h-4" />}
+                    />
                   </div>
                 </li>
               );

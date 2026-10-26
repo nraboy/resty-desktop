@@ -215,7 +215,8 @@ pub fn get_auto_unlock(db: State<'_, AppDb>) -> Result<bool, String> {
     Ok(db.get_setting("auto_unlock", "false")? == "true")
 }
 
-/// Whether this platform can store a secret at all. macOS/Windows only — see keychain.rs.
+/// Whether this platform can store a secret at all: macOS/Windows, plus Linux when a Secret
+/// Service session bus is present (best-effort) — see keychain.rs.
 #[tauri::command]
 pub fn get_auto_unlock_supported() -> bool {
     keychain::is_supported()

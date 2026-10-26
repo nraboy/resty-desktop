@@ -759,7 +759,7 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   from an internal id already resolved from this app's own data (a repo, plan, or snapshot id),
   never from a URL query param, `location.search`, or other external input. Re-flagging this from
   a future `npm audit` run without checking reachability first would push a breaking
-  major-version migration (v7 changes routing APIs across all 13 routed pages) for zero actual
+  major-version migration (v7 changes routing APIs across all 12 routed pages) for zero actual
   risk reduction.
 - **Linux file dialogs use `tauri-plugin-dialog`'s `xdg-portal` feature
   (`default-features = false, features = ["xdg-portal"]`), not the plugin's default `gtk3`

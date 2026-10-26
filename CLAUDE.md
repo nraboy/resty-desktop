@@ -23,7 +23,7 @@ its scope. See **Where the detail lives** and **Settled decisions** below.
 | Memory safety | `zeroize` crate — `MasterKey`/`FullRepository` zeroize sensitive bytes on drop/replace; see docs/data.md |
 | Notifications | `tauri-plugin-notification` — shown on backup start/success (changed or unchanged)/warnings/failure, each gated by a global setting (`commands/notify.rs`) |
 | Window state | `tauri-plugin-window-state` — `SIZE\|POSITION\|MAXIMIZED` only (never `VISIBLE`), restored by hand in `setup()` then `fit_to_monitor`; min window 1024×640, default 1366×800; see docs/decisions.md |
-| Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch |
+| Single-instance | `tauri-plugin-single-instance` — prevents multiple processes; focuses existing window on relaunch (a relaunch carrying `--from-autostart` is ignored on purpose — `lib.rs`) |
 | Launch at login | `tauri-plugin-autostart`, OS-native entry, gated on the tray setting, carries a `--from-autostart` arg used to gate a hidden launch when auto-unlock is also on; see docs/decisions.md |
 | Auto-unlock | `keyring` 4 (`v1` feature), opt-in, stores the *derived* master key; macOS/Windows guaranteed, Linux (Secret Service) best-effort; see docs/data.md |
 | ID generation | `crypto.randomUUID()` (native browser API) |
@@ -55,7 +55,7 @@ src/
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
     TruncatedText.tsx     # Text with a native `title` shown only when actually cut off; callers supply the truncation classes (bare `truncate` for free-text cells, `max-xl:truncate` for compact-only ones) — see docs/frontend.md
-    Sidebar.tsx           # Icon rail below 1280px (`max-xl:`); left nav with app icon + repo indicator; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
+    Sidebar.tsx           # Icon rail below 1280px (`max-xl:`); left nav with app icon; "Lock" item at the bottom of the nav list (shared handleLock with tray/menu); a footer status strip below the nav list (not a nav item) toggles the Activity panel, showing "N tasks running"/"No background activity" from activeTaskCount()
     ActivityPanel.tsx     # Right-side overlay drawer surfacing background activity (indexing, scheduler backups, stats, mirrors); opened via the Sidebar's status strip, open state owned by App.tsx — see docs/concurrency.md
   lib/
     types.ts              # Shared TS types (Repository, Snapshot, BackupPlan, etc.); isRemoteRepo() helper
@@ -64,10 +64,12 @@ src/
     activity.tsx          # ActivityProvider: indexing, scheduler backups, stats, mirrors via the task event bus — see docs/concurrency.md
     format.ts             # formatBytes, formatSize, formatDate, formatDuration, dbSizeHint (Settings DB-size hint), etc.
     config.ts             # MIN_RESTIC_MAJOR/MINOR constants for version warning
-    utils.ts              # needsFullDiskAccess(paths) — macOS protected-path check
+    utils.ts              # needsFullDiskAccess(path) — macOS protected-path check for one path (callers iterate, e.g. via planReadPaths)
     theme.tsx             # ThemeProvider + useTheme(); persists to localStorage
     cron.ts               # parseCronToSimple/buildCronExpr — pure cron helpers, unit-tested
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
+    breakpoints.test.ts   # Pins Sidebar's `useIsCompact` 1280 query to Tailwind's stock `xl` (and fails if tailwind.config.js overrides it)
+    node-stubs.d.ts       # Ambient node:* types for the file-reading tests (the project has no @types/node)
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx  # Add/open/duplicate/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
@@ -87,13 +89,16 @@ src-tauri/
     main.rs               # Calls restic_gui_lib::run()
     lib.rs                # Tauri builder; registers commands; manages app state; native menu bar; tray — see docs/concurrency.md
     tasks.rs              # Unified `task` event bus (TaskEvent, OperationCtx) — see docs/concurrency.md
+    gpu_compat.rs         # NVIDIA+Wayland env workaround (gated) + AppImage fixups/`is_appimage` — see docs/decisions.md
+    cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing + the ~5-minute orphan-cleanup tick — see docs/concurrency.md
+    scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
     commands/
       mod.rs                # get_restic_path(); NoConsole trait for Finder-launched PATH
       auth.rs               # Setup/unlock/lock master password; auto-unlock — see docs/data.md
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
-      notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
+      notify.rs             # Global notification toggles (started/success-changed/success-unchanged/warnings/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
@@ -104,8 +109,6 @@ src-tauri/
       transfer.rs           # Export/import bundle + Backrest config.json import — see docs/data.md
       webhook.rs            # Per-plan webhook delivery (generic/Discord/Slack/Teams presets + Custom {placeholder} templates); test_webhook; preview_webhook renders build_body for the edit page; pure build_body/build_message/interpolate unit-tested — see docs/backend.md
       cache.rs              # AppDb (SQLite state), MasterKey, operation handles — see docs/concurrency.md
-  cache_warmer.rs       # Background sweep: snapshot refresh + auto-indexing + the ~5-minute orphan-cleanup tick — see docs/concurrency.md
-  scheduler.rs          # Background tick runs due schedules via execute_backup — see docs/concurrency.md and docs/decisions.md
 ```
 
 ## Routes
@@ -143,7 +146,8 @@ Full detail (env-var policy, streaming vs. one-shot calls, `mirror_repo`'s queue
 credentials incl. REST, stats-cache policy): **docs/restic.md**.
 
 Retain always: restic's binary path is user-configurable (defaults to `restic` on `$PATH`); every
-command sets `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` as **env vars, never process args**; every
+command sets `RESTIC_REPOSITORY`/`RESTIC_PASSWORD` as **env vars, never process args** (a repo with an
+empty stored password gets `--insecure-no-password` instead and no `RESTIC_PASSWORD`); every
 restic `Command` must set `.stdin(Stdio::null())` (Windows Scoop-shim spawn failures otherwise)
 alongside `.no_console()`; an `async fn` `#[tauri::command]` must **never** call
 `std::process::Command` inline — always `spawn_blocking` (streaming) or `run_restic_blocking`
@@ -172,18 +176,20 @@ restic/cron process — the retry-on-"already locked" logic remains the backstop
 
 ## Operation Event Bus
 
-Full detail (seven stateful frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
+Full detail (eight stateful frontend consumers, why `operationId` not `repoId`, the mirror/index-batch
 per-run registries): **docs/concurrency.md**.
 
 Retain always: `tasks.rs` defines a uniform `task` event (`TaskEvent`) layered **on top of**,
 never instead of, existing detailed feeds (`backup:progress`, etc.). Envelope: `operationId`
 (unique per operation instance — the correlation key, since `repoId` alone can't distinguish
-concurrent operations), `kind`, `phase` (`started`|`progress`|`cancelling`|`cancelled`|
+concurrent operations), `kind`, `phase` (`pending`|`started`|`progress`|`cancelling`|`cancelled`|
 `finished`|`failed`), `repoId`, `targetId`, `origin`, `progress`, `error`, `at` (plus `retentionSkipped`, set only on a finished `backup`). Every
 restic-shelling operation is wired via `OperationCtx`, except pure-DB reads (`list_snapshots`,
-`get_repo_stats`) and the continuous 60s `cache_warmer` snapshot-refresh tick. `TaskKind::Cleanup`
-(`clean_cache`, the "Clean Orphaned Data" button) is the one kind that emits `repoId: ""` — it
-never shells out to restic and isn't scoped to a single repo; every other kind carries a real one.
+`get_repo_stats`), the continuous 60s `cache_warmer` snapshot-refresh tick, and the still-unwired
+`refresh_snapshots` and `init_repo` (see docs/concurrency.md). `TaskKind::Cleanup` (`clean_cache`, the
+"Clean Orphaned Data" button, and the automatic `maybe_run_cleanup`) never shells out to restic and
+isn't scoped to a single repo, so it emits `repoId: ""`; Prune All and `testConnection` do too, so a
+consumer keying off `repoId` must not assume every event carries a real one.
 
 ## Security Architecture
 
@@ -305,7 +311,7 @@ proposing a change — several are pinned by a named test or reference a confirm
   `execute_backup`/`apply_retention`'s re-fetch-failure fallback) now either fetches real data
   first or does nothing on failure. Don't reintroduce a caller that clears `snapshots_cache` with
   no real listing in hand — see docs/decisions.md.
-- `clear_cache` ("Clear All Cache") deliberately does **not** `VACUUM` — its `DELETE FROM table;`
+- `clear_browse_cache` ("Clear All Cache", which calls `AppDb::clear_cache`) deliberately does **not** `VACUUM` — its `DELETE FROM table;`
   calls have no `WHERE` clause, so SQLite's truncate optimization already makes them cheap
   regardless of row count; `VACUUM` scales with total DB size instead and would hold the same
   `AppDb` connection mutex for however long that takes, the same freeze class `clean_cache`'s old
@@ -326,7 +332,7 @@ proposing a change — several are pinned by a named test or reference a confirm
   any offset/zone logic
 - Linux/Wayland title-bar buttons freezing after a tray restore was an upstream `tao` 0.35 bug
   (its custom Wayland header's `EventBox` sat above the buttons), fixed by tao ≥ 0.36 / tauri ≥
-  2.12. Don't pin tauri below 2.12 and don't add an app-side workaround without re-verifying on
+  2.12 (enforced by the `tauri = "2.12"` manifest floor). Don't pin tauri below 2.12 and don't add an app-side workaround without re-verifying on
   Wayland; see docs/decisions.md
 - Backup progress bars are non-monotonic by design (restic's own `percent_done` behavior)
 - `IndexHandle::gate` must stay one app-wide mutex — never split per-batch or per-repo
@@ -335,7 +341,7 @@ proposing a change — several are pinned by a named test or reference a confirm
 - `bundle.targets` in `tauri.conf.json` is an explicit list (`deb`/`appimage`/`rpm`/`dmg`/`nsis`/`msi`).
   AppImage was dropped in v0.0.8 for Mesa 25+ black windows and re-added (issue #28) once
   tauri#15665/#15781 were verified fixed in tauri-bundler 2.10.0 / `@tauri-apps/cli` ≥ 2.12.0 —
-  that CLI version is a floor, don't pin lower. `"deb"` must stay listed (the AppImage bundler
+  that CLI version is a floor (`"@tauri-apps/cli": "^2.12.0"` in package.json), don't pin lower. `"deb"` must stay listed (the AppImage bundler
   builds from the deb output tree). App-side, AppImage-only: `gpu_compat::apply_appimage_fixups`
   unsets the dangling `GST_PLUGIN_SYSTEM_PATH_1_0`, and `commands/portal.rs` + an `App.tsx` banner
   warn when the file-chooser portal is missing (an AppImage has no `depends`). A
@@ -466,7 +472,7 @@ are silently dropped — see docs/data.md for the full list).
 
 ## Theming
 
-Three modes: Dark (default), Light, System. Stored in `localStorage`; applied as `dark`/`light`/`system` class on `<html>`. All theme-sensitive colors route through CSS custom properties in `src/index.css`, extended in `tailwind.config.js` (`gray.50–950`, `blue/green/red.300/400/700/900`, `amber.300/400/500/700/900`).
+Three modes: System (the default when nothing is stored), Dark, Light; `:root` carries the dark values. Stored in `localStorage`; applied as `dark`/`light`/`system` class on `<html>`. All theme-sensitive colors route through CSS custom properties in `src/index.css`, extended in `tailwind.config.js` (`gray.50–950`, `blue/green/red.300/400/700/900`, `amber.300/400/500/700/900`, `purple.400`, `yellow.400`).
 
 **Adding a themed color:** add `--tw-<color>-<shade>` to both `:root` and `html.light` (and the
 `system` media-query block, kept identical to `light`) in `src/index.css`, extend
@@ -523,7 +529,7 @@ docs/decisions.md.
 
 ## Releases
 
-`.github/workflows/release.yml` — triggered by `v*` tag; a `test` job (frontend + Rust tests) gates the build; builds on ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. Requires `permissions: contents: write`. Skipped on non-GitHub CI (`github.server_url` check).
+`.github/workflows/release.yml` — triggered by `v*` tag; a `test` job (frontend + Rust tests) gates the build; builds on ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest via `tauri-apps/tauri-action@v0`; creates a draft GitHub Release. Annotated tag message becomes release body. The `build` job carries `permissions: contents: write` and the `github.server_url` check that skips it on non-GitHub CI; the `test` job always runs.
 
 Pre-built macOS binaries are not notarized: `sudo xattr -rd com.apple.quarantine /Applications/Resty\ Desktop.app`.
 
@@ -536,7 +542,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,cache,crypto,repo,repo_locks,snapshot,schedule,transfer,browse}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,schedule,snapshot,transfer,webhook}.rs`.
 - Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
   build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
   controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a
@@ -562,8 +568,9 @@ enables only `eslint-plugin-react-hooks` (`rules-of-hooks` + `exhaustive-deps`) 
 `typescript-eslint` rule sets, no stylistic rules — because `npm run typecheck` already covers
 type errors and stylistic linting adds churn without preventing the regressions this project
 actually sees. `npm run lint:rust` runs `cargo clippy` with `-D warnings`; the few call sites that
-can't reasonably shrink (`#[tauri::command]`s with many parameters, one intentionally
-fire-and-forget `spawn_blocking` unlock) carry a targeted `#[allow(clippy::...)]` with a comment,
+can't reasonably shrink (`#[tauri::command]`s with many parameters, two intentionally
+fire-and-forget `spawn_blocking`s — the post-cancel unlock in `execute_backup`, snapshot.rs, and webhook
+delivery in webhook.rs) carry a targeted `#[allow(clippy::...)]` with a comment,
 matching the pre-existing pattern in `cache.rs`. Neither linter catches this project's actual
 biggest regression risk — the concurrency/ordering invariants documented in the Concurrency and
 Restic Integration sections above (`RepoLocks` ordering, `busy` flags, cancel-path races); those

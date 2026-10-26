@@ -300,7 +300,7 @@ export default function RepositoriesPage() {
   useEffect(() => {
     const unlistenTask = listen<TaskEvent>("task", (e) => {
       const t = e.payload;
-      if (t.kind !== "stats" || t.phase !== "finished") return;
+      if (t.kind !== "stats" || t.targetId || t.phase !== "finished") return;
       getRepoStats(t.repoId)
         .then((s) => setStatsMap((prev) => ({ ...prev, [t.repoId]: s })))
         .catch(() => {});

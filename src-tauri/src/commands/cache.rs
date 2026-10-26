@@ -855,7 +855,7 @@ impl AppDb {
             // would block window creation for an O(file-size) rewrite on upgrade.
             // The freelist pages are reused in place as the cache rebuilds via
             // re-indexing (no doubling), and users who want to shrink the file
-            // can use "Clear All Cache", which already does its own VACUUM.
+            // can use "Compress Database" (Clear All Cache deliberately doesn't VACUUM).
         }
 
         conn.execute_batch(
