@@ -27,6 +27,7 @@ import {
   renameRepo,
   updateRepoSecrets,
   updateRepoPath,
+  updateRepoDeferPrune,
   updateRepoReadOnly,
   testRepoConnection,
 } from "../lib/invoke";
@@ -106,6 +107,7 @@ export default function RepositoriesPage() {
   const [editPassword, setEditPassword] = useState("");
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
+  const [editDeferPrune, setEditDeferPrune] = useState(false);
   // Populated with stored credential values when the edit modal opens (see
   // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
   // Save sends whatever rows are present (blank-key rows are dropped); "Clear stored
@@ -536,6 +538,12 @@ export default function RepositoriesPage() {
         await initRepo({ id, name: form.name, path, password: form.password, credentials });
       } else {
         await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, credentials });
+        // A duplicate keeps the source's "prune after retention" choice (add has no checkbox for
+        // it). Best-effort: the repo already exists, so a failure here must not read as a failed
+        // add and invite a second, duplicate-of-the-duplicate submit.
+        if (duplicateSource?.deferPrune) {
+          await updateRepoDeferPrune(id, true).catch(() => {});
+        }
       }
       await load();
       setModalMode(null);
@@ -625,6 +633,11 @@ export default function RepositoriesPage() {
       if (editReadOnly !== editTarget.readOnly) {
         await updateRepoReadOnly(editTarget.id, editReadOnly);
       }
+      // The checkbox is disabled while read-only, so its stored value is left alone rather than
+      // reset — unticking read-only later brings the same choice back.
+      if (!editReadOnly && editDeferPrune !== editTarget.deferPrune) {
+        await updateRepoDeferPrune(editTarget.id, editDeferPrune);
+      }
       await load();
       setEditTarget(null);
     } catch (err: any) {
@@ -659,6 +672,7 @@ export default function RepositoriesPage() {
     setEditPassword("");
     setEditNoPassword(false);
     setEditReadOnly(repo.readOnly);
+    setEditDeferPrune(repo.deferPrune);
     setEditTestResult(null);
     setEditCredentialRows([]);
     setEditLoadedCredentials([]);
@@ -877,6 +891,8 @@ export default function RepositoriesPage() {
     try {
       await pruneRepo(pruneTarget.id);
       setPruneDone(true);
+      // Pick up the new lastPrunedAt for the row's "Pruned …" line.
+      load().catch(() => {});
     } catch (err: any) {
       const msg = String(err);
       if (msg === "Cancelled") {
@@ -967,6 +983,14 @@ export default function RepositoriesPage() {
                         Read-only
                       </span>
                     )}
+                    {repo.deferPrune && !repo.readOnly && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 flex-shrink-0 whitespace-nowrap"
+                        title="Retention only forgets snapshots; run Prune… to reclaim storage."
+                      >
+                        Prune deferred
+                      </span>
+                    )}
                   </div>
                   <TruncatedText as="p" text={repo.path} className="text-xs text-gray-500 mt-0.5 font-mono truncate" />
                 </div>
@@ -1012,6 +1036,14 @@ export default function RepositoriesPage() {
                       <p className="text-xs text-gray-500">—</p>
                     ) : (
                       <p className="text-xs text-gray-500 animate-pulse">loading…</p>
+                    )}
+                    {repo.deferPrune && !repo.readOnly && (
+                      <p
+                        className="text-xs text-gray-500"
+                        title={repo.lastPrunedAt != null ? formatTimestamp(repo.lastPrunedAt) : undefined}
+                      >
+                        {repo.lastPrunedAt != null ? `Pruned ${formatRelative(repo.lastPrunedAt)}` : "Not pruned yet"}
+                      </p>
                     )}
                   </div>
                   <ActionButton
@@ -1310,9 +1342,21 @@ export default function RepositoriesPage() {
             <input
               type="checkbox"
               checked={editReadOnly}
-              onChange={(e) => { setEditReadOnly(e.target.checked); setEditTestResult(null); }}
+              onChange={(e) => {
+                setEditReadOnly(e.target.checked);
+                setEditTestResult(null);
+              }}
             />
             Read-only repository (--no-lock)
+          </label>
+          <label className={`flex items-center gap-2 text-sm ${editReadOnly ? "text-gray-500" : "text-gray-400"}`}>
+            <input
+              type="checkbox"
+              checked={!editDeferPrune}
+              disabled={editReadOnly}
+              onChange={(e) => setEditDeferPrune(!e.target.checked)}
+            />
+            Prune after retention (forget --prune)
           </label>
           {editTestResult && (
             <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>

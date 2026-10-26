@@ -188,6 +188,9 @@ export default function BackupPlansPage() {
   // Backup and retention both write to the repo — unavailable once it's read-only
   // (or was deleted out from under the plan, matching the existing "no valid repo" case).
   const planRepoReadOnly = (plan: BackupPlan) => repos.find((r) => r.id === plan.repoId)?.readOnly ?? false;
+  const retentionDeferred = retentionPlan
+    ? repos.find((r) => r.id === retentionPlan.repoId)?.deferPrune ?? false
+    : false;
 
   const openRetentionModal = (plan: BackupPlan) => {
     setRetentionPlan(plan);
@@ -302,7 +305,7 @@ export default function BackupPlansPage() {
         try {
           await forgetByPlan(backupPlan.repoId, backupPlan.tags, backupPlan.paths, backupPlan.retention, backupPlan.id);
         } catch (pruneErr: any) {
-          setBackupError("Backup succeeded but pruning failed: " + String(pruneErr));
+          setBackupError("Backup succeeded but applying retention failed: " + String(pruneErr));
           return;
         } finally {
           setApplyingRetention(false);
@@ -577,8 +580,9 @@ export default function BackupPlansPage() {
             </div>
 
             <p className="text-xs text-gray-500">
-              Runs <code className="text-gray-400">restic forget --prune</code> with the plan's retention rules.
+              Runs <code className="text-gray-400">restic forget{retentionDeferred ? "" : " --prune"}</code> with the plan's retention rules.
               Snapshots outside the policy will be permanently removed.
+              {retentionDeferred && " Pruning is deferred for this repository; storage is reclaimed the next time you prune it."}
             </p>
 
             <div className="min-h-[48px] flex flex-col justify-center">

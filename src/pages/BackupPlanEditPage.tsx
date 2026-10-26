@@ -1073,12 +1073,12 @@ export default function BackupPlanEditPage() {
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
         <h2 className="text-sm font-medium text-gray-300 mb-1">Retention Policy (optional)</h2>
         <p className="text-xs text-gray-500 mb-4">
-          After each backup, old snapshots will be pruned. Leave all fields blank to skip pruning.
+          After each backup, snapshots outside this policy are forgotten (and pruned, unless the repository defers pruning). Leave all fields blank to skip retention.
         </p>
         <RetentionFields value={retention} onChange={setRetention} />
         {retentionFromDefault && Object.values(retention).some((v) => v.trim() !== "") && (
           <p className="mt-3 text-xs text-gray-500">
-            Pre-filled from your default retention policy in Settings. Clear the fields to skip pruning.
+            Pre-filled from your default retention policy in Settings. Clear the fields to skip retention.
           </p>
         )}
       </div>

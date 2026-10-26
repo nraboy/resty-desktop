@@ -7,6 +7,12 @@ export interface Repository {
    * being a mirror/copy destination) is refused — see CLAUDE.md's Restic
    * Integration section. A read-only repo may still be a mirror/copy *source*. */
   readOnly: boolean;
+  /** When true, retention runs plain `forget` (no `--prune`) for this repo; storage is
+   * reclaimed only by an explicit prune. Lives on the repo because early-deletion fees
+   * depend on where it is stored. Prune All still prunes it. */
+  deferPrune: boolean;
+  /** Unix seconds of the last successful prune the app ran, or null if never. */
+  lastPrunedAt: number | null;
 }
 
 // Result of an auto-unlock attempt at startup (try_auto_unlock, auth.rs). `reason` is a

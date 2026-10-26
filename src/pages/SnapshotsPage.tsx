@@ -145,6 +145,10 @@ export default function SnapshotsPage() {
         setAllRepos(repos);
         const found = repos.find((r) => r.id === repoId) ?? null;
         setRepo(found);
+        // Manual deletes follow the repo's prune choice; the user can still tick the box.
+        // Set both ways so moving from a deferred repo to a normal one restores the default.
+        setPruneOnDelete(!found?.deferPrune);
+        setMultiDeletePrune(!found?.deferPrune);
         // No match means load() (which needs a repo) will never run to clear `loading`, so
         // release it here — same class as the catch below — to reach "Repository not found".
         if (!found) setLoading(false);

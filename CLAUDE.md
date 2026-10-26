@@ -154,7 +154,7 @@ docs/restic.md "Stale locks" and docs/decisions.md. A repo can be marked **read-
 `apply_repo_flags`); every write op instead calls `ensure_writable` and refuses outright. A stats
 refresh (`fetch_and_cache_stats`) runs restic **twice** — default mode for the restore-size figures,
 then `--mode raw-data` for the on-disk stored size (`ResticStats.raw_size`) — with the second call's
-failure deliberately non-fatal to the refresh; see docs/restic.md.
+failure deliberately non-fatal to the refresh; see docs/restic.md. Retention runs `forget --prune` unless the repo has `defer_prune` set (per repo, since cloud early-deletion fees depend on where it's stored); explicit prunes still prune it — see docs/restic.md "Deferred prune".
 
 ## Concurrency: Per-Repository Lock Registry
 
@@ -383,6 +383,14 @@ proposing a change — several are pinned by a named test or reference a confirm
   "none" plan state through `apply_retention`, the scheduler and the activity reducers). Its load
   (`load_default_retention`) fails *closed* — an error prefills nothing, unlike `notify::load`. See
   docs/decisions.md
+- **Deferred prune** (issue #49): retention is `forget --prune` unless the repo has `defer_prune` set
+  (edit-modal checkbox "Prune after retention", ticked by default and stored inverted — a positive
+  label on purpose, the original "Don't prune…" double negative confused users). It's per **repo**, not
+  per plan or global (cloud early-deletion fees depend on where the repo lives), and explicit
+  "Prune…"/"Prune All" still prune a deferred repo. A failed flag lookup **fails closed** (no prune);
+  a read-only repo keeps its stored choice but the row hides the badge. `last_pruned_at` is
+  best-effort bookkeeping. Known unfixed gap: bulk snapshot delete with "prune" ticked prunes once
+  *per snapshot* — planned fix and rejected alternative in docs/decisions.md
 - Controls use the native arrow cursor, not the web-style hand, with **no Settings toggle** (issue
   #35): a base-layer rule in `index.css` (`button, [role="button"] { cursor: default }`) overrides
   Tailwind preflight's `cursor: pointer`, no `cursor-pointer` classes remain, and the sidebar's

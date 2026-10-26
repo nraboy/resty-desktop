@@ -381,6 +381,15 @@ pub async fn update_repo_path(
 }
 
 #[tauri::command]
+pub async fn update_repo_defer_prune(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    defer_prune: bool,
+) -> Result<(), String> {
+    db.set_repo_defer_prune(&repo_id, defer_prune)
+}
+
+#[tauri::command]
 pub async fn update_repo_read_only(
     db: State<'_, AppDb>,
     repo_id: String,
@@ -1034,7 +1043,10 @@ pub async fn prune_all_repos(
             };
 
             match outcome {
-                PruneAttempt::Success => {}
+                PruneAttempt::Success => {
+                    // Stamped per repo so a batch that stops partway still records the ones it finished.
+                    let _ = db.record_pruned(&repo.id);
+                }
                 PruneAttempt::Cancelled => break 'body Err("Cancelled".to_string()),
                 PruneAttempt::Failed(msg) => break 'body Err(format!("Prune failed for '{}': {}", repo.name, msg)),
             }
@@ -1134,7 +1146,10 @@ pub async fn prune_repo(
         };
 
         match outcome {
-            PruneAttempt::Success => Ok(()),
+            PruneAttempt::Success => {
+                let _ = db.record_pruned(&repo_id);
+                Ok(())
+            }
             PruneAttempt::Cancelled => Err("Cancelled".to_string()),
             PruneAttempt::Failed(msg) => Err(msg),
         }

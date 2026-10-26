@@ -97,6 +97,12 @@ pub struct Repository {
     pub name: String,
     pub path: String,
     pub read_only: bool,
+    /// When true, retention runs plain `forget` (no `--prune`) for this repo, so storage is
+    /// reclaimed only by an explicit prune — avoids early-deletion fees on some cloud
+    /// storage classes. See `snapshot::apply_retention`.
+    pub defer_prune: bool,
+    /// Unix seconds of the last successful prune this app ran (any path), `None` if never.
+    pub last_pruned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -870,7 +876,9 @@ impl AppDb {
                 password_ciphertext    BLOB NOT NULL,
                 read_only              INTEGER NOT NULL DEFAULT 0,
                 credentials_nonce      BLOB,
-                credentials_ciphertext BLOB
+                credentials_ciphertext BLOB,
+                defer_prune            INTEGER NOT NULL DEFAULT 0,
+                last_pruned_at         INTEGER
             );
             CREATE TABLE IF NOT EXISTS backup_plans (
                 id              TEXT PRIMARY KEY,
@@ -996,6 +1004,13 @@ impl AppDb {
         add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
         )?;
+        // Additive — retention's `--prune` opt-out and the last-prune timestamp (issue #49).
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE repositories ADD COLUMN defer_prune INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE repositories ADD COLUMN last_pruned_at INTEGER;",
+        )?;
         // Additive, nullable — an existing row's password_nonce/password_ciphertext are
         // never touched, and NULL here means "no stored credentials" (the ambient mode:
         // use restic's own credential chain). See CLAUDE.md's "Backend credentials".
@@ -1098,7 +1113,8 @@ impl AppDb {
     pub fn list_repos(&self) -> Result<Vec<Repository>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, path, read_only FROM repositories ORDER BY rowid")
+            .prepare("SELECT id, name, path, read_only, defer_prune, last_pruned_at
+                 FROM repositories ORDER BY rowid")
             .map_err(|e| e.to_string())?;
         let repos = stmt
             .query_map([], |row| {
@@ -1107,6 +1123,8 @@ impl AppDb {
                     name: row.get(1)?,
                     path: row.get(2)?,
                     read_only: row.get::<_, i64>(3)? != 0,
+                    defer_prune: row.get::<_, i64>(4)? != 0,
+                    last_pruned_at: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1239,6 +1257,39 @@ impl AppDb {
         conn.execute(
             "UPDATE repositories SET path = ?1 WHERE id = ?2",
             params![new_path, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_repo_defer_prune(&self, repo_id: &str, defer_prune: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET defer_prune = ?1 WHERE id = ?2",
+            params![defer_prune, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_repo_defer_prune(&self, repo_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT defer_prune FROM repositories WHERE id = ?1",
+            params![repo_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .map_err(|e| e.to_string())
+    }
+
+    /// Stamps `last_pruned_at` after a successful prune. Pure bookkeeping — callers discard
+    /// the result so a failed write never fails the prune it describes.
+    pub fn record_pruned(&self, repo_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET last_pruned_at = ?1 WHERE id = ?2",
+            params![timestamp(), repo_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -3102,8 +3153,8 @@ impl AppDb {
             tx.execute(
                 "INSERT INTO repositories
                  (id, name, path, password_nonce, password_ciphertext, read_only,
-                  credentials_nonce, credentials_ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  credentials_nonce, credentials_ciphertext, defer_prune)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     r.id,
                     r.name,
@@ -3113,6 +3164,7 @@ impl AppDb {
                     r.read_only,
                     r.credentials_nonce,
                     r.credentials_ciphertext,
+                    r.defer_prune,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -3152,6 +3204,7 @@ pub struct ImportRepo {
     pub read_only: bool,
     pub credentials_nonce: Option<Vec<u8>>,
     pub credentials_ciphertext: Option<Vec<u8>>,
+    pub defer_prune: bool,
 }
 
 fn timestamp() -> i64 {
@@ -3628,6 +3681,7 @@ mod tests {
             read_only: false,
             credentials_nonce: None,
             credentials_ciphertext: None,
+            defer_prune: false,
         };
         let plan = BackupPlan {
             id: "plan1".to_string(),
@@ -6087,5 +6141,27 @@ mod tests {
             "freelist_count must be > 0 after migration (no VACUUM); got {}",
             freelist_count
         );
+    }
+
+    #[test]
+    fn defer_prune_and_last_pruned_round_trip() {
+        let db = test_db();
+        db.add_repo("r1", "Repo", "/backups", &[], &[], false, None, None).unwrap();
+
+        // Defaults: prunes normally, never pruned.
+        let r = db.list_repos().unwrap().remove(0);
+        assert!(!r.defer_prune);
+        assert_eq!(r.last_pruned_at, None);
+        assert!(!db.get_repo_defer_prune("r1").unwrap());
+
+        db.set_repo_defer_prune("r1", true).unwrap();
+        assert!(db.get_repo_defer_prune("r1").unwrap());
+        assert!(db.list_repos().unwrap()[0].defer_prune);
+
+        db.record_pruned("r1").unwrap();
+        assert!(db.list_repos().unwrap()[0].last_pruned_at.unwrap_or(0) > 0);
+
+        db.set_repo_defer_prune("r1", false).unwrap();
+        assert!(!db.get_repo_defer_prune("r1").unwrap());
     }
 }

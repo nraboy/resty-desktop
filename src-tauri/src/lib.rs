@@ -582,6 +582,7 @@ pub fn run() {
             repo::rename_repo,
             repo::update_repo_path,
             repo::update_repo_read_only,
+            repo::update_repo_defer_prune,
             repo::get_repo_password,
             repo::get_repo_credentials,
             repo::update_repo_secrets,

@@ -55,6 +55,10 @@ struct ExportRepo {
     /// predate the read-only feature) still import cleanly as writable repos.
     #[serde(default)]
     read_only: bool,
+    /// Retention's `--prune` opt-out (issue #49). Added after bundle v1 shipped — defaults to
+    /// `false` so older exports import as repos that prune normally.
+    #[serde(default)]
+    defer_prune: bool,
     /// Backend credentials (e.g. B2_ACCOUNT_ID/KEY, AWS_ACCESS_KEY_ID/SECRET), each
     /// encrypted under the export passphrase exactly like `password`. Added after
     /// bundle v1 shipped — `#[serde(default)]` means an older export (which predates
@@ -256,6 +260,7 @@ pub fn export_data(
                 path: r.path.clone(),
                 password,
                 read_only: r.read_only,
+                defer_prune: r.defer_prune,
                 credentials,
             });
         }
@@ -450,6 +455,7 @@ pub fn import_data(
             read_only: r.read_only,
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
+            defer_prune: r.defer_prune,
         });
     }
 
@@ -714,6 +720,9 @@ pub fn import_backrest_config(
             // deliberately deferred follow-up, not done here.
             credentials_nonce: None,
             credentials_ciphertext: None,
+            // Backrest's `prunePolicy` is a schedule and Resty has no prune schedule yet;
+            // deferring here would leave an imported repo never pruning on its own.
+            defer_prune: false,
         });
     }
 
@@ -969,6 +978,7 @@ mod tests {
             path: "b2:bucket:path".to_string(),
             password: EncSecret { nonce: "n".to_string(), ciphertext: "c".to_string() },
             read_only: false,
+            defer_prune: true,
             credentials: vec![ExportCredential {
                 key: "B2_ACCOUNT_ID".to_string(),
                 value: EncSecret { nonce: "cn".to_string(), ciphertext: "cc".to_string() },
@@ -976,6 +986,7 @@ mod tests {
         };
         let json = serde_json::to_string(&repo).unwrap();
         let back: ExportRepo = serde_json::from_str(&json).unwrap();
+        assert!(back.defer_prune);
         assert_eq!(back.credentials.len(), 1);
         assert_eq!(back.credentials[0].key, "B2_ACCOUNT_ID");
         assert_eq!(back.credentials[0].value.nonce, "cn");
@@ -995,6 +1006,8 @@ mod tests {
         }"#;
         let repo: ExportRepo = serde_json::from_str(json).unwrap();
         assert!(repo.credentials.is_empty());
+        // Likewise predates `deferPrune`: an old bundle imports as a repo that prunes normally.
+        assert!(!repo.defer_prune);
     }
 
     #[test]

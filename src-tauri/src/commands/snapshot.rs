@@ -193,6 +193,9 @@ pub async fn delete_snapshot(
         Err(e) => task_ctx.failed(e.clone()),
     }
     result?;
+    if prune {
+        let _ = db.record_pruned(&repo_id);
+    }
     // Keeps the repo's cached snapshot list accurate immediately, without an unbounded
     // browse_cache_files delete or wiping the rest of the repo's cache — see
     // remove_snapshot_from_cache's doc comment (cache.rs) and docs/decisions.md.
@@ -1862,10 +1865,20 @@ pub(crate) fn non_blank_tags(tags: &[String]) -> Vec<String> {
     tags.iter().filter(|t| !t.trim().is_empty()).cloned().collect()
 }
 
-fn build_retention_args(tags: &[String], paths: &[String], retention: &RetentionPolicy) -> Vec<String> {
+/// `prune` appends `--prune`; a repo with `defer_prune` set passes `false` so retention only
+/// forgets and storage is reclaimed by an explicit prune (issue #49).
+fn build_retention_args(
+    tags: &[String],
+    paths: &[String],
+    retention: &RetentionPolicy,
+    prune: bool,
+) -> Vec<String> {
     let tags = non_blank_tags(tags);
-    let mut args: Vec<String> =
-        vec!["forget".to_string(), "--prune".to_string(), "--json".to_string()];
+    let mut args: Vec<String> = vec!["forget".to_string()];
+    if prune {
+        args.push("--prune".to_string());
+    }
+    args.push("--json".to_string());
 
     if !tags.is_empty() {
         args.push("--group-by".to_string());
@@ -1988,7 +2001,10 @@ pub fn apply_retention(
     }
     let restic_path = super::get_restic_path(db);
 
-    let args = build_retention_args(tags, paths, retention);
+    // A failed lookup fails closed (no prune): skipping a prune is recoverable with a manual
+    // Prune…, while pruning against a repo that opted out can incur early-deletion fees.
+    let prune = !db.get_repo_defer_prune(repo_id).unwrap_or(true);
+    let args = build_retention_args(tags, paths, retention, prune);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     // `forget` takes restic's exclusive lock — wait for the repo to go idle first (see
@@ -2023,6 +2039,9 @@ pub fn apply_retention(
     }
 
     if result.is_ok() {
+        if prune {
+            let _ = db.record_pruned(repo_id);
+        }
         // A failed re-fetch leaves the cache exactly as it was — see docs/decisions.md.
         if let Ok(json) =
             run_restic_with_path(&repo, vec!["snapshots", "--json"], &restic_path)
@@ -2353,7 +2372,7 @@ mod tests {
 
     #[test]
     fn retention_args_blank_tags_fall_back_to_paths() {
-        let args = build_retention_args(&strs(&["", "  "]), &strs(&["/a"]), &all_retention());
+        let args = build_retention_args(&strs(&["", "  "]), &strs(&["/a"]), &all_retention(), true);
         assert!(!args.contains(&"--tag".to_string()));
         assert!(!args.contains(&"--group-by".to_string()));
         let i = args.iter().position(|a| a == "--path").expect("--path present");
@@ -2362,7 +2381,7 @@ mod tests {
 
     #[test]
     fn retention_args_drops_blank_tags_among_real_ones() {
-        let args = build_retention_args(&strs(&["home", " ", "work"]), &[], &all_retention());
+        let args = build_retention_args(&strs(&["home", " ", "work"]), &[], &all_retention(), true);
         assert!(args.contains(&"home,work".to_string()));
         assert!(!args.iter().any(|a| a.trim().is_empty()));
     }
@@ -2482,15 +2501,26 @@ mod tests {
 
     #[test]
     fn retention_args_always_starts_with_forget_prune_json() {
-        let args = build_retention_args(&[], &[], &all_retention());
+        let args = build_retention_args(&[], &[], &all_retention(), true);
         assert_eq!(&args[..3], &["forget", "--prune", "--json"]);
+    }
+
+    #[test]
+    fn retention_args_without_prune_omits_the_flag_and_keeps_the_rest() {
+        let with = build_retention_args(&[], &[], &all_retention(), true);
+        let without = build_retention_args(&[], &[], &all_retention(), false);
+        assert_eq!(&without[..2], &["forget", "--json"]);
+        assert!(!without.iter().any(|a| a == "--prune"));
+        let mut expected = with.clone();
+        expected.retain(|a| a != "--prune");
+        assert_eq!(without, expected);
     }
 
     #[test]
     fn retention_args_with_tags_uses_group_by_not_path() {
         let tags = vec!["home".to_string(), "work".to_string()];
         let paths = vec!["/some/path".to_string()];
-        let args = build_retention_args(&tags, &paths, &all_retention());
+        let args = build_retention_args(&tags, &paths, &all_retention(), true);
         assert!(args.contains(&"--group-by".to_string()));
         assert!(args.contains(&"tags".to_string()));
         assert!(args.contains(&"--tag".to_string()));
@@ -2501,7 +2531,7 @@ mod tests {
     #[test]
     fn retention_args_without_tags_uses_paths() {
         let paths = vec!["/home/user".to_string(), "/etc".to_string()];
-        let args = build_retention_args(&[], &paths, &all_retention());
+        let args = build_retention_args(&[], &paths, &all_retention(), true);
         assert!(!args.contains(&"--group-by".to_string()));
         assert!(!args.contains(&"--tag".to_string()));
         let path_positions: Vec<usize> = args
@@ -2516,7 +2546,7 @@ mod tests {
 
     #[test]
     fn retention_args_emits_all_keep_flags_when_set() {
-        let args = build_retention_args(&[], &[], &all_retention());
+        let args = build_retention_args(&[], &[], &all_retention(), true);
         let pairs: Vec<(&str, &str)> = args
             .windows(2)
             .map(|w| (w[0].as_str(), w[1].as_str()))
@@ -2537,7 +2567,7 @@ mod tests {
             keep_monthly: None,
             keep_yearly: None,
         };
-        let args = build_retention_args(&[], &[], &policy);
+        let args = build_retention_args(&[], &[], &policy, true);
         assert!(args.contains(&"--keep-last".to_string()));
         assert!(!args.contains(&"--keep-daily".to_string()));
         assert!(!args.contains(&"--keep-weekly".to_string()));
@@ -2554,7 +2584,7 @@ mod tests {
             keep_monthly: None,
             keep_yearly: None,
         };
-        let args = build_retention_args(&[], &[], &policy);
+        let args = build_retention_args(&[], &[], &policy, true);
         assert_eq!(args, vec!["forget", "--prune", "--json"]);
     }
 
@@ -2570,7 +2600,7 @@ mod tests {
 
     #[test]
     fn zero_retention_values_are_omitted() {
-        let args = build_retention_args(&[], &[], &retention(Some(0), Some(7)));
+        let args = build_retention_args(&[], &[], &retention(Some(0), Some(7)), true);
         let pairs: Vec<(&str, &str)> =
             args.windows(2).map(|w| (w[0].as_str(), w[1].as_str())).collect();
         assert!(pairs.contains(&("--keep-daily", "7")));
@@ -2587,7 +2617,7 @@ mod tests {
             keep_monthly: zero,
             keep_yearly: zero,
         };
-        assert_eq!(build_retention_args(&[], &[], &policy), vec!["forget", "--prune", "--json"]);
+        assert_eq!(build_retention_args(&[], &[], &policy, true), vec!["forget", "--prune", "--json"]);
     }
 
     #[test]

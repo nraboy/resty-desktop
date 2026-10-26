@@ -8,9 +8,9 @@
   const REPO_NAME = "Offsite Backblaze B2 production archive for the finance and legal departments";
   const REPO_PATH = "b2:company-backups-production-eu-central-primary:/finance/legal/archives/2026/quarterly-statements-final";
   const repos = [
-    { id: "repo-1", name: REPO_NAME, path: REPO_PATH, readOnly: false },
-    { id: "repo-2", name: "local", path: "/Users/someone/backups/local-repo", readOnly: true },
-    { id: "repo-3", name: LONG(110, "x"), path: LONG(150, "y"), readOnly: false },
+    { id: "repo-1", name: REPO_NAME, path: REPO_PATH, readOnly: false, deferPrune: false, lastPrunedAt: null },
+    { id: "repo-2", name: "local", path: "/Users/someone/backups/local-repo", readOnly: true, deferPrune: false, lastPrunedAt: null },
+    { id: "repo-3", name: LONG(110, "x"), path: LONG(150, "y"), readOnly: false, deferPrune: true, lastPrunedAt: 1700000000 },
   ];
   const HOST = "build-server-production-eu-central-primary-replica-01.internal.example-corp.com";
   const LONGTAG = "quarterly-finance-department-archive-2026-q1-final-approved";

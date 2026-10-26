@@ -970,6 +970,29 @@ under the fields. Nothing reads the default when a backup or `forget` runs.
   rejects 0, negatives, decimals and non-numeric text, sharing its rules and error text with the plan editor; the inputs also block `. , e + -` keystrokes). Imports need no such guard: `RetentionPolicy`
   is `Option<u32>`, so a non-integer count fails the parse and the whole file is refused.
 
+## Deferred prune, and the known multi-delete gap (issue #49)
+
+Retention is per-repo opt-out of `--prune` (`repositories.defer_prune`); see docs/restic.md
+"Deferred prune". Decisions worth keeping:
+
+- **Per repo, not per plan or global.** Early-deletion fees depend on where the repo is stored,
+  and several plans can share one repo.
+- **Explicit prunes ignore the flag.** "Prune…" and "Prune All" still prune a deferred repo —
+  they're how a deferred prune gets done.
+- **Backrest import leaves it off.** Backrest's prune policy is a schedule; Resty has none, so
+  deferring on import would leave the repo never pruning by itself.
+
+**Known gap, not fixed:** `SnapshotsPage.handleMultiDelete` calls `deleteSnapshot(repoId, id,
+prune)` once per selected snapshot, so with "prune" ticked it runs a full `restic prune` *per
+snapshot* — expensive on a cloud repo. Planned fix (unbuilt): delete each with `prune = false`,
+then one `pruneRepo(repoId)` at the end (reuses the lock, cancel, Activity-panel row and
+`last_pruned_at` handling). Things to handle when doing it: `PruneHandle.busy` can reject the final
+call ("A prune is already in progress") — report it as "deleted, prune failed", not a delete
+failure; give the trailing prune its own progress/Hide state (it can run for minutes); skip the
+prune after a mid-batch delete failure and say so. A batch `restic forget id1 id2 …` command was
+considered and rejected as roughly double the work for no extra benefit. Unscheduled prune
+(a schedule action for "prune repo X") is the other open follow-up.
+
 ## Linux GPU Compatibility
 
 `src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.

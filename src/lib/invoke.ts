@@ -65,6 +65,9 @@ export const renameRepo = (repoId: string, newName: string): Promise<void> =>
 export const updateRepoPath = (repoId: string, newPath: string): Promise<void> =>
   invoke("update_repo_path", { repoId, newPath });
 
+export const updateRepoDeferPrune = (repoId: string, deferPrune: boolean): Promise<void> =>
+  invoke("update_repo_defer_prune", { repoId, deferPrune });
+
 export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<void> =>
   invoke("update_repo_read_only", { repoId, readOnly });
 
