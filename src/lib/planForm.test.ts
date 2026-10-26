@@ -16,6 +16,8 @@ import {
 } from "./planForm";
 import type { BackupPlan } from "./types";
 
+const keep = (over: Partial<PlanFormState["retention"]>): PlanFormState["retention"] => ({ ...emptyForm().retention, ...over });
+
 const valid = (over: Partial<PlanFormState> = {}): PlanFormState => ({
   ...emptyForm(),
   name: "Docs",
@@ -91,19 +93,19 @@ describe("validatePlanForm", () => {
   });
 
   it("rejects retention counts below 1 or non-numeric on the Retention tab", () => {
-    for (const bad of ["0", "-2", "abc"]) {
-      expect(validatePlanForm(valid({ keepDaily: bad }))).toEqual({
+    for (const bad of ["0", "-2", "abc", "1.5", "1e2"]) {
+      expect(validatePlanForm(valid({ retention: keep({ keepDaily: bad }) }))).toEqual({
         where: "retention",
         message: "Retention counts must be whole numbers of at least 1 — leave a field blank to disable it.",
       });
     }
-    expect(validatePlanForm(valid({ keepDaily: "7", keepWeekly: "0" }))?.where).toBe("retention");
-    expect(validatePlanForm(valid({ keepDaily: "7" }))).toBeNull();
-    expect(validatePlanForm(valid({ keepDaily: "  " }))).toBeNull();
+    expect(validatePlanForm(valid({ retention: keep({ keepDaily: "7", keepWeekly: "0" }) }))?.where).toBe("retention");
+    expect(validatePlanForm(valid({ retention: keep({ keepDaily: "7" }) }))).toBeNull();
+    expect(validatePlanForm(valid({ retention: keep({ keepDaily: "  " }) }))).toBeNull();
   });
 
   it("reports the first problem when several tabs have one", () => {
-    expect(validatePlanForm(valid({ packSize: "1", keepDaily: "0" }))?.where).toBe("advanced");
+    expect(validatePlanForm(valid({ packSize: "1", retention: keep({ keepDaily: "0" }) }))?.where).toBe("advanced");
   });
 });
 
@@ -116,7 +118,7 @@ describe("buildPlan", () => {
         excludeItems: ["x", "!x/keep"],
         excludeIfPresent: [".nobackup"],
         excludeCaches: true,
-        keepDaily: "7",
+        retention: keep({ keepDaily: "7" }),
         limitUpload: "500",
         packSize: "32",
         excludeFiles: [{ path: "/e.txt", ignoreCase: false }],
@@ -164,8 +166,8 @@ describe("buildPlan", () => {
 
   it("has no retention when every count is blank, and parses the ones set", () => {
     expect(buildPlan(valid(), "i").retention).toBeUndefined();
-    expect(hasRetention(valid({ keepYearly: "2" }))).toBe(true);
-    expect(buildPlan(valid({ keepLast: "3", keepYearly: "2" }), "i").retention).toEqual({
+    expect(hasRetention(valid({ retention: keep({ keepYearly: "2" }) }))).toBe(true);
+    expect(buildPlan(valid({ retention: keep({ keepLast: "3", keepYearly: "2" }) }), "i").retention).toEqual({
       keepLast: 3,
       keepDaily: undefined,
       keepWeekly: undefined,
@@ -202,7 +204,7 @@ describe("formFromPlan", () => {
   it("fills the expert text from the patterns and stringifies numbers", () => {
     const f = formFromPlan(plan(), true);
     expect(f.excludeText).toBe("node_modules\n*.log");
-    expect(f.keepDaily).toBe("7");
+    expect(f.retention.keepDaily).toBe("7");
     expect(f.packSize).toBe("32");
     expect(f.limitDownload).toBe("");
   });
@@ -227,8 +229,8 @@ describe("treeRulesFromForm", () => {
 describe("tab summaries", () => {
   it("summarises retention", () => {
     expect(retentionSummary(valid())).toBe("Off");
-    expect(retentionSummary(valid({ keepDaily: "7", keepWeekly: "4" }))).toBe("Keep 7 daily, 4 weekly");
-    expect(retentionSummary(valid({ keepLast: " 3 ", keepYearly: "1" }))).toBe("Keep 3 last, 1 yearly");
+    expect(retentionSummary(valid({ retention: keep({ keepDaily: "7", keepWeekly: "4" }) }))).toBe("Keep 7 daily, 4 weekly");
+    expect(retentionSummary(valid({ retention: keep({ keepLast: " 3 ", keepYearly: "1" }) }))).toBe("Keep 3 last, 1 yearly");
   });
 
   it("flags anything non-default on the Advanced tab", () => {
@@ -240,7 +242,7 @@ describe("tab summaries", () => {
     expect(advancedIsCustom(valid({ useFsSnapshot: true }))).toBe(true);
     expect(advancedIsCustom(valid({ webhooks: [{ id: "w", url: "https://x", provider: "generic", stages: { started: false, completed: true, failed: true } }] }))).toBe(true);
     // Retention and tags have their own tabs.
-    expect(advancedIsCustom(valid({ keepDaily: "7", tags: ["t"] }))).toBe(false);
+    expect(advancedIsCustom(valid({ retention: keep({ keepDaily: "7" }), tags: ["t"] }))).toBe(false);
   });
 
   it("recognises tab ids from the URL", () => {

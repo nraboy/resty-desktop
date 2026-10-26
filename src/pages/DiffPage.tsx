@@ -6,6 +6,7 @@ import type { DiffResult, Snapshot } from "../lib/types";
 import { computeChildren, type DiffChange, type TreeNode } from "../lib/difftree";
 import Button from "../components/Button";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import ContextMenu from "../components/ContextMenu";
 import Modal from "../components/Modal";
 import Input from "../components/Input";
@@ -193,7 +194,7 @@ export default function DiffPage() {
                     <thead>
                       <tr className="bg-gray-900 border-b border-gray-800 text-left">
                         <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Name</th>
-                        <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-28">Change</th>
+                        <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-28 min-w-[7rem]">Change</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-800">
@@ -205,22 +206,22 @@ export default function DiffPage() {
                             className="hover:bg-gray-900/50 transition-colors"
                             onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, node }); }}
                           >
-                            <td className="px-4 py-2.5">
+                            <td className="px-4 py-2.5 max-w-0 w-full">
                               <div className="flex items-center gap-2">
                                 {node.isDir ? <DirIcon /> : <FileIcon />}
                                 {node.isDir ? (
                                   <button
                                     onClick={() => setCurrentPath(node.fullPath)}
-                                    className="text-gray-200 hover:text-gray-50 transition-colors text-left"
+                                    className="text-gray-200 hover:text-gray-50 transition-colors text-left min-w-0 overflow-hidden"
                                   >
-                                    {node.name}
+                                    <TruncatedText as="span" text={node.name} className="block truncate" />
                                   </button>
                                 ) : (
-                                  <span className="text-gray-300">{node.name}</span>
+                                  <TruncatedText as="span" text={node.name} className="text-gray-300 min-w-0 truncate" />
                                 )}
                               </div>
                             </td>
-                            <td className="px-4 py-2.5">
+                            <td className="px-4 py-2.5 min-w-[7rem] whitespace-nowrap">
                               <span className={`text-xs font-mono ${style.color}`}>
                                 {style.icon} {style.label}
                               </span>

@@ -16,13 +16,13 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 ## Features
 
 - **Master password** — all repository passwords are encrypted at rest; a single master password unlocks the app on each launch
-- **Auto-unlock** (macOS / Windows) — an opt-in, off-by-default toggle that stores the derived unlock key (never your master password) in the OS credential manager, so the app can unlock itself at startup instead of showing the password prompt. Trade-off worth knowing: anyone with access to your unlocked desktop session can then open Resty and use every repository, since the OS credential store is scoped to your user account, not to this app specifically
-- **Repository management** — add local or remote repositories (Amazon S3 / S3-compatible, native Backblaze B2, SFTP, and other restic-supported backends), initialize new ones, check integrity, rename, remove, or mirror to another repo
+- **Auto-unlock** (macOS / Windows; Linux best-effort via the Secret Service) — an opt-in, off-by-default toggle that stores the derived unlock key (never your master password) in the OS credential manager, so the app can unlock itself at startup instead of showing the password prompt. Trade-off worth knowing: anyone with access to your unlocked desktop session can then open Resty and use every repository, since the OS credential store is scoped to your user account, not to this app specifically
+- **Repository management** — add local or remote repositories (Amazon S3 / S3-compatible, native Backblaze B2, a restic REST server, SFTP, and other restic-supported backends), initialize new ones, check integrity, rename, remove, or mirror to another repo
 - **Read-only repositories** — mark a repository backed by a genuinely read-only filesystem or mount as read-only; the app opens it with restic's own `--no-lock` for every read, and refuses writes (backup, prune, tag, delete, retention) outright rather than relying on restic to reject them
 - **Launch at login** — optionally have the OS start the app automatically at login (uses the native macOS LaunchAgent / Windows Registry Run entry / Linux XDG `.desktop` mechanism), gated on the system tray toggle since without the tray, closing the window quits the app
-- **Backend credentials** — optionally store credentials (e.g. S3 access keys, native B2 application keys) per remote repository, encrypted with the master password; left blank, restic falls back to your system's own credential chain (`~/.aws/credentials`, an IAM role, etc.) exactly as before. Note: restic's own documentation recommends B2's S3-compatible API over its native backend for better error handling
+- **Backend credentials** — optionally store credentials (e.g. S3 access keys, native B2 application keys, REST server username/password) per remote repository, encrypted with the master password; left blank, restic falls back to your system's own credential chain (`~/.aws/credentials`, an IAM role, etc.) exactly as before. Note: restic's own documentation recommends B2's S3-compatible API over its native backend for better error handling
 - **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
-- **Schedules** — attach backup plans to a cron schedule; runs happen in the background even while the UI is closed
+- **Schedules** — attach backup plans to a cron schedule; runs happen in the background while the app is unlocked — with the system tray enabled, that includes while the window is closed
 - **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning
 - **Snapshot diff** — compare any two snapshots to see exactly what was added, removed, or modified, with per-entry restore directly from the diff view
 - **File browser** — navigate the file tree inside any snapshot and restore individual files, directories, or entire snapshots
@@ -67,7 +67,7 @@ Tauri v2 requires WebKitGTK and a few other system libraries on Linux. Install t
 
 ```bash
 sudo apt update
-sudo apt install libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev librsvg2-dev
+sudo apt install libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
 ```
 
 **Fedora:**
@@ -139,7 +139,7 @@ The app automatically searches common installation locations (`/opt/homebrew/bin
 This GUI wrapper for Restic was created by [Nic Raboy](https://www.nraboy.com). If you found it valuable, consider donating to demonstrate your appreciation.
 
 - [PayPal](https://paypal.me/nraboy)
-- [Square Cash](https://cash.app/$nraboy)
+- [Sponsor on GitHub](https://github.com/sponsors/nraboy)
 
 ## Open Source & No Warranty
 

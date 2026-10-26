@@ -35,6 +35,17 @@ type MasterKeyRow = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 // ── public types (serialised to frontend) ─────────────────────────────────
 
+/// On-disk footprint of `app_data.db` (+ WAL) and how much of it a `VACUUM` could give
+/// back. `reclaimable_bytes` is the freelist (`freelist_count × page_size`) — pages
+/// SQLite has freed but not returned to the OS — so it is `0` for a database whose size
+/// is all live rows, however large.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbSize {
+    pub total_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupHistoryEntry {
@@ -86,9 +97,15 @@ pub struct Repository {
     pub name: String,
     pub path: String,
     pub read_only: bool,
+    /// When true, retention runs plain `forget` (no `--prune`) for this repo, so storage is
+    /// reclaimed only by an explicit prune — avoids early-deletion fees on some cloud
+    /// storage classes. See `snapshot::apply_retention`.
+    pub defer_prune: bool,
+    /// Unix seconds of the last successful prune this app ran (any path), `None` if never.
+    pub last_pruned_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPolicy {
     pub keep_last: Option<u32>,
@@ -838,7 +855,7 @@ impl AppDb {
             // would block window creation for an O(file-size) rewrite on upgrade.
             // The freelist pages are reused in place as the cache rebuilds via
             // re-indexing (no doubling), and users who want to shrink the file
-            // can use "Clear All Cache", which already does its own VACUUM.
+            // can use "Compress Database" (Clear All Cache deliberately doesn't VACUUM).
         }
 
         conn.execute_batch(
@@ -859,7 +876,9 @@ impl AppDb {
                 password_ciphertext    BLOB NOT NULL,
                 read_only              INTEGER NOT NULL DEFAULT 0,
                 credentials_nonce      BLOB,
-                credentials_ciphertext BLOB
+                credentials_ciphertext BLOB,
+                defer_prune            INTEGER NOT NULL DEFAULT 0,
+                last_pruned_at         INTEGER
             );
             CREATE TABLE IF NOT EXISTS backup_plans (
                 id              TEXT PRIMARY KEY,
@@ -985,6 +1004,13 @@ impl AppDb {
         add_column_ignoring_duplicates(conn,
             "ALTER TABLE repositories ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;",
         )?;
+        // Additive — retention's `--prune` opt-out and the last-prune timestamp (issue #49).
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE repositories ADD COLUMN defer_prune INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        add_column_ignoring_duplicates(conn,
+            "ALTER TABLE repositories ADD COLUMN last_pruned_at INTEGER;",
+        )?;
         // Additive, nullable — an existing row's password_nonce/password_ciphertext are
         // never touched, and NULL here means "no stored credentials" (the ambient mode:
         // use restic's own credential chain). See CLAUDE.md's "Backend credentials".
@@ -1087,7 +1113,8 @@ impl AppDb {
     pub fn list_repos(&self) -> Result<Vec<Repository>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, path, read_only FROM repositories ORDER BY rowid")
+            .prepare("SELECT id, name, path, read_only, defer_prune, last_pruned_at
+                 FROM repositories ORDER BY rowid")
             .map_err(|e| e.to_string())?;
         let repos = stmt
             .query_map([], |row| {
@@ -1096,6 +1123,8 @@ impl AppDb {
                     name: row.get(1)?,
                     path: row.get(2)?,
                     read_only: row.get::<_, i64>(3)? != 0,
+                    defer_prune: row.get::<_, i64>(4)? != 0,
+                    last_pruned_at: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1228,6 +1257,39 @@ impl AppDb {
         conn.execute(
             "UPDATE repositories SET path = ?1 WHERE id = ?2",
             params![new_path, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_repo_defer_prune(&self, repo_id: &str, defer_prune: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET defer_prune = ?1 WHERE id = ?2",
+            params![defer_prune, repo_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_repo_defer_prune(&self, repo_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT defer_prune FROM repositories WHERE id = ?1",
+            params![repo_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .map_err(|e| e.to_string())
+    }
+
+    /// Stamps `last_pruned_at` after a successful prune. Pure bookkeeping — callers discard
+    /// the result so a failed write never fails the prune it describes.
+    pub fn record_pruned(&self, repo_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE repositories SET last_pruned_at = ?1 WHERE id = ?2",
+            params![timestamp(), repo_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -2749,10 +2811,12 @@ impl AppDb {
     // ── size helper ──────────────────────────────────────────────────────────
 
     /// Checkpoint the WAL into the main file, then return the combined on-disk
-    /// size of `app_data.db` + `app_data.db-wal`. Must be called while the
-    /// `Connection` mutex is already held by the caller so no background thread
-    /// can append WAL frames between the checkpoint and the `fs::metadata` reads.
-    fn checkpoint_and_size(&self, conn: &Connection) -> u64 {
+    /// size of `app_data.db` + `app_data.db-wal`, plus the freelist-based
+    /// reclaimable estimate (two O(1) header-page reads, so no extra mutex hold of
+    /// note). Must be called while the `Connection` mutex is already held by the
+    /// caller so no background thread can append WAL frames between the checkpoint
+    /// and the `fs::metadata` reads.
+    fn checkpoint_and_size(&self, conn: &Connection) -> DbSize {
         // TRUNCATE mode moves all checkpointed frames into the main file and
         // zeros the WAL, so both files reflect the true post-operation footprint.
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -2760,12 +2824,20 @@ impl AppDb {
         let wal = std::fs::metadata(self.db_path.with_extension("db-wal"))
             .map(|m| m.len())
             .unwrap_or(0);
-        main + wal
+        let pragma = |name: &str| -> u64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0)
+        };
+        DbSize {
+            total_bytes: main + wal,
+            reclaimable_bytes: pragma("freelist_count") * pragma("page_size"),
+        }
     }
 
     /// Public entry-point for the `get_db_size` command: acquires the
     /// connection lock, checkpoints the WAL, and returns the combined size.
-    pub fn get_size(&self) -> Result<u64, String> {
+    pub fn get_size(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         Ok(self.checkpoint_and_size(&conn))
     }
@@ -2786,7 +2858,7 @@ impl AppDb {
     /// that cost — reclaiming space is deliberately its job alone, not an implicit side
     /// effect of clearing data here. Run it after this if the freed space needs to be
     /// returned to the OS.
-    pub fn clear_cache(&self) -> Result<u64, String> {
+    pub fn clear_cache(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
             "DELETE FROM browse_cache_files;
@@ -2997,7 +3069,7 @@ impl AppDb {
     }
 
     /// Remove only orphaned cache rows, leaving live caches intact, in a single
-    /// synchronous call. Returns `(rows_deleted, db_size_bytes)`. Orphans are:
+    /// synchronous call. Returns `(rows_deleted, DbSize)`. Orphans are:
     ///   - `snapshots_cache` / `repo_stats_cache` rows whose `repo_id` no longer
     ///     exists in `repositories` (e.g. a deleted repo),
     ///   - `browse_cache_files` / `browse_cache_status` / `indexed_snapshots`
@@ -3017,7 +3089,7 @@ impl AppDb {
     /// a `pub fn` rather than `#[cfg(test)]`-gated since it's the natural non-batched
     /// building block any future non-UI caller (e.g. a CLI/debug command) would want.
     #[allow(dead_code)]
-    pub fn clean_cache(&self) -> Result<(u64, u64), String> {
+    pub fn clean_cache(&self) -> Result<(u64, DbSize), String> {
         let mut removed = self.mark_orphans()?;
         loop {
             let batch = self.drain_orphans(CLEAN_CACHE_BATCH_ROWS)?;
@@ -3034,7 +3106,7 @@ impl AppDb {
     /// Rewrite the database file to reclaim free pages, without deleting any
     /// rows. Unlike `clear_cache`, this never touches live data — it's a plain
     /// `VACUUM` for users who just want to recover disk space.
-    pub fn compress_database(&self) -> Result<u64, String> {
+    pub fn compress_database(&self) -> Result<DbSize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
         Ok(self.checkpoint_and_size(&conn))
@@ -3081,8 +3153,8 @@ impl AppDb {
             tx.execute(
                 "INSERT INTO repositories
                  (id, name, path, password_nonce, password_ciphertext, read_only,
-                  credentials_nonce, credentials_ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  credentials_nonce, credentials_ciphertext, defer_prune)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     r.id,
                     r.name,
@@ -3092,6 +3164,7 @@ impl AppDb {
                     r.read_only,
                     r.credentials_nonce,
                     r.credentials_ciphertext,
+                    r.defer_prune,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -3131,6 +3204,7 @@ pub struct ImportRepo {
     pub read_only: bool,
     pub credentials_nonce: Option<Vec<u8>>,
     pub credentials_ciphertext: Option<Vec<u8>>,
+    pub defer_prune: bool,
 }
 
 fn timestamp() -> i64 {
@@ -3217,7 +3291,7 @@ fn parse_snapshot_rows(json: &str) -> Result<Vec<SnapshotRow>, String> {
 }
 
 #[tauri::command]
-pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<u64, String> {
+pub async fn clear_browse_cache(app: tauri::AppHandle) -> Result<DbSize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db = app.state::<AppDb>();
         db.clear_cache()
@@ -3333,11 +3407,11 @@ pub(crate) async fn run_cleanup(app: tauri::AppHandle, origin: TaskOrigin) -> Re
 }
 
 /// "Clean Orphaned Data" button — thin wrapper over `run_cleanup` with `origin: Manual`,
-/// plus the DB-size readout the Settings UI shows afterward. Signature and return shape
-/// (`rows_deleted`, `db_size_bytes`) are unchanged from before extraction, so the
-/// `invoke.ts` wrapper and Settings UI need no changes.
+/// plus the DB-size readout the Settings UI shows afterward. Returns
+/// `(rows_deleted, DbSize)` — total and reclaimable bytes, which Settings uses for its
+/// compress hint.
 #[tauri::command]
-pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, u64), String> {
+pub async fn clean_cache(app: tauri::AppHandle) -> Result<(u64, DbSize), String> {
     let removed = run_cleanup(app.clone(), TaskOrigin::Manual).await?;
     let size = tauri::async_runtime::spawn_blocking(move || app.state::<AppDb>().get_size())
         .await
@@ -3356,12 +3430,12 @@ pub async fn stop_cleanup(
 }
 
 #[tauri::command]
-pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<u64, String> {
+pub fn get_db_size(db: tauri::State<'_, AppDb>) -> Result<DbSize, String> {
     db.get_size()
 }
 
 #[tauri::command]
-pub async fn compress_database(app: tauri::AppHandle) -> Result<u64, String> {
+pub async fn compress_database(app: tauri::AppHandle) -> Result<DbSize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db = app.state::<AppDb>();
         db.compress_database()
@@ -3607,6 +3681,7 @@ mod tests {
             read_only: false,
             credentials_nonce: None,
             credentials_ciphertext: None,
+            defer_prune: false,
         };
         let plan = BackupPlan {
             id: "plan1".to_string(),
@@ -4791,6 +4866,36 @@ mod tests {
         assert_eq!(count_rows(&db, "repo_stats_cache"), 0);
         assert_eq!(count_rows(&db, "browse_cache_files"), 0);
         assert_eq!(count_rows(&db, "browse_cache_status"), 0);
+    }
+
+    /// `DbSize.reclaimable_bytes` is the freelist: live rows report none, deleted rows
+    /// show up as reclaimable (clear_cache never vacuums), and `compress_database`
+    /// returns them to zero.
+    #[test]
+    fn db_size_reports_reclaimable_after_clear_and_none_after_compress() {
+        // File-backed (not `test_db()`'s in-memory/empty-path DB) so the size reads see real files.
+        let dir = std::env::temp_dir().join(format!("resty-dbsize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app_data.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        AppDb::init_schema(&conn).unwrap();
+        let db = AppDb::new(conn, path);
+        seed_repo(&db, "repo1");
+        seed_snapshot(&db, "repo1", "aaaa111100000000");
+        db.insert_browse_files("aaaa111100000000", &file_entries(5000)).unwrap();
+
+        assert_eq!(db.get_size().unwrap().reclaimable_bytes, 0);
+
+        let cleared = db.clear_cache().unwrap();
+        assert!(cleared.reclaimable_bytes > 0, "freed pages should be on the freelist");
+        assert!(cleared.reclaimable_bytes <= cleared.total_bytes);
+
+        let compressed = db.compress_database().unwrap();
+        assert_eq!(compressed.reclaimable_bytes, 0);
+        assert!(compressed.total_bytes < cleared.total_bytes);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6036,5 +6141,27 @@ mod tests {
             "freelist_count must be > 0 after migration (no VACUUM); got {}",
             freelist_count
         );
+    }
+
+    #[test]
+    fn defer_prune_and_last_pruned_round_trip() {
+        let db = test_db();
+        db.add_repo("r1", "Repo", "/backups", &[], &[], false, None, None).unwrap();
+
+        // Defaults: prunes normally, never pruned.
+        let r = db.list_repos().unwrap().remove(0);
+        assert!(!r.defer_prune);
+        assert_eq!(r.last_pruned_at, None);
+        assert!(!db.get_repo_defer_prune("r1").unwrap());
+
+        db.set_repo_defer_prune("r1", true).unwrap();
+        assert!(db.get_repo_defer_prune("r1").unwrap());
+        assert!(db.list_repos().unwrap()[0].defer_prune);
+
+        db.record_pruned("r1").unwrap();
+        assert!(db.list_repos().unwrap()[0].last_pruned_at.unwrap_or(0) > 0);
+
+        db.set_repo_defer_prune("r1", false).unwrap();
+        assert!(!db.get_repo_defer_prune("r1").unwrap());
     }
 }

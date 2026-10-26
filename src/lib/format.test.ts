@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList, formatPlanSources } from "./format";
+import { formatBytes, formatSize, formatDate, formatDateOnly, formatTimestamp, formatDuration, formatRelative, formatRepoSize, isOverdue, capList, formatPlanSources, dbSizeHint } from "./format";
 import type { ResticStats } from "./types";
 
 describe("formatBytes", () => {
@@ -268,5 +268,35 @@ describe("formatPlanSources", () => {
 
   it("falls back to '0 paths' when there are no sources", () => {
     expect(formatPlanSources({ paths: [], filesFrom: [] })).toBe("0 paths");
+  });
+});
+
+describe("dbSizeHint", () => {
+  const MB = 1024 ** 2;
+  const GB = 1024 ** 3;
+
+  it("suggests compressing when a meaningful share is reclaimable", () => {
+    expect(dbSizeHint({ totalBytes: 2 * GB, reclaimableBytes: GB })).toEqual({
+      kind: "compress",
+      reclaimableBytes: GB,
+      neededBytes: GB,
+    });
+  });
+
+  it("ignores reclaimable space under the absolute floor", () => {
+    expect(dbSizeHint({ totalBytes: 200 * MB, reclaimableBytes: 50 * MB })).toBeNull();
+  });
+
+  it("ignores reclaimable space under the fractional floor", () => {
+    // 150 MB clears the byte floor but is <10% of a 10 GB file; the file is large, so the live-data hint applies.
+    expect(dbSizeHint({ totalBytes: 10 * GB, reclaimableBytes: 150 * MB })).toEqual({ kind: "large" });
+  });
+
+  it("flags a large database with nothing to reclaim", () => {
+    expect(dbSizeHint({ totalBytes: 100 * GB, reclaimableBytes: 0 })).toEqual({ kind: "large" });
+  });
+
+  it("says nothing for a small database", () => {
+    expect(dbSizeHint({ totalBytes: 123456789, reclaimableBytes: 0 })).toBeNull();
   });
 });

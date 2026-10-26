@@ -1,0 +1,62 @@
+<!doctype html><html><head><meta charset="utf-8"><script src="/mock.js"></script></head><body><pre id="o">running</pre><script>
+const M = window.__MOCK_DATA__; const s0 = M.snapshots[0].id;
+const SC = [
+  ["/", "text:+ New Repository"], ["/", "text:Open Existing"], ["/", "title:Rename"], ["/", "title:Mirror to another repository"], ["/", "text:Remove"],
+  ["/", "ctx:Prune"], ["/", "ctx:Edit"],
+  // The last repo has a 110-char unbroken name / 150-char path: the worst case for titles and labels.
+  ["/", "title:Rename@last"], ["/", "title:Mirror to another repository@last"], ["/", "text:Remove@last"], ["/", "ctx:Prune@last"], ["/", "ctx:Edit@last"],
+  ["/snapshots/repo-1", "title:Restore snapshot"], ["/snapshots/repo-1", "title:Copy to repository"], ["/snapshots/repo-1", "title:Delete snapshot"],
+  ["/snapshots/repo-1", "text:+ tag"], ["/snapshots/repo-1", "text:Unlock"], ["/snapshots/repo-3", "text:Unlock"],
+  [`/snapshots/repo-1/${s0}/browse`, "text:Restore"],
+  ["/backup-plans", "title:Run backup"], ["/backup-plans", "text:Delete"], ["/schedules", "text:Delete"],
+  ["/settings", "text:Prune All"], ["/settings", "text:Export"],
+];
+const WIDTHS = (new URLSearchParams(location.search).get("widths") || "1024,1366").split(",").map(Number); const out = []; const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const short = (el) => (el.tagName.toLowerCase() + (typeof el.className === "string" && el.className ? "." + el.className.split(/\s+/).slice(0, 3).join(".") : "") + ":" + (el.textContent || "").trim().slice(0, 28)).slice(0, 100);
+function find(d, spec) {
+  const [k, v] = [spec.slice(0, spec.indexOf(":")), spec.slice(spec.indexOf(":") + 1)];
+  const els = [...d.querySelectorAll("button, [role=button], a")];
+  const last = v.endsWith("@last"); const vv = last ? v.slice(0, -5) : v; const pick = (arr) => (last ? arr[arr.length - 1] : arr[0]);
+  if (k === "title") return pick(els.filter((e) => (e.getAttribute("title") || e.getAttribute("aria-label") || "").includes(vv) && e.offsetParent !== null));
+  if (k === "text") return pick(els.filter((e) => (e.textContent || "").trim().toLowerCase().includes(vv.toLowerCase()) && e.offsetParent !== null));
+  if (k === "x") return els.find((e) => (e.textContent || "").trim().toLowerCase().includes(v.toLowerCase()) && e.offsetParent !== null);
+  return null;
+}
+async function open(f, spec) {
+  const d = f.contentDocument, w = f.contentWindow;
+  if (spec.startsWith("ctx:")) {
+    const rows = [...d.querySelectorAll("main .grid > div, main tbody tr")]; const row = spec.endsWith("@last") ? rows[rows.length - 1] : rows[0]; if (!row) return "no row"; spec = spec.replace("@last", "");
+    row.dispatchEvent(new w.MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 300 })); await sleep(200);
+    const item = [...d.querySelectorAll("button, [role=menuitem], div")].reverse().find((e) => e.children.length === 0 && (e.textContent || "").trim().startsWith(spec.slice(4)));
+    if (!item) return "no ctx item"; item.click();
+  } else { const b = find(d, spec); if (!b) return "no button"; b.click(); }
+  await sleep(500); return d.querySelector("[role=dialog]") ? "" : "no dialog";
+}
+function measure(f) {
+  const w = f.contentWindow, d = f.contentDocument, dlg = d.querySelector("[role=dialog]");
+  const panel = dlg.children[1], body = panel.children[1], res = { clipped: [], wraps: [], bodyHscroll: 0, vfit: true };
+  const pr = panel.getBoundingClientRect();
+  res.vfit = pr.top >= -1 && pr.bottom <= w.innerHeight + 1;
+  res.bodyHscroll = body.scrollWidth - body.clientWidth;
+  for (const el of panel.querySelectorAll("*")) {
+    const r = el.getBoundingClientRect(); if (!r.width || !r.height) continue;
+    if (r.right > pr.right + 1 || r.left < pr.left - 1) res.clipped.push(short(el) + ` right=${Math.round(r.right - pr.right)}`);
+  }
+  for (const el of panel.querySelectorAll("*")) {
+    if (el.children.length || !el.textContent.trim() || el.textContent.trim().length > 40 || ["OPTION","TEXTAREA","PRE","CODE"].includes(el.tagName)) continue;
+    const rg = d.createRange(); rg.selectNodeContents(el);
+    if (new Set([...rg.getClientRects()].map((x) => Math.round(x.top / 4))).size > 1) res.wraps.push(short(el));
+  }
+  res.title = (dlg.querySelector("h2") || {}).textContent;
+  return res;
+}
+(async () => {
+  for (const [route, spec] of SC) for (const width of WIDTHS) {
+    const f = document.createElement("iframe"); f.style.cssText = `width:${width}px;height:640px;border:0;position:absolute;left:0;top:0`;
+    f.src = route; document.body.appendChild(f); await new Promise((r) => (f.onload = r)); await sleep(1500);
+    let r; try { const err = await open(f, spec); r = err ? { skipped: err } : measure(f); } catch (e) { r = { error: String(e) }; }
+    out.push({ route: route.replace(s0, "S0"), spec, width, ...r }); f.remove();
+  }
+  document.getElementById("o").textContent = "RESULT" + JSON.stringify(out) + "END";
+})();
+</script></body></html>

@@ -8,6 +8,7 @@ import { formatBytes, formatDate, formatDuration } from "../lib/format";
 import { isPermissionWarning } from "../lib/utils";
 import Button from "../components/Button";
 import EmptyState from "../components/EmptyState";
+import TruncatedText from "../components/TruncatedText";
 import BackupWarningsList from "../components/BackupWarningsList";
 import { CheckCircleIcon, XCircleIcon, MinusCircleIcon, WarningIcon } from "../components/icons";
 
@@ -64,7 +65,7 @@ export default function LogsPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-100">Backup Logs</h1>
           <p className="text-sm text-gray-500 mt-0.5">History of all backup runs.</p>
@@ -86,14 +87,14 @@ export default function LogsPage() {
         const pageEntries = entries.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
         return (
           <>
-            <div className="rounded-xl border border-gray-800 overflow-x-auto">
-              <table className="w-full min-w-[800px] text-sm">
+            <div className="rounded-xl border border-gray-800 overflow-hidden">
+              <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-900 border-b border-gray-800 text-left">
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-6"></th>
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Date</th>
-                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Plan</th>
-                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Repository</th>
+                    <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[18%] mid:w-[30%]">Plan</th>
+                    <th className="max-mid:hidden px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider w-[25%]">Repository</th>
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Duration</th>
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">New</th>
                     <th className="px-4 py-3 text-xs text-gray-500 font-medium uppercase tracking-wider">Changed</th>
@@ -131,12 +132,25 @@ export default function LogsPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-gray-300 whitespace-nowrap">{formatDate(entry.startedAt)}</td>
-                        <td className="px-4 py-3 text-gray-300">{entry.planName ?? <span className="text-gray-500 italic">Manual</span>}</td>
-                        <td className="px-4 py-3 text-gray-400">{entry.repoName ?? entry.repoId}</td>
+                        <td className="px-4 py-3 text-gray-300 max-w-0 w-[18%] mid:w-[30%]">
+                          {entry.planName != null ? (
+                            <TruncatedText text={entry.planName} className="truncate" />
+                          ) : (
+                            <span className="text-gray-500 italic">Manual</span>
+                          )}
+                        </td>
+                        <td className="max-mid:hidden px-4 py-3 text-gray-400 max-w-0 w-[25%]">
+                          <TruncatedText
+                            text={entry.repoName ?? entry.repoId}
+                            className="truncate"
+                          />
+                        </td>
                         <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatDuration(entry.durationSeconds, true)}</td>
                         <td className="px-4 py-3 text-gray-400">{entry.filesNew.toLocaleString()}</td>
                         <td className="px-4 py-3 text-gray-400">{entry.filesChanged.toLocaleString()}</td>
-                        <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatBytes(entry.bytesAdded)}</td>
+                        <td className="px-4 py-3 text-gray-400 whitespace-nowrap">
+                          {formatBytes(entry.bytesAdded)}
+                        </td>
                         <td className="px-4 py-3 font-mono text-blue-400 text-xs">
                           {entry.snapshotId ? (
                             <button

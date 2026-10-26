@@ -6,7 +6,7 @@
 
 import type { BackupPlan, ExcludeFile, PlanWebhook } from "./types";
 import type { TreeRulesInput } from "./planTree";
-import { parsePackSize } from "./utils";
+import { EMPTY_RETENTION_FIELDS, parsePackSize, parseRetention, retentionToFields, type RetentionFields } from "./utils";
 
 export type PlanTab = "files" | "retention" | "advanced" | "tags";
 export const PLAN_TABS: PlanTab[] = ["files", "retention", "advanced", "tags"];
@@ -41,11 +41,8 @@ export interface PlanFormState {
   excludeText: string;
   excludeIfPresent: string[];
   excludeCaches: boolean;
-  keepLast: string;
-  keepDaily: string;
-  keepWeekly: string;
-  keepMonthly: string;
-  keepYearly: string;
+  /** The five retention inputs as typed (blank = unset); see `parseRetention`. */
+  retention: RetentionFields;
   limitUpload: string;
   limitDownload: string;
   packSize: string;
@@ -70,11 +67,7 @@ export function emptyForm(): PlanFormState {
     excludeText: "",
     excludeIfPresent: [],
     excludeCaches: false,
-    keepLast: "",
-    keepDaily: "",
-    keepWeekly: "",
-    keepMonthly: "",
-    keepYearly: "",
+    retention: { ...EMPTY_RETENTION_FIELDS },
     limitUpload: "",
     limitDownload: "",
     packSize: "",
@@ -100,11 +93,7 @@ export function formFromPlan(plan: BackupPlan, repoStillExists: boolean): PlanFo
     excludeText: plan.excludes.join("\n"),
     excludeIfPresent: plan.excludeIfPresent,
     excludeCaches: plan.excludeCaches,
-    keepLast: plan.retention?.keepLast?.toString() ?? "",
-    keepDaily: plan.retention?.keepDaily?.toString() ?? "",
-    keepWeekly: plan.retention?.keepWeekly?.toString() ?? "",
-    keepMonthly: plan.retention?.keepMonthly?.toString() ?? "",
-    keepYearly: plan.retention?.keepYearly?.toString() ?? "",
+    retention: retentionToFields(plan.retention),
     limitUpload: plan.limitUpload?.toString() ?? "",
     limitDownload: plan.limitDownload?.toString() ?? "",
     packSize: plan.packSize?.toString() ?? "",
@@ -141,18 +130,7 @@ const toNum = (s: string): number | undefined => {
 };
 
 export function hasRetention(f: PlanFormState): boolean {
-  return [f.keepLast, f.keepDaily, f.keepWeekly, f.keepMonthly, f.keepYearly].some((s) => s.trim() !== "");
-}
-
-function retentionOf(f: PlanFormState): BackupPlan["retention"] {
-  if (!hasRetention(f)) return undefined;
-  return {
-    keepLast: toNum(f.keepLast),
-    keepDaily: toNum(f.keepDaily),
-    keepWeekly: toNum(f.keepWeekly),
-    keepMonthly: toNum(f.keepMonthly),
-    keepYearly: toNum(f.keepYearly),
-  };
+  return Object.values(f.retention).some((s) => s.trim() !== "");
 }
 
 /** What the editor's preview tree needs to decide what's included: the sources and every
@@ -199,23 +177,16 @@ export function validatePlanForm(f: PlanFormState): FormIssue | null {
   const pack = parsePackSize(f.packSize);
   if ("error" in pack) return { where: "advanced", message: pack.error };
   // 0 means "unset" throughout the app (restic rejects a forget with no effective policy), so a
-  // 0/negative/non-numeric count is an error here rather than a silently dead rule.
-  const retention = retentionOf(f);
-  if (retention) {
-    const counts = Object.values(retention);
-    if (counts.every((v) => v === undefined) || counts.some((v) => v !== undefined && v < 1)) {
-      return {
-        where: "retention",
-        message: "Retention counts must be whole numbers of at least 1 — leave a field blank to disable it.",
-      };
-    }
-  }
+  // 0/negative/decimal/non-numeric count is an error here rather than a silently dead rule.
+  const retention = parseRetention(f.retention);
+  if ("error" in retention) return { where: "retention", message: retention.error };
   return null;
 }
 
 /** The plan to save. Call after `validatePlanForm` returned null. */
 export function buildPlan(f: PlanFormState, id: string): BackupPlan {
   const pack = parsePackSize(f.packSize);
+  const retention = parseRetention(f.retention);
   return {
     id,
     name: f.name.trim(),
@@ -225,7 +196,7 @@ export function buildPlan(f: PlanFormState, id: string): BackupPlan {
     excludes: savedExcludes(f),
     excludeIfPresent: f.excludeIfPresent,
     excludeCaches: f.excludeCaches,
-    retention: retentionOf(f),
+    retention: "value" in retention ? retention.value : undefined,
     limitUpload: toNum(f.limitUpload),
     limitDownload: toNum(f.limitDownload),
     webhooks: f.webhooks,
@@ -245,11 +216,11 @@ export function retentionSummary(f: PlanFormState): string {
   const add = (v: string, label: string) => {
     if (v.trim() !== "") parts.push(`${v.trim()} ${label}`);
   };
-  add(f.keepLast, "last");
-  add(f.keepDaily, "daily");
-  add(f.keepWeekly, "weekly");
-  add(f.keepMonthly, "monthly");
-  add(f.keepYearly, "yearly");
+  add(f.retention.keepLast, "last");
+  add(f.retention.keepDaily, "daily");
+  add(f.retention.keepWeekly, "weekly");
+  add(f.retention.keepMonthly, "monthly");
+  add(f.retention.keepYearly, "yearly");
   return parts.length ? `Keep ${parts.join(", ")}` : "Off";
 }
 

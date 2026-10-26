@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { listBackupPlans, listRepos, removeBackupPlan, saveBackupPlan } from "../lib/invoke";
+import { getDefaultRetention, listBackupPlans, listRepos, removeBackupPlan, saveBackupPlan } from "../lib/invoke";
 import type { Repository } from "../lib/types";
+import { parseRetention, retentionToFields } from "../lib/utils";
 import {
   PLAN_TABS,
   advancedIsCustom,
@@ -45,6 +46,8 @@ export default function BackupPlanEditPage() {
   const [error, setError] = useState("");
   const [issue, setIssue] = useState<FormIssue | null>(null);
   const [form, setForm] = useState<PlanFormState>(emptyForm);
+  // True when the retention fields were seeded from Settings' default policy (new plans only).
+  const [retentionFromDefault, setRetentionFromDefault] = useState(false);
 
   const update: FormUpdate = useCallback((patch) => {
     setForm((prev) => ({ ...prev, ...(typeof patch === "function" ? patch(prev) : patch) }));
@@ -93,8 +96,19 @@ export default function BackupPlanEditPage() {
           } else {
             setError("Backup plan not found.");
           }
-        } else if (allRepos.length > 0) {
-          setForm((prev) => ({ ...prev, repoId: allRepos[0].id }));
+        } else {
+          if (allRepos.length > 0) setForm((prev) => ({ ...prev, repoId: allRepos[0].id }));
+          // New plans only: seed retention from Settings' default policy. A failed load prefills
+          // nothing — the safe direction, since retention deletes snapshots.
+          const def = await getDefaultRetention().catch(() => null);
+          if (def?.enabled) {
+            const fields = retentionToFields(def.policy);
+            const parsed = parseRetention(fields);
+            if ("value" in parsed && parsed.value) {
+              setForm((prev) => ({ ...prev, retention: fields }));
+              setRetentionFromDefault(true);
+            }
+          }
         }
       } catch (err: any) {
         setError(String(err));
@@ -164,7 +178,7 @@ export default function BackupPlanEditPage() {
 
   const content: Record<PlanTab, React.ReactNode> = {
     files: <FilesTab form={form} update={update} active={tab === "files"} />,
-    retention: <RetentionTab form={form} update={update} />,
+    retention: <RetentionTab form={form} update={update} seededFromDefault={retentionFromDefault} />,
     advanced: <AdvancedTab form={form} update={update} />,
     tags: <TagsTab form={form} update={update} />,
   };

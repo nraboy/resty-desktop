@@ -71,8 +71,8 @@ pub(crate) fn parse_stats_json(stdout: &str) -> Result<ResticStats, String> {
 /// Parses `restic stats --mode raw-data --json` stdout into the on-disk stored-size figure
 /// (post-dedup, post-compression). Pure, mirroring `parse_stats_json` — same last-nonblank-line
 /// handling, same tolerance for restic emitting other NDJSON lines before the summary. Kept
-/// separate from `parse_stats_json` rather than folded in behind a mode flag: that function is
-/// shared with `get_snapshot_stats` in snapshot.rs, which never calls raw-data mode.
+/// separate from `parse_stats_json` rather than folded in behind a mode flag: the two share
+/// only `last_nonblank_line`, which `get_snapshot_stats` (snapshot.rs) also uses.
 pub(crate) fn parse_raw_data_size(stdout: &str) -> Result<u64, String> {
     let last_line = last_nonblank_line(stdout).ok_or_else(|| "No output from restic stats".to_string())?;
     let v: serde_json::Value = serde_json::from_str(last_line).map_err(|e| e.to_string())?;
@@ -225,6 +225,48 @@ pub(crate) fn unlock_quietly(repo: &FullRepository, restic_path: &str) {
     let _ = run_restic_with_path(repo, vec!["unlock"], restic_path);
 }
 
+/// Extra attempts a write op makes after its first "already locked" failure. The first
+/// retry is preceded by a stale-lock unlock (see `lock_retry_step`), the rest just wait.
+pub(crate) const LOCK_RETRIES: u32 = 2;
+
+/// restic's lock-collision text; every retry site (and `explain_lock_failure`) keys on it.
+pub(crate) fn is_lock_error(msg: &str) -> bool {
+    msg.contains("already locked")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LockRetry {
+    UnlockStaleThenRetry,
+    WaitThenRetry,
+    GiveUp,
+}
+
+/// The one decision every lock-retry loop makes, kept pure so the bound is unit-tested. The
+/// first lock failure clears *stale* locks (plain `restic unlock` — never `--remove-all`,
+/// which would also remove live ones) and retries; later ones just wait, as the loops always
+/// did. Nothing past `max_retries`, so no caller can loop. Only ever used on a path that has
+/// already passed `ensure_writable`, so the unlock never runs against a read-only repo.
+pub(crate) fn lock_retry_step(retries_done: u32, is_lock: bool, max_retries: u32) -> LockRetry {
+    if !is_lock || retries_done >= max_retries {
+        LockRetry::GiveUp
+    } else if retries_done == 0 {
+        LockRetry::UnlockStaleThenRetry
+    } else {
+        LockRetry::WaitThenRetry
+    }
+}
+
+/// Shown in front of a lock failure that survived the stale-lock unlock and the retries.
+pub(crate) const LOCK_FAILURE_PREFIX: &str = "Resty Desktop tried to clear stale locks and retried, \
+    but the repository is still locked. Another restic process (on this or another computer) may be using it. \
+    If you're sure nothing else is, wait 30 minutes for the lock to expire or run `restic unlock --remove-all` from a terminal.";
+
+/// Places `LOCK_FAILURE_PREFIX` *in front of* restic's text, never replacing it — the
+/// "already locked" wording must survive for anything that matches on it.
+pub(crate) fn explain_lock_failure(msg: &str) -> String {
+    format!("{LOCK_FAILURE_PREFIX}\n\n{msg}")
+}
+
 /// Error returned by every write-type command when the target repository is marked
 /// read-only. Read-type operations (browse, restore, search, stats, check, diff, and
 /// being a copy/mirror *source*) are unaffected — see `apply_repo_flags`.
@@ -336,6 +378,15 @@ pub async fn update_repo_path(
     new_path: String,
 ) -> Result<(), String> {
     db.update_repo_path(&repo_id, &new_path)
+}
+
+#[tauri::command]
+pub async fn update_repo_defer_prune(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    defer_prune: bool,
+) -> Result<(), String> {
+    db.set_repo_defer_prune(&repo_id, defer_prune)
 }
 
 #[tauri::command]
@@ -855,6 +906,46 @@ async fn run_one_prune_attempt(
     }
 }
 
+/// Runs `run_one_prune_attempt`, retrying up to `LOCK_RETRIES` times on restic's "already
+/// locked" error — `RepoLocks` only coordinates this app's own operations, not an external
+/// restic/Backrest/other-computer process (see CLAUDE.md's Concurrency section). The first
+/// retry is preceded by a stale-lock `restic unlock` (see `lock_retry_step`); a lock error
+/// that survives gets `LOCK_FAILURE_PREFIX`. A cancel before any re-attempt returns
+/// `Err("Cancelled")`, matching every other cancel path in the two prune commands.
+async fn run_prune_retrying_on_lock(
+    restic_path: &str,
+    full: &FullRepository,
+    prune_handle: &PruneHandle,
+) -> Result<PruneAttempt, String> {
+    let cancelled = || prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+    let mut outcome = run_one_prune_attempt(restic_path, full, prune_handle).await?;
+    let mut retries = 0;
+    loop {
+        let is_lock = matches!(&outcome, PruneAttempt::Failed(msg) if is_lock_error(msg));
+        match lock_retry_step(retries, is_lock, LOCK_RETRIES) {
+            LockRetry::GiveUp => break,
+            LockRetry::UnlockStaleThenRetry => {
+                let _ = run_restic_blocking(full.clone(), vec!["unlock".to_string()], restic_path.to_string()).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
+            LockRetry::WaitThenRetry => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
+        }
+        retries += 1;
+        // A cancel during the unlock or the sleep must stop us from spawning another
+        // attempt — same reasoning as the cancellation checks before the first one.
+        if cancelled() {
+            return Err("Cancelled".to_string());
+        }
+        outcome = run_one_prune_attempt(restic_path, full, prune_handle).await?;
+    }
+    Ok(match outcome {
+        PruneAttempt::Failed(msg) if is_lock_error(&msg) => PruneAttempt::Failed(explain_lock_failure(&msg)),
+        other => other,
+    })
+}
+
 #[tauri::command]
 pub async fn prune_all_repos(
     app: tauri::AppHandle,
@@ -946,30 +1037,16 @@ pub async fn prune_all_repos(
                 break 'body Err("Cancelled".to_string());
             }
 
-            // Retry on a genuine EXTERNAL lock collision (a different machine/tool's restic
-            // process — RepoLocks above only coordinates this app's own operations).
-            let mut outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+            let outcome = match run_prune_retrying_on_lock(&restic_path, &full, &prune_handle).await {
                 Ok(o) => o,
                 Err(e) => break 'body Err(e),
             };
-            for _ in 0..2 {
-                match &outcome {
-                    PruneAttempt::Failed(msg) if msg.contains("already locked") => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                        if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                            break 'body Err("Cancelled".to_string());
-                        }
-                        outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
-                            Ok(o) => o,
-                            Err(e) => break 'body Err(e),
-                        };
-                    }
-                    _ => break,
-                }
-            }
 
             match outcome {
-                PruneAttempt::Success => {}
+                PruneAttempt::Success => {
+                    // Stamped per repo so a batch that stops partway still records the ones it finished.
+                    let _ = db.record_pruned(&repo.id);
+                }
                 PruneAttempt::Cancelled => break 'body Err("Cancelled".to_string()),
                 PruneAttempt::Failed(msg) => break 'body Err(format!("Prune failed for '{}': {}", repo.name, msg)),
             }
@@ -1063,34 +1140,16 @@ pub async fn prune_repo(
             break 'body Err("Cancelled".to_string());
         }
 
-        // Run the prune, retrying up to 2 additional times if it collides with a *different*
-        // process's or machine's genuine restic lock — RepoLocks above only coordinates this app's
-        // own operations, not an external restic/Backrest/other-computer process (see CLAUDE.md's
-        // Concurrency section). Matches apply_retention's retry pattern.
-        let mut outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
+        let outcome = match run_prune_retrying_on_lock(&restic_path, &full, &prune_handle).await {
             Ok(o) => o,
             Err(e) => break 'body Err(e),
         };
-        for _ in 0..2 {
-            match &outcome {
-                PruneAttempt::Failed(msg) if msg.contains("already locked") => {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    // A cancel during the inter-retry sleep must stop us from spawning another
-                    // attempt — same reasoning as the cancellation check above.
-                    if prune_handle.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                        break 'body Err("Cancelled".to_string());
-                    }
-                    outcome = match run_one_prune_attempt(&restic_path, &full, &prune_handle).await {
-                        Ok(o) => o,
-                        Err(e) => break 'body Err(e),
-                    };
-                }
-                _ => break,
-            }
-        }
 
         match outcome {
-            PruneAttempt::Success => Ok(()),
+            PruneAttempt::Success => {
+                let _ = db.record_pruned(&repo_id);
+                Ok(())
+            }
             PruneAttempt::Cancelled => Err("Cancelled".to_string()),
             PruneAttempt::Failed(msg) => Err(msg),
         }
@@ -1254,11 +1313,70 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
 mod tests {
     use super::{
         apply_backend_env, apply_from_repo_flags, apply_from_repo_password, apply_repo_flags,
-        apply_repo_password, ensure_writable, last_nonblank_line, merge_credentials,
-        parse_raw_data_size, parse_stats_json, validate_init_password, validate_restic_path,
-        READ_ONLY_REPO_ERROR,
+        apply_repo_password, ensure_writable, explain_lock_failure, is_lock_error,
+        last_nonblank_line, lock_retry_step, merge_credentials, parse_raw_data_size,
+        parse_stats_json, validate_init_password, validate_restic_path, LockRetry,
+        LOCK_FAILURE_PREFIX, LOCK_RETRIES, READ_ONLY_REPO_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
+
+    // ── lock retry policy ──────────────────────────────────────────────────
+
+    const RESTIC_LOCK_ERROR: &str = "unable to create lock in backend: repository is already locked \
+        exclusively by PID 4242 on host by user (UID 501, GID 20)";
+
+    #[test]
+    fn is_lock_error_matches_restic_text_only() {
+        assert!(is_lock_error(RESTIC_LOCK_ERROR));
+        assert!(!is_lock_error("Fatal: wrong password or no key found"));
+        assert!(!is_lock_error(""));
+    }
+
+    #[test]
+    fn lock_retry_step_unlocks_first_then_waits_then_gives_up() {
+        assert_eq!(lock_retry_step(0, true, LOCK_RETRIES), LockRetry::UnlockStaleThenRetry);
+        assert_eq!(lock_retry_step(1, true, LOCK_RETRIES), LockRetry::WaitThenRetry);
+        assert_eq!(lock_retry_step(2, true, LOCK_RETRIES), LockRetry::GiveUp);
+    }
+
+    #[test]
+    fn lock_retry_step_never_retries_a_non_lock_error() {
+        for done in 0..5 {
+            assert_eq!(lock_retry_step(done, false, LOCK_RETRIES), LockRetry::GiveUp);
+        }
+    }
+
+    #[test]
+    fn lock_retry_step_with_one_retry_unlocks_exactly_once() {
+        // execute_backup's bound: one unlock+retry, then it must stop.
+        assert_eq!(lock_retry_step(0, true, 1), LockRetry::UnlockStaleThenRetry);
+        assert_eq!(lock_retry_step(1, true, 1), LockRetry::GiveUp);
+    }
+
+    #[test]
+    fn lock_retry_step_terminates_for_any_error_stream() {
+        // Even if every attempt keeps failing on a lock, the loop must run out.
+        let mut retries = 0;
+        let mut unlocks = 0;
+        loop {
+            match lock_retry_step(retries, true, LOCK_RETRIES) {
+                LockRetry::GiveUp => break,
+                LockRetry::UnlockStaleThenRetry => unlocks += 1,
+                LockRetry::WaitThenRetry => {}
+            }
+            retries += 1;
+            assert!(retries <= LOCK_RETRIES, "retry loop did not terminate");
+        }
+        assert_eq!((retries, unlocks), (LOCK_RETRIES, 1));
+    }
+
+    #[test]
+    fn explain_lock_failure_keeps_restic_text() {
+        let msg = explain_lock_failure(RESTIC_LOCK_ERROR);
+        assert!(msg.starts_with(LOCK_FAILURE_PREFIX));
+        assert!(msg.ends_with(RESTIC_LOCK_ERROR));
+        assert!(is_lock_error(&msg));
+    }
 
     // ── validate_init_password ─────────────────────────────────────────────
 

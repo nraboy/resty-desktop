@@ -14,6 +14,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuild
 use tauri::{Emitter, Manager};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 struct MenuState {
     app_submenu: tauri::menu::Submenu<tauri::Wry>,
@@ -48,6 +49,58 @@ fn show_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+/// What the window-state plugin saves and restores. Never VISIBLE: the plugin's restore calls
+/// show()+set_focus() for it, which would break the hidden login launch (`should_start_hidden`)
+/// and the `visible: false` startup path. DECORATIONS/FULLSCREEN aren't app-controlled state
+/// worth persisting. A fn rather than a const because the plugin's bitflags version (and so
+/// whether the flag operators are const) isn't pinned.
+fn window_state_flags() -> StateFlags {
+    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED
+}
+
+/// The inner size to shrink to so the window's outer frame fits `area`, or `None` if it already
+/// fits. `outer - inner` is the frame (title bar, borders) that has to keep fitting too.
+fn fitted_inner_size(
+    outer: tauri::PhysicalSize<u32>,
+    inner: tauri::PhysicalSize<u32>,
+    area: tauri::PhysicalSize<u32>,
+) -> Option<tauri::PhysicalSize<u32>> {
+    if outer.width <= area.width && outer.height <= area.height {
+        return None;
+    }
+    let frame_w = outer.width.saturating_sub(inner.width);
+    let frame_h = outer.height.saturating_sub(inner.height);
+    Some(tauri::PhysicalSize::new(
+        inner.width.min(area.width.saturating_sub(frame_w)),
+        inner.height.min(area.height.saturating_sub(frame_h)),
+    ))
+}
+
+/// Shrinks (and re-centers) the window if it no longer fits its monitor. The window-state plugin
+/// restores *physical* px with no clamping, so a size saved on a larger or differently scaled
+/// display can come back bigger than the current one. A maximized window is left alone — the OS
+/// sizes it, and its outer frame can legitimately exceed the work area on Windows. Best-effort
+/// throughout: with no monitor to measure (possible on Wayland) the restored size stands.
+fn fit_to_monitor(window: &tauri::WebviewWindow) {
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+    let monitor = match window.current_monitor() {
+        Ok(Some(m)) => m,
+        _ => match window.primary_monitor() {
+            Ok(Some(m)) => m,
+            _ => return,
+        },
+    };
+    let (Ok(outer), Ok(inner)) = (window.outer_size(), window.inner_size()) else {
+        return;
+    };
+    if let Some(fitted) = fitted_inner_size(outer, inner, monitor.work_area().size) {
+        let _ = window.set_size(tauri::Size::Physical(fitted));
+        let _ = window.center();
     }
 }
 
@@ -288,6 +341,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(window_state_flags())
+                // Restored by hand in setup() so fit_to_monitor runs right after it, before the
+                // window is ever shown. The plugin still tracks and saves "main" regardless.
+                .skip_initial_state("main")
+                .build(),
+        )
         // app_name must be set explicitly: it defaults to package_info().name
         // ("Resty Desktop", with a space), and auto-launch writes the Linux Exec=
         // line and the Windows Run value unquoted. Also becomes the autostart
@@ -427,6 +488,12 @@ pub fn run() {
             // auth state (a locked app in the tray is now a normal, supported state).
             // Otherwise close quits the app.
             if let Some(window) = app.get_webview_window("main") {
+                // Must precede the show/hide branch below: the window is still hidden here, so
+                // the restored size/position never visibly jumps. Errors (first launch, a
+                // corrupt state file) just leave the tauri.conf.json default in place.
+                let _ = window.restore_state(window_state_flags());
+                fit_to_monitor(&window);
+
                 let app_handle = app.handle().clone();
                 let win = window.clone();
                 window.on_window_event(move |event| {
@@ -516,6 +583,7 @@ pub fn run() {
             repo::rename_repo,
             repo::update_repo_path,
             repo::update_repo_read_only,
+            repo::update_repo_defer_prune,
             // plan tree preview
             plan_tree::tree_supported,
             plan_tree::tree_env,
@@ -598,6 +666,8 @@ pub fn run() {
             backup_plan::list_backup_plans,
             backup_plan::save_backup_plan,
             backup_plan::remove_backup_plan,
+            backup_plan::get_default_retention,
+            backup_plan::set_default_retention,
             // schedules
             schedule::list_schedules,
             schedule::save_schedule,
@@ -642,7 +712,47 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::should_start_hidden;
+    use super::{fitted_inner_size, should_start_hidden};
+    use tauri::PhysicalSize;
+
+    fn sz(w: u32, h: u32) -> PhysicalSize<u32> {
+        PhysicalSize::new(w, h)
+    }
+
+    #[test]
+    fn fitted_inner_size_none_when_it_fits() {
+        assert_eq!(fitted_inner_size(sz(1366, 828), sz(1366, 800), sz(1920, 1040)), None);
+        // Exactly filling the work area still fits.
+        assert_eq!(fitted_inner_size(sz(1920, 1040), sz(1920, 1012), sz(1920, 1040)), None);
+    }
+
+    #[test]
+    fn fitted_inner_size_shrinks_oversized_keeps_frame() {
+        // 28px title bar: the inner size must leave room for it inside the 1040px work area.
+        assert_eq!(
+            fitted_inner_size(sz(2560, 1428), sz(2560, 1400), sz(1920, 1040)),
+            Some(sz(1920, 1012))
+        );
+    }
+
+    #[test]
+    fn fitted_inner_size_only_caps_overflowing_axis() {
+        // Too tall, width fine: width must come back untouched.
+        assert_eq!(
+            fitted_inner_size(sz(1366, 1100), sz(1366, 1072), sz(1920, 1040)),
+            Some(sz(1366, 1012))
+        );
+        // Too wide, height fine.
+        assert_eq!(
+            fitted_inner_size(sz(2000, 828), sz(2000, 800), sz(1920, 1040)),
+            Some(sz(1920, 800))
+        );
+    }
+
+    #[test]
+    fn fitted_inner_size_saturates_when_frame_exceeds_area() {
+        assert_eq!(fitted_inner_size(sz(300, 300), sz(100, 100), sz(50, 50)), Some(sz(0, 0)));
+    }
 
     // Pins the "all three required" rule — see should_start_hidden's doc comment. Each of the
     // seven non-all-true combinations must stay false; only from_autostart && tray_on &&

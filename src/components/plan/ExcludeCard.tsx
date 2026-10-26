@@ -222,7 +222,7 @@ export default function ExcludeCard({ form, update }: FormProps) {
                 className="flex items-center justify-between gap-3 bg-gray-800 rounded-lg px-3 py-2"
               >
                 <span className="text-xs font-mono text-gray-300 truncate flex-1">{f.path}</span>
-                <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0">
+                <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0 whitespace-nowrap">
                   <input
                     type="checkbox"
                     checked={f.ignoreCase}
