@@ -101,6 +101,7 @@ src-tauri/
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
       plan_rules.rs         # Verified port of restic's exclude matching: decides what a plan includes — see docs/backup-plan-tree.md
       plan_edit.rs          # Turns tree clicks into verified source/pattern edits (carve-out chains, glob escaping) and renders a plan as restic CLI files — see docs/backup-plan-tree.md
+      plan_listfiles.rs     # Reads `--files-from` list files like restic (trim, comments, Go filepath.Glob) into read-only extra sources for the tree — see docs/backup-plan-tree.md
       plan_tree.rs          # Commands behind the plan editor's tree preview: list folders, classify paths, streamed subtree scans — see docs/backup-plan-tree.md
       notify.rs             # Global notification toggles (started/success-changed/success-unchanged/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md

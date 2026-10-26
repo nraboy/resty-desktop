@@ -166,6 +166,7 @@ export function treeRulesFromForm(f: PlanFormState): TreeRulesInput {
     excludeIfPresent: f.excludeIfPresent,
     excludeCaches: f.excludeCaches,
     excludeFiles: f.excludeFiles,
+    filesFrom: f.filesFrom,
   };
 }
 

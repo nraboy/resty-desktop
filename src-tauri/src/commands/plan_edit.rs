@@ -128,6 +128,9 @@ pub(crate) fn apply_edit(
         }
     }
     work.sources = sources;
+    // Sources from path-list files are the list file's, not the plan's: they take part in every
+    // check (they are sources to the engine) but are never added, removed or rewritten here.
+    work.list_sources = input.list_sources.iter().map(|s| style.clean(s.trim())).collect();
     let outcome = match action.kind.as_str() {
         "exclude" => do_exclude(work, &path, action.pattern.as_deref().unwrap_or(""), probe, read, getenv)?,
         "include" => do_include(work, &path, action.scope.as_deref() == Some("folder"), probe, read, getenv)?,
@@ -202,6 +205,8 @@ fn do_exclude(
     if after.included {
         return Err(if is_source {
             "This folder is a backup source itself, so patterns don't apply to it — remove it from the sources instead.".to_string()
+        } else if work.list_sources.iter().any(|s| s == path) {
+            "This comes from a path-list file, so patterns can't exclude it — remove or change that line in the file.".to_string()
         } else {
             format!("`{pattern}` doesn't exclude it: {}", explain(&b1.origins, &after.reason))
         });
@@ -395,6 +400,10 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     if rules.exclude_caches {
         cmd.push("--exclude-caches".to_string());
     }
+    for f in &rules.files_from {
+        cmd.push("--files-from".to_string());
+        quote(f, &mut cmd);
+    }
     for s in &rules.sources {
         quote(&rules.style.to_native(&rules.style.clean(s)), &mut cmd);
     }
@@ -405,6 +414,9 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     ];
     if n_ci > 0 {
         notes.push("Case-insensitive patterns are in their own file because restic keeps them in a separate list.".to_string());
+    }
+    if !rules.files_from.is_empty() {
+        notes.push("Path-list files are passed as --files-from; restic reads them when it runs, so use absolute paths inside them.".to_string());
     }
     if rules.style == PathStyle::Windows {
         notes.push("The command is written for PowerShell. In cmd.exe, replace the single quotes with double quotes.".to_string());

@@ -74,7 +74,6 @@ export default function FilesTab({ form, update, active }: FormProps & { active:
           onApplyEdit={applyEdit}
           history={history}
           onUndo={undo}
-          listFileCount={form.filesFrom.length}
         />
       ) : null}
       <ListFilesCard form={form} update={update} />

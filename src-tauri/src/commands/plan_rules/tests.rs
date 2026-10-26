@@ -104,6 +104,7 @@ fn rules(sources: &[&str], patterns: &[&str]) -> PlanRules {
         markers: vec![],
         exclude_caches: false,
         style: PathStyle::Unix,
+        ..Default::default()
     }
 }
 
@@ -562,6 +563,7 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
             markers,
             exclude_caches: false,
             style: PathStyle::NATIVE,
+            ..Default::default()
         })
         .unwrap();
         let probe = FsProbe::default();
@@ -614,6 +616,7 @@ fn engine_speed() {
         markers: vec![],
         exclude_caches: false,
         style: PathStyle::Unix,
+        ..Default::default()
     })
     .unwrap();
     let probe = MockProbe::default();

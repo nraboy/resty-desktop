@@ -122,8 +122,7 @@ folders, a per-folder time budget with a "not fully checked" state.
 tabs and undo history live in `components/plan/` and `lib/planForm.ts`; see docs/frontend.md). The
 sources of a plan are **the folders and files picked in this tree** — `SourcesCard` (a plain path
 list) only renders when `tree_supported` is false, which no platform does today. It is shown for
-every plan; one with path-list files gets a note that their entries aren't in the tree yet (planned:
-shown read-only with a "from list file X, line N" mark). The tree starts at the whole filesystem
+every plan; the entries of its path-list files appear read-only (see below). The tree starts at the whole filesystem
 (`/`, or the drives on Windows), expands down to each source, and the plan with no source starts
 with nothing selected; a "Sources only" view is a shortcut for deep sources. Save needs at least one
 source (a folder/file or a path-list file).
@@ -185,6 +184,42 @@ source (a folder/file or a path-list file).
   the Rust commands are covered by unit tests, but the event path between them is only exercised in
   the real app.
 
+## Path-list files in the tree (`--files-from`)
+
+`commands/plan_listfiles.rs` reads a plan's list files the way restic does, and each line's result
+becomes one more **source** — `PlanRules::list_sources` / `TreeRulesInput.list_sources`, which the
+engine treats exactly like the plan's own sources (exempt themselves, contents judged; verified:
+restic gives `--files-from` entries and glob matches the same root treatment as path arguments).
+`tree_list_files(files)` returns `ListEntry { path, file, line, pattern }` plus `RuleProblem`s; the
+tree card loads it when the list of files changes (and on Refresh), shows the entries with a
+**"From list"** pill and a tooltip line ("Listed on line 3 of …" / "Matched by `…/*` on line 4 of …"),
+and merges them into the rules it sends everywhere (verdicts, scans, edits, export).
+
+What restic does, checked against 0.19.1 and reproduced (`parse_lines`, `glob`):
+- Lines are trimmed (whitespace, `\r`, a BOM on the file); blank lines and lines starting with `#` —
+  also indented ones — are skipped. `~` and `$VAR` are **not** expanded.
+- The rest goes through Go's `filepath.Glob` (`**` is just `*`: one path component; `*` matches
+  dotfiles; results sorted). A pattern matching nothing — including a path that doesn't exist — is
+  skipped with a warning, not an error; a malformed one makes restic refuse to run. The tree reports
+  both per line (`file:line`).
+- A **relative** entry is resolved from restic's working directory, which the editor can't know:
+  reported, not shown. At most 10,000 entries are shown (`MAX_LIST_ENTRIES`), then a note.
+
+**Read-only by design.** Edits never add, remove or rewrite list sources: `apply_edit` keeps them in
+`work.list_sources` (they take part in every verification but are not in the outcome), clicking a
+"From list" row says which line of which file to change instead, and an exclude pattern that can't
+affect one (a root is exempt) is refused with a message naming the list file. Patterns *inside* a
+list source work like anywhere. The CLI export names the files (`--files-from`) rather than
+inlining the entries. Opening the file from the app isn't offered: the shell plugin is deliberately
+limited to http(s) links, and widening it is a decision of its own. Editing the list from the tree
+(with a warning, since restic reads the file at backup time) is the natural next step.
+
+Tested by unit tests (parsing, glob against a real folder, caps, the engine/edit behaviour) and by
+`restic_reads_list_files_like_the_engine_does` (`#[ignore]`, needs restic; also in the `restic-compat`
+workflow): random trees, random list files (explicit paths, `*`/`?`/`[..]`/`**`, missing paths,
+comments, padding, CRLF) plus exclude patterns, engine vs a dry run, node by node — last run
+2,764 nodes over 180 cases and three seeds, zero disagreements.
+
 ## Editing from the tree (phase 3, slice 1)
 
 Clicking a row's box inside a source opens a dialog (`PlanTreeEditDialog`); nothing changes until the user confirms,
@@ -239,7 +274,6 @@ or removing a *source* skips the dialog (see above) unless it would absorb other
    the CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
    exclude editors, and (deferred) include patterns resolved to an explicit
    `--files-from-verbatim` list at backup time (restic has no include patterns).
-3b. Path-list files in the tree — not yet: parse the list, expand globs like restic (`filepath.Glob`,
-   `**` = a single `*`), show the entries read-only with their source file and line, later edit with a
-   warning. Until then the tree notes that a plan has list files.
+3b. Path-list files in the tree — done, read-only (above). Still to do: edit the list file from the
+   tree (with a warning), and open it from the app.
 4. Polish: size estimates, keyboard/accessibility; verifying on a real Windows machine.

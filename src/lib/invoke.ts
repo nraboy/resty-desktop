@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
-import type { Classification, TreeEnv, TreeListing, TreeRulesInput } from "./planTree";
+import type { Classification, ListFilesResult, TreeEnv, TreeListing, TreeRulesInput } from "./planTree";
 import type { EditAction, EditOutcome, ExportOut, MatchPreview } from "./planTreeEdit";
 
 // ── auth ──────────────────────────────────────────────────────────────────
@@ -411,6 +411,10 @@ export const treeSupported = (): Promise<boolean> =>
 /** Where the tree starts (`/`, or one root per drive on Windows) and the home folder. */
 export const treeEnv = (): Promise<TreeEnv> =>
   invoke("tree_env");
+
+/** The sources a plan's path-list files (`--files-from`) add, expanded like restic reads them. */
+export const treeListFiles = (files: string[]): Promise<ListFilesResult> =>
+  invoke("tree_list_files", { files });
 
 /** `dir` / `file` / `symlink` / `other` / `missing` for each path (`follow`: a symlink reports its target). */
 export const treeKinds = (paths: string[], follow = false): Promise<string[]> =>

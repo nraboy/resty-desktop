@@ -55,8 +55,9 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
   const mode = modeFor(target);
   const windows = isWindows();
   const options = useMemo(
-    () => scopeOptions(target.path, target.kind, rules.sources, windows),
-    [target, rules.sources, windows],
+    // Sources from path-list files bound a scope like the plan's own: a pattern never reaches above one.
+    () => scopeOptions(target.path, target.kind, [...rules.sources, ...(rules.listSources ?? [])], windows),
+    [target, rules.sources, rules.listSources, windows],
   );
   const [optionId, setOptionId] = useState("exact");
   const [pattern, setPattern] = useState(options[0]?.pattern ?? "");

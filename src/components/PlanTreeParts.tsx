@@ -49,9 +49,14 @@ export function StateBox({ state }: { state: DisplayState }) {
   }
 }
 
-/** Marks a row that is one of the plan's backup sources (the folders and files the tree builds). */
-export function SourcePill() {
-  return (
+/** Marks a row that is a backup source: one the plan picked, or (`kind="list"`) one a path-list
+ * file contributes, which is read-only here. */
+export function SourcePill({ kind = "plan" }: { kind?: "plan" | "list" }) {
+  return kind === "list" ? (
+    <span className="flex-shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-px rounded border border-gray-700 bg-gray-800 text-gray-400">
+      From list
+    </span>
+  ) : (
     <span className="flex-shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-px rounded border border-blue-700/50 bg-blue-900/40 text-blue-300">
       Source
     </span>

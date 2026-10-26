@@ -217,6 +217,7 @@ describe("treeRulesFromForm", () => {
       excludeIfPresent: [".x"],
       excludeCaches: true,
       excludeFiles: [],
+      filesFrom: [],
     });
     // Expert text goes in raw, comments and blanks included.
     expect(treeRulesFromForm(valid({ excludeMode: "expert", excludeText: "a\n# c\n\nb" })).excludes).toEqual(["a", "# c", "", "b"]);

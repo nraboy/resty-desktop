@@ -934,6 +934,12 @@ pub struct RuleInput {
 pub struct PlanRules {
     /// Absolute source paths (`restic backup <paths>`).
     pub sources: Vec<String>,
+    /// Sources contributed by `--files-from` list files, already expanded (see `plan_listfiles`).
+    /// The engine treats them exactly like `sources`; they are kept apart so edits never rewrite
+    /// them (they belong to the list file) and the CLI export can name the file instead.
+    pub list_sources: Vec<String>,
+    /// The `--files-from` files themselves, for the CLI export only.
+    pub files_from: Vec<String>,
     /// All patterns, in the order they reach restic (see the module docs for that order).
     pub rules: Vec<RuleInput>,
     /// `--exclude-if-present` specs.
@@ -1015,7 +1021,16 @@ impl Engine {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Engine {
             style: rules.style,
-            sources: rules.sources.iter().map(|s| rules.style.clean(s)).collect(),
+            sources: {
+                let mut seen = std::collections::HashSet::new();
+                rules
+                    .sources
+                    .iter()
+                    .chain(&rules.list_sources)
+                    .map(|s| rules.style.clean(s))
+                    .filter(|c| seen.insert(c.clone()))
+                    .collect()
+            },
             cs: PatternList::new(cs, false),
             cs_ids,
             ci: PatternList::new(ci, true),
@@ -1124,6 +1139,21 @@ impl Engine {
             Verdict { included: false, reason: Some(Reason::OutsideSources), at: None, reincluded_by: None }
         }
     }
+}
+
+/// The root a clean canonical path starts at — `/`, or a drive such as `C:/` — or `None` for a
+/// relative path.
+pub fn root_of(path: &str) -> Option<&str> {
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/' {
+        return Some(&path[..3]);
+    }
+    path.starts_with('/').then(|| &path[..1])
+}
+
+/// Is this canonical path a root (`/`, `C:/`)?
+pub fn is_root(path: &str) -> bool {
+    root_of(path) == Some(path)
 }
 
 /// `path` relative to `src` when it is `src` or below it (`""` for `src` itself). A root

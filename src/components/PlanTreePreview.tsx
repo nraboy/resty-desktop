@@ -5,6 +5,7 @@ import {
   treeEnv,
   treeKinds,
   treeListDir,
+  treeListFiles,
   treePlanEdit,
   treeScanCancel,
   treeScanStart,
@@ -25,6 +26,8 @@ import {
   visibleWindow,
   type BoxClick,
   type DisplayState,
+  type ListEntry,
+  type ListFilesResult,
   type NodeInfo,
   type NodeVerdict,
   type RuleOrigin,
@@ -56,6 +59,10 @@ const FLUSH_MS = 100;
 
 type RootMode = "sources" | "filesystem";
 
+const NO_LIST: ListFilesResult = { entries: [], problems: [], truncated: false };
+/** Path-list problems listed in full before the rest are summarised. */
+const MAX_LIST_PROBLEMS = 5;
+
 interface ScanEventPayload extends ScanResult {
   scanId: number;
   path: string;
@@ -69,8 +76,6 @@ interface Props {
   /** Edits made from the tree, oldest first, each with a summary; `onUndo` takes back the latest. */
   history?: { summary: string }[];
   onUndo?: () => void;
-  /** How many path-list files the plan has: their entries aren't in the tree yet. */
-  listFileCount?: number;
   /** False while the preview's tab is hidden: nothing is loaded or scanned until it's shown
    * (the component stays mounted so its state survives a tab switch). Defaults to true. */
   active?: boolean;
@@ -114,7 +119,6 @@ export default function PlanTreePreview({
   onApplyEdit,
   history = [],
   onUndo,
-  listFileCount = 0,
   active = true,
 }: Props) {
   // The whole filesystem is the starting point; "Sources only" is a shortcut for a plan whose
@@ -138,8 +142,50 @@ export default function PlanTreePreview({
   const scans = useRef(new Map<string, ScanResult>());
   const origins = useRef(new Map<number, RuleOrigin>());
 
+  // Where the tree starts (`/`, or a drive list on Windows) comes from the backend; the OS's
+  // spelling of paths decides how the plan's sources are read (`C:\\Users\\me` ↔ `C:/Users/me`).
+  const windows = isWindows();
+  const [env, setEnv] = useState<TreeEnv | null>(null);
+  useEffect(() => {
+    treeEnv()
+      .then(setEnv)
+      .catch(() => setEnv({ windows, roots: [], home: null }));
+  }, [windows]);
+  const ready = env !== null;
+
+  // What the plan's path-list files add (`--files-from`): read-only sources, expanded by the
+  // backend the way restic reads them. Loaded when the list of files changes (and on Refresh).
+  const filesFrom = rules.filesFrom ?? [];
+  const filesFromKey = JSON.stringify(filesFrom);
+  const [listResult, setListResult] = useState<ListFilesResult>(NO_LIST);
+  const loadList = useCallback(async () => {
+    const files = JSON.parse(filesFromKey) as string[];
+    if (files.length === 0) {
+      setListResult(NO_LIST);
+      return;
+    }
+    try {
+      setListResult(await treeListFiles(files));
+    } catch (e) {
+      setListResult({ entries: [], problems: [{ what: files.join(", "), error: String(e) }], truncated: false });
+    }
+  }, [filesFromKey]);
+  useEffect(() => {
+    if (!ready || !active) return;
+    const t = setTimeout(loadList, filesFromKey === "[]" ? 0 : 350);
+    return () => clearTimeout(t);
+  }, [ready, active, loadList, filesFromKey]);
+  const listSources = useMemo(() => listResult.entries.map((e) => e.path), [listResult]);
+  /** Where each list-file source came from (the first line that named it). */
+  const listOrigin = useMemo(() => {
+    const m = new Map<string, ListEntry>();
+    for (const e of listResult.entries) if (!m.has(e.path)) m.set(e.path, e);
+    return m;
+  }, [listResult]);
+  const fullRules: TreeRulesInput = { ...rules, listSources };
+
   // Rules are debounced: typing a pattern shouldn't rescan on every keystroke.
-  const rulesKey = JSON.stringify(rules);
+  const rulesKey = JSON.stringify(fullRules);
   const [activeKey, setActiveKey] = useState(rulesKey);
   useEffect(() => {
     const t = setTimeout(() => setActiveKey(rulesKey), 350);
@@ -158,24 +204,18 @@ export default function PlanTreePreview({
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
-  // Where the tree starts (`/`, or a drive list on Windows) comes from the backend; the OS's
-  // spelling of paths decides how the plan's sources are read (`C:\\Users\\me` ↔ `C:/Users/me`).
-  const windows = isWindows();
-  const [env, setEnv] = useState<TreeEnv | null>(null);
-  useEffect(() => {
-    treeEnv()
-      .then(setEnv)
-      .catch(() => setEnv({ windows, roots: [], home: null }));
-  }, [windows]);
-  const ready = env !== null;
-
   /** The plan's sources in the tree's spelling: as edited now, and as the verdicts on screen know them. */
   const sourcesNow = useMemo(() => new Set(rules.sources.map((s) => toCanonical(s, windows))), [rules.sources, windows]);
-  const shownSources = useMemo(
+  const shownPlanSources = useMemo(
     () => Array.from(new Set(activeRules.sources.map((s) => toCanonical(s, windows)))),
     [activeRules.sources, windows],
   );
-  const shownSourceSet = useMemo(() => new Set(shownSources), [shownSources]);
+  const shownSourceSet = useMemo(() => new Set(shownPlanSources), [shownPlanSources]);
+  /** Every source the verdicts on screen know: the plan's own and those from path-list files. */
+  const shownSources = useMemo(
+    () => Array.from(new Set([...shownPlanSources, ...(activeRules.listSources ?? [])])),
+    [shownPlanSources, activeRules.listSources],
+  );
   const pinned = useMemo(() => pinnedPaths(shownSources), [shownSources]);
 
   const roots = useMemo(
@@ -281,7 +321,8 @@ export default function PlanTreePreview({
     // Open the roots (and, browsing the whole filesystem, the way down to each source).
     const toOpen = new Set<string>(roots.map((r) => r.path));
     if (mode === "filesystem") {
-      for (const s of topLevelSources(rulesRef.current.sources.map((x) => toCanonical(x, windows))).slice(0, 10)) {
+      const all = [...rulesRef.current.sources, ...(rulesRef.current.listSources ?? [])];
+      for (const s of topLevelSources(all.map((x) => toCanonical(x, windows))).slice(0, 10)) {
         for (const a of ancestorsOf(s)) toOpen.add(a);
         toOpen.add(s);
       }
@@ -487,6 +528,14 @@ export default function PlanTreePreview({
   const onBox = async (path: string, kind: SourceKind) => {
     // Wait for the verdicts to catch up with the last edit, or the click would act on stale state.
     if (!onApplyEdit || !settled || busy) return;
+    const origin = listOrigin.get(path);
+    if (origin && !sourcesNow.has(path)) {
+      // Listed in a path-list file: the file is the source of truth, so the change is made there.
+      setActionError(
+        `${baseName(path)} is on line ${origin.line} of ${origin.file}. To stop backing it up, remove or change that line in the file (then Refresh).`,
+      );
+      return;
+    }
     const click = boxClick(sourcesNow.has(path), verdicts.current.get(path));
     if (click === "dialog") {
       openEdit(path, kind);
@@ -496,7 +545,7 @@ export default function PlanTreePreview({
     setBusy(true);
     try {
       const outcome = await treePlanEdit(
-        rules,
+        fullRules,
         click === "removeSource"
           ? { kind: "exclude", path, pattern: escapeGlob(path, windows) }
           : { kind: "include", path, scope: "item" },
@@ -515,11 +564,13 @@ export default function PlanTreePreview({
 
   const reload = () => {
     nodes.current.clear();
+    loadList();
     refresh();
   };
 
   const emptySources = mode === "sources" && roots.length === 0;
-  const nothingPicked = rules.sources.length === 0 && listFileCount === 0;
+  const nothingPicked = rules.sources.length === 0 && filesFrom.length === 0;
+  const listProblems = listResult.problems;
   const visible = rows.slice(start, end);
   const latest = history[history.length - 1];
 
@@ -647,11 +698,27 @@ export default function PlanTreePreview({
       {nothingPicked && !emptySources && (
         <p className="mb-3 text-xs text-gray-400">Nothing is selected yet. Open a folder and click its box to back it up.</p>
       )}
-      {listFileCount > 0 && (
-        <p className="mb-3 text-xs text-gray-500">
-          This plan also backs up everything listed in {listFileCount === 1 ? "its path-list file" : `its ${listFileCount} path-list files`}.
-          Those entries aren&apos;t shown in the tree yet.
-        </p>
+      {filesFrom.length > 0 && (
+        <div className="mb-3 text-xs text-gray-500">
+          <p>
+            {listResult.entries.length > 0
+              ? `${listResult.entries.length.toLocaleString()} ${listResult.entries.length === 1 ? "entry" : "entries"} from your path-list ${filesFrom.length === 1 ? "file" : "files"} ${listResult.entries.length === 1 ? "is" : "are"} marked “From list”. Change them by editing the file, then Refresh.`
+              : "Your path-list files don't add anything to the tree."}
+          </p>
+          {listProblems.length > 0 && (
+            <ul className="mt-1 space-y-1">
+              {listProblems.slice(0, MAX_LIST_PROBLEMS).map((p, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-amber-400">
+                  <WarningIcon className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+                  <span><span className="font-mono break-all">{p.what}</span>: {p.error}</span>
+                </li>
+              ))}
+              {listProblems.length > MAX_LIST_PROBLEMS && (
+                <li className="pl-5">…and {listProblems.length - MAX_LIST_PROBLEMS} more.</li>
+              )}
+            </ul>
+          )}
+        </div>
       )}
 
       {emptySources ? (
@@ -702,6 +769,15 @@ export default function PlanTreePreview({
                 const dim = state === "excluded" || missing;
                 const isDir = row.kind === "dir";
                 const isSource = shownSourceSet.has(row.path);
+                // From a path-list file (and not also one of the plan's own sources).
+                const fromList = !isSource ? listOrigin.get(row.path) : undefined;
+                if (fromList) {
+                  lines.unshift(
+                    fromList.pattern === row.path
+                      ? `Listed on line ${fromList.line} of ${fromList.file}.`
+                      : `Matched by \`${fromList.pattern}\` on line ${fromList.line} of ${fromList.file}.`,
+                  );
+                }
                 const click = boxClick(isSource, verdict);
                 return (
                   <div
@@ -709,7 +785,7 @@ export default function PlanTreePreview({
                     role="treeitem"
                     aria-level={row.depth + 1}
                     aria-expanded={isDir ? row.expanded : undefined}
-                    aria-label={`${row.name}: ${missing ? "missing" : STATE_LABEL[state]}${isSource ? " (backup source)" : ""}`}
+                    aria-label={`${row.name}: ${missing ? "missing" : STATE_LABEL[state]}${isSource ? " (backup source)" : fromList ? " (from a path-list file)" : ""}`}
                     className="absolute left-0 right-0 flex items-center gap-1.5 hover:bg-gray-800/40"
                     style={{ top, height: ROW_H, paddingLeft: indent }}
                   >
@@ -736,8 +812,8 @@ export default function PlanTreePreview({
                         type="button"
                         onClick={() => onBox(row.path, row.kind)}
                         className="rounded-[3px] hover:ring-2 hover:ring-blue-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 flex-shrink-0"
-                        title={boxTitle(click, verdict?.included, row.kind)}
-                        aria-label={`${row.name}: ${boxTitle(click, verdict?.included, row.kind).toLowerCase()}`}
+                        title={fromList ? "From a path-list file — edit the file to change it" : boxTitle(click, verdict?.included, row.kind)}
+                        aria-label={`${row.name}: ${(fromList ? "from a path-list file" : boxTitle(click, verdict?.included, row.kind)).toLowerCase()}`}
                       >
                         <StateBox state={state} />
                       </button>
@@ -764,6 +840,7 @@ export default function PlanTreePreview({
                       </span>
                     </Tooltip>
                     {isSource && <SourcePill />}
+                    {fromList && <SourcePill kind="list" />}
                     {missing && <span className="text-xs text-amber-400 ml-1">doesn&apos;t exist</span>}
                     {state === "unverified" && <span className="text-xs text-gray-500 ml-1">not fully checked</span>}
                     {state === "partial" && <span className="text-xs text-gray-500 ml-1">some items excluded</span>}
@@ -795,9 +872,9 @@ export default function PlanTreePreview({
       </p>
 
       {onApplyEdit && (
-        <PlanTreeEditDialog target={editTarget} rules={rules} onClose={() => setEditTarget(null)} onApply={onApplyEdit} />
+        <PlanTreeEditDialog target={editTarget} rules={fullRules} onClose={() => setEditTarget(null)} onApply={onApplyEdit} />
       )}
-      <PlanTreeExportDialog open={exportOpen} rules={rules} onClose={() => setExportOpen(false)} />
+      <PlanTreeExportDialog open={exportOpen} rules={fullRules} onClose={() => setExportOpen(false)} />
     </div>
   );
 }

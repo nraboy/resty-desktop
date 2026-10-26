@@ -5,7 +5,7 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, plan_tree, portal, repo, repo_locks, schedule, snapshot,
+    auth, backup_plan, browse, cache, notify, plan_listfiles, plan_tree, portal, repo, repo_locks, schedule, snapshot,
     transfer, webhook,
 };
 use rusqlite::Connection;
@@ -519,6 +519,7 @@ pub fn run() {
             // plan tree preview
             plan_tree::tree_supported,
             plan_tree::tree_env,
+            plan_listfiles::tree_list_files,
             plan_tree::tree_kinds,
             plan_tree::tree_list_dir,
             plan_tree::tree_classify,

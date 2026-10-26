@@ -27,6 +27,13 @@ use super::plan_rules::{
 #[serde(rename_all = "camelCase")]
 pub struct TreeRulesInput {
     pub sources: Vec<String>,
+    /// Sources contributed by path-list files, already expanded (`tree_list_files`) and in the
+    /// tree's spelling. Read-only: edits never add, remove or rewrite them.
+    #[serde(default)]
+    pub list_sources: Vec<String>,
+    /// The path-list files themselves (`--files-from`); only the CLI export uses them.
+    #[serde(default)]
+    pub files_from: Vec<String>,
     /// `--exclude` patterns, in order (blank lines and `#` comments are dropped here, exactly as
     /// `build_exclude_args` does at backup time).
     #[serde(default)]
@@ -197,6 +204,8 @@ pub(crate) fn build_rules(
     BuiltRules {
         rules: PlanRules {
             sources: input.sources.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            list_sources: input.list_sources.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            files_from: input.files_from.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string).collect(),
             rules,
             markers,
             exclude_caches: input.exclude_caches,

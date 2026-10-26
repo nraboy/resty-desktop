@@ -24,6 +24,11 @@ export interface TreeListing {
 /** The plan's include-deciding parts, as sent to the backend (mirrors `TreeRulesInput`). */
 export interface TreeRulesInput {
   sources: string[];
+  /** Sources contributed by path-list files, already expanded (`tree_list_files`), in the tree's
+   * spelling. Read-only: edits never add, remove or rewrite them. */
+  listSources?: string[];
+  /** The path-list files themselves; only the CLI export reads them. */
+  filesFrom?: string[];
   excludes: string[];
   excludeIfPresent: string[];
   excludeCaches: boolean;
@@ -37,6 +42,22 @@ export interface RuleOrigin {
   line?: number | null;
   /** From an `--iexclude-file` (case-insensitive list). */
   ignoreCase?: boolean;
+}
+
+/** One source a path-list file contributes: `path` came from `line` of `file` (`pattern` is the
+ * line itself, a glob when it differs from `path`). */
+export interface ListEntry {
+  path: string;
+  file: string;
+  line: number;
+  pattern: string;
+}
+
+export interface ListFilesResult {
+  entries: ListEntry[];
+  problems: RuleProblem[];
+  /** Stopped at the entry cap. */
+  truncated: boolean;
 }
 
 export interface RuleProblem {
