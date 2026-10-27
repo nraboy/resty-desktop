@@ -1142,9 +1142,10 @@ impl Engine {
             let mut rejected: Option<Verdict> = None;
             for comp in rel.split('/') {
                 current = self.style.join(&current, comp);
-                // From 0.19 a folder on the way to another explicit source is never rejected, so
-                // restic walks through it; its other children are then judged one by one.
-                if !self.judge_sources && self.leads_to_a_source(&current) {
+                // A folder on the way to another explicit source is never rejected (every restic
+                // we test, 0.17 and 0.19), so restic walks through it; its other children are then
+                // judged one by one.
+                if self.leads_to_a_source(&current) {
                     continue;
                 }
                 if let Some(reason) = self.judge_node(&current, probe) {

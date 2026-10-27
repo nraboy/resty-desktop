@@ -41,10 +41,10 @@ Don't "simplify" it: every oddity below was found by running restic.
   tree sends it back as `TreeRulesInput.judge_sources`, and the editor says so in a one-line note
   when it applies. An unreadable version means 0.19 behaviour. `count_matches` (the pattern
   dialog's live count) also counts a source a new pattern would drop under the old rule.
-- **A folder on the way to another explicit source is walked through (0.19).** With sources `/s`
-  and `/s/a/b`, a marker or pattern that rejects `/s/a` does not stop restic reaching `/s/a/b`; the
-  folder is kept and its other children are judged one by one (`Engine::leads_to_a_source`).
-  Before 0.19 this is unverified and the engine judges it as any node.
+- **A folder on the way to another explicit source is walked through.** With sources `/s` and
+  `/s/a/b`, a marker or pattern that rejects `/s/a` does not stop restic reaching `/s/a/b`; the
+  folder is kept and its other children are judged one by one (`Engine::leads_to_a_source`). Found
+  by the random multi-source cases; the same on 0.17.3 and 0.19.1.
 - **`exclude-if-present name[:header]`:** every item whose *parent directory* holds the marker file
   (header bytes must match, if given) is rejected, except the marker itself; the directory stays.
   `--exclude-caches` is `CACHEDIR.TAG:Signature: 8a477f597d28d172789f06886806bc55`.

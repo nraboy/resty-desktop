@@ -169,10 +169,12 @@ fn a_folder_on_the_way_to_another_source_is_walked_through_even_when_a_rule_reje
     assert!(e.classify("/s/a/b/c/f", &probe).included);
     // A sibling that leads nowhere is still dropped by the marker.
     assert!(!e.classify("/s/z", &probe).included);
-    // Older restics judge it like any node.
+    // The same on a restic before 0.19 (checked against 0.17.3), whose only difference is that it
+    // also judges the sources themselves.
     r.judge_sources = true;
     let old = Engine::new(&r).unwrap();
-    assert!(!old.classify("/s/a/other.txt", &probe).included);
+    assert!(old.classify("/s/a/other.txt", &probe).included);
+    assert!(!old.classify("/s/z", &probe).included);
 }
 
 // ── restic before 0.19 judges the source paths themselves (restic #5767) ─────
@@ -681,12 +683,6 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
         let mut all_nodes = nodes.clone();
         all_nodes.push(root.join(".nobackup"));
         for node in all_nodes.iter().filter(|p| p.exists()) {
-            // Before 0.19 a folder on the way to an explicit source is saved as a bare directory
-            // whatever the rules say about it as content of another source, so restic's list says
-            // nothing about whether the *rules* include it. (From 0.19 the engine models it.)
-            if judge && sources.iter().skip(1).any(|s| s != node && s.starts_with(node)) {
-                continue;
-            }
             let path = canon(node.to_str().unwrap());
             let path = path.as_str();
             let want = reported.contains(path);
