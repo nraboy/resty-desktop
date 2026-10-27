@@ -1052,12 +1052,15 @@ impl Engine {
         &self.sources
     }
 
-    /// How this engine's paths are spelled (see [`PathStyle`]).
-    /// Does this engine judge the source paths themselves (restic < 0.19)? See `PlanRules::judge_sources`.
-    pub fn judges_sources(&self) -> bool {
-        self.judge_sources
+    /// Is this source judged by the rules like any other node? That is restic before 0.19 (see
+    /// `PlanRules::judge_sources`), and only for a source with no other source below it: one that
+    /// contains another source is a folder of the target tree, kept as it is, whose children are
+    /// then judged one by one.
+    pub fn judges_source(&self, src: &str) -> bool {
+        self.judge_sources && !self.leads_to_a_source(src)
     }
 
+    /// How this engine's paths are spelled (see [`PathStyle`]).
     pub fn style(&self) -> PathStyle {
         self.style
     }
@@ -1120,6 +1123,11 @@ impl Engine {
     /// included if any of them includes it.
     pub fn classify(&self, path: &str, probe: &dyn Probe) -> Verdict {
         let path = self.style.clean(path);
+        // A folder on the way to another explicit source is part of the snapshot whatever the rules
+        // say about it (restic saves the target tree's folders without judging them).
+        if self.leads_to_a_source(&path) && self.sources.iter().any(|s| strip_source(&path, s).is_some()) {
+            return Verdict::included();
+        }
         let mut first_rejection: Option<Verdict> = None;
         let mut under_any = false;
         for src in &self.sources {
@@ -1127,7 +1135,7 @@ impl Engine {
             under_any = true;
             // restic < 0.19 judges the source path itself like any other node, and nothing below a
             // rejected source is reached; from 0.19 the source is exempt and only its contents count.
-            if self.judge_sources {
+            if self.judges_source(src) {
                 if let Some(reason) = self.judge_node(src, probe) {
                     // A rejected source is its own `at` unless the queried path is the source itself.
                     let at = if rel.is_empty() { None } else { Some(src.clone()) };

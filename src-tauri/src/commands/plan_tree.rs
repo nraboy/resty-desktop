@@ -505,8 +505,8 @@ pub(crate) fn count_matches(
     let mut scanned: u64 = 0;
     for src in sources {
         // restic < 0.19 judges the source path itself: a pattern can newly drop the whole source.
-        if base.judges_sources() {
-            let root = base.style().clean(src);
+        let root = base.style().clean(src);
+        if base.judges_source(&root) {
             if base.judge_node(&root, probe).is_some() {
                 continue; // already left out
             }

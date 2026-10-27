@@ -177,6 +177,23 @@ fn a_folder_on_the_way_to_another_source_is_walked_through_even_when_a_rule_reje
     assert!(!old.classify("/s/z", &probe).included);
 }
 
+#[test]
+fn a_source_holding_another_source_is_never_judged_and_its_folders_to_it_are_always_kept() {
+    // `s` matches the rule (it is a component of every path below), so every path here is rejected
+    // by it unless it is exempt.
+    for judge in [false, true] {
+        let e = Engine::new(&PlanRules { judge_sources: judge, ..rules(&["/s", "/s/a/b"], &["s"]) }).unwrap();
+        let probe = MockProbe::default();
+        // `/s` holds `/s/a/b`, so it is a folder of the target tree, not a judged leaf; `/s/a` leads to `b`.
+        assert!(included(&e, "/s") && included(&e, "/s/a"), "judge_sources={judge}");
+        // Their other children are judged one by one, and fail the rule.
+        assert!(!included(&e, "/s/other"), "judge_sources={judge}");
+        assert!(!e.classify("/s/a/other", &probe).included, "judge_sources={judge}");
+        // The leaf source: exempt from 0.19, judged (and dropped) before.
+        assert_eq!(included(&e, "/s/a/b"), !judge, "judge_sources={judge}");
+    }
+}
+
 // ── restic before 0.19 judges the source paths themselves (restic #5767) ─────
 
 /// The same plan as `rules`, for a restic older than 0.19.
