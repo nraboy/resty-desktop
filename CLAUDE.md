@@ -42,12 +42,14 @@ src/
   index.css             # Tailwind directives + global styles
   components/
     ActionButton.tsx      # Canonical row-action button: icon + label, label reveals as text at the `wide` breakpoint — see docs/frontend.md
+    AppendOnlyField.tsx   # "Append-only server" checkbox + info tooltip, for `rest:http(s)` paths only — see docs/frontend.md
     BackupWarningsList.tsx # Shared detail view for a backup that completed with warnings (restic exit 3): missing sources first, unreadable files, retention-skipped note, macOS FDA hint — see docs/frontend.md
     Button.tsx            # primary/secondary/danger/ghost variants
     ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen
     EmptyState.tsx        # Empty list placeholder
     icons.tsx             # Canonical glyph icons — single source for every icon used in more than one place; same meaning = same drawing
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
+    InsecureTlsField.tsx  # "Skip TLS certificate verification (--insecure-tls)" checkbox + tooltip, for `rest:https` paths only — see docs/frontend.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     plan/                 # The plan editor's pieces: PlanHeader (editable title, repo, actions), PlanTabs (accessible tablist), FilesTab (the file tree, ListFilesCard, FdaNotice, ExcludeCard, MarkersCard; SourcesCard = plain path list, fallback only), RetentionTab, AdvancedTab (+ WebhooksCard), TagsTab
@@ -57,6 +59,7 @@ src/
     PlanTreeParts.tsx     # The tree's checkbox-style state marker (incl. the distinct "holds a source" look), Source pill and state labels
     PlanTreePreview.tsx   # The plan editor's file tree: where sources are picked (one click adds/removes, click inside a source opens the dialog) and a preview of what's included, with the reason per row — see docs/backup-plan-tree.md
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    RestServerLogin.tsx   # "Server username" / "Server password" pair shown instead of the generic credential rows for `rest:` URLs — see docs/frontend.md
     RetentionFields.tsx   # The five `keep_*` inputs, shared by the plan editor and Settings' default retention card
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
@@ -115,6 +118,7 @@ src-tauri/
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
+      rest_probe.rs         # `detect_append_only`: the `DELETE /data/<64 zeros>` probe that suggests a rest-server's `--append-only` mode; pure helpers unit-tested — see docs/restic.md
       snapshot.rs           # List/delete/tag snapshots; execute_backup; copy/mirror; retention — see docs/restic.md and docs/concurrency.md
       browse.rs             # File listing, restore, indexing (single + batch) — see docs/concurrency.md and docs/decisions.md
       backup_plan.rs        # List/save/remove backup plans; `validate_plan_sources` (paths-or-list-files, list-file plans need a tag) — see docs/restic.md
@@ -266,6 +270,20 @@ proposing a change — several are pinned by a named test or reference a confirm
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
+- `--insecure-tls` is a per-repo, user-acknowledged flag for `rest:https://` repos (`apply_tls_flags` at
+  every restic `Command` site, since restic has no env var for it); `check_tls_compat` refuses a
+  copy/mirror pair where it would disable verification on an unflagged TLS-verifying repo; the
+  recommended fix is trusting the CA in the OS store; client certs/`--cacert` are deferred — see
+  docs/decisions.md
+- `rest:` failure hints (`backends::rest_error_hint`) are appended after restic's text and advisory
+  only; `test_repo_connection` fails fast on a `rest:` repo's first restic retry line (and has a 45s deadline) via `run_restic_with_timeout` because
+  restic retries unreachable backends for minutes — see docs/decisions.md
+- `rest-server --append-only` repos carry a stored `append_only` flag (set by the user or suggested by
+  `rest_probe`'s `DELETE /data/<64 zeros>` after a successful connection test): `ensure_can_delete`
+  blocks delete/tag/retention/prune (`tag` too — restic's tag edit leaves a duplicate snapshot when the
+  delete 403s), backup/unlock/copy-into stay allowed, and retention is folded into
+  `BackupOutcome::retention_skipped` rather than failing; the probe only ever ticks the box (never
+  clears it) and is skipped for read-only repos — see docs/decisions.md
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
 - `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
@@ -563,7 +581,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,schedule,snapshot,transfer,webhook}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,rest_probe,schedule,snapshot,transfer,webhook}.rs`.
 - Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
   build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
   controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a

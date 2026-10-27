@@ -3,7 +3,14 @@ import {
   commonCredentialKeys,
   detectBackend,
   hasBrokenRestUserinfo,
+  applyAppendOnlyProbe,
+  getCredentialValue,
+  isRestLoginKey,
+  setCredentialValue,
   hasInlineRestUserinfo,
+  insecureTlsConflict,
+  supportsAppendOnly,
+  supportsInsecureTls,
 } from "./backends";
 
 describe("detectBackend", () => {
@@ -87,5 +94,110 @@ describe("REST userinfo detectors", () => {
 
   it.each(cases)("hasInlineRestUserinfo(%s) === %s", (path, _broken, inline) => {
     expect(hasInlineRestUserinfo(path)).toBe(inline);
+  });
+});
+
+describe("supportsInsecureTls", () => {
+  it("is true only for rest:https:// URLs", () => {
+    expect(supportsInsecureTls("rest:https://nas:8000/repo")).toBe(true);
+    expect(supportsInsecureTls("  rest:HTTPS://nas/")).toBe(true);
+    // restic rejects an upper-case backend prefix ("invalid backend"), so it isn't a REST repo.
+    expect(supportsInsecureTls("REST:https://nas/")).toBe(false);
+    expect(supportsInsecureTls("rest:http://nas:8000/repo")).toBe(false);
+    expect(supportsInsecureTls("s3:s3.amazonaws.com/bucket")).toBe(false);
+    expect(supportsInsecureTls("/home/user/repo")).toBe(false);
+  });
+});
+
+describe("insecureTlsConflict", () => {
+  const insecureRest = { path: "rest:https://nas:8000/a", insecureTls: true };
+  const verifiedRest = { path: "rest:https://other:8000/b", insecureTls: false };
+  const local = { path: "/backups/repo", insecureTls: false };
+
+  it("flags a pair where the flag would weaken a TLS-verifying repo, in either order", () => {
+    expect(insecureTlsConflict(insecureRest, verifiedRest)).toBe(true);
+    expect(insecureTlsConflict(verifiedRest, insecureRest)).toBe(true);
+  });
+
+  it("allows both-flagged, neither-flagged and non-TLS counterparts", () => {
+    expect(insecureTlsConflict(insecureRest, { ...verifiedRest, insecureTls: true })).toBe(false);
+    expect(insecureTlsConflict(verifiedRest, { ...verifiedRest })).toBe(false);
+    expect(insecureTlsConflict(insecureRest, local)).toBe(false);
+    expect(insecureTlsConflict(insecureRest, { path: "sftp:u@h:/r", insecureTls: false })).toBe(false);
+    expect(insecureTlsConflict(insecureRest, { path: "rest:http://nas/r", insecureTls: false })).toBe(false);
+  });
+});
+
+describe("supportsAppendOnly", () => {
+  it("is true for rest:http and rest:https URLs only", () => {
+    expect(supportsAppendOnly("rest:http://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("rest:https://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("rest:HTTPS://nas:8000/r")).toBe(true);
+    expect(supportsAppendOnly("REST:https://nas:8000/r")).toBe(false);
+    expect(supportsAppendOnly("s3:s3.amazonaws.com/b")).toBe(false);
+    expect(supportsAppendOnly("/home/u/repo")).toBe(false);
+  });
+});
+
+describe("applyAppendOnlyProbe", () => {
+  const probe = (status: "appendOnly" | "notAppendOnly" | "undetermined", detail = "d") => ({ status, detail });
+
+  it("turns the flag on when detected, with a note only if it was off", () => {
+    expect(applyAppendOnlyProbe(probe("appendOnly"), false)).toEqual({
+      appendOnly: true,
+      note: expect.stringContaining("Append-only server detected"),
+    });
+    expect(applyAppendOnlyProbe(probe("appendOnly"), true)).toEqual({ appendOnly: true, note: "" });
+  });
+
+  it("never clears the flag when the server allows deletes, only noting it if it was on", () => {
+    expect(applyAppendOnlyProbe(probe("notAppendOnly"), false)).toEqual({ appendOnly: false, note: "" });
+    expect(applyAppendOnlyProbe(probe("notAppendOnly"), true)).toEqual({
+      appendOnly: true,
+      note: expect.stringContaining("left on"),
+    });
+  });
+
+  it("leaves the flag alone and explains when undetermined", () => {
+    for (const current of [true, false]) {
+      expect(applyAppendOnlyProbe(probe("undetermined", "rejected (401)"), current)).toEqual({
+        appendOnly: current,
+        note: "Append-only check skipped: rejected (401)",
+      });
+    }
+  });
+});
+
+describe("rest server login credential helpers", () => {
+  it("recognizes only the two REST login keys", () => {
+    expect(isRestLoginKey("RESTIC_REST_USERNAME")).toBe(true);
+    expect(isRestLoginKey(" RESTIC_REST_PASSWORD ")).toBe(true);
+    expect(isRestLoginKey("AWS_ACCESS_KEY_ID")).toBe(false);
+  });
+
+  it("reads a value, or empty when absent", () => {
+    const rows: [string, string][] = [["A", "1"], ["RESTIC_REST_USERNAME", "bob"]];
+    expect(getCredentialValue(rows, "RESTIC_REST_USERNAME")).toBe("bob");
+    expect(getCredentialValue(rows, "RESTIC_REST_PASSWORD")).toBe("");
+  });
+
+  it("updates in place, appends when missing, and removes when emptied", () => {
+    const rows: [string, string][] = [["HTTPS_PROXY", "p"], ["RESTIC_REST_USERNAME", "bob"]];
+    expect(setCredentialValue(rows, "RESTIC_REST_USERNAME", "alice")).toEqual([
+      ["HTTPS_PROXY", "p"],
+      ["RESTIC_REST_USERNAME", "alice"],
+    ]);
+    expect(setCredentialValue(rows, "RESTIC_REST_PASSWORD", "s3cret")).toEqual([
+      ["HTTPS_PROXY", "p"],
+      ["RESTIC_REST_USERNAME", "bob"],
+      ["RESTIC_REST_PASSWORD", "s3cret"],
+    ]);
+    expect(setCredentialValue(rows, "RESTIC_REST_USERNAME", "")).toEqual([["HTTPS_PROXY", "p"]]);
+    // Never mutates its input.
+    expect(rows).toHaveLength(2);
+  });
+
+  it("keeps whitespace in a password exactly as typed", () => {
+    expect(setCredentialValue([], "RESTIC_REST_PASSWORD", " pad ")).toEqual([["RESTIC_REST_PASSWORD", " pad "]]);
   });
 });

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveIndexBatchStatus, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DefaultRetention, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { ActiveIndexBatchStatus, AppendOnlyProbe, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DefaultRetention, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
 import type { Classification, ListFilesResult, TreeEnv, TreeListing, TreeRulesInput } from "./planTree";
 import type { EditAction, EditOutcome, ExportOut, MatchPreview } from "./planTreeEdit";
 
@@ -73,6 +73,21 @@ export const updateRepoDeferPrune = (repoId: string, deferPrune: boolean): Promi
 export const updateRepoReadOnly = (repoId: string, readOnly: boolean): Promise<void> =>
   invoke("update_repo_read_only", { repoId, readOnly });
 
+export const updateRepoInsecureTls = (repoId: string, insecureTls: boolean): Promise<void> =>
+  invoke("update_repo_insecure_tls", { repoId, insecureTls });
+
+export const updateRepoAppendOnly = (repoId: string, appendOnly: boolean): Promise<void> =>
+  invoke("update_repo_append_only", { repoId, appendOnly });
+
+// Asks a rest: server whether it runs --append-only (rest_probe.rs). Only meaningful after a
+// successful testRepoConnection — a 401/404 comes back "undetermined".
+export const detectAppendOnly = (
+  path: string,
+  insecureTls: boolean,
+  credentials: [string, string][],
+): Promise<AppendOnlyProbe> =>
+  invoke("detect_append_only", { path, insecureTls, credentials });
+
 export const getRepoPassword = (repoId: string): Promise<string> =>
   invoke("get_repo_password", { repoId });
 
@@ -99,9 +114,10 @@ export const testRepoConnection = (
   path: string,
   password: string,
   readOnly: boolean,
+  insecureTls: boolean,
   credentials: [string, string][],
 ): Promise<void> =>
-  invoke("test_repo_connection", { path, password, readOnly, credentials });
+  invoke("test_repo_connection", { path, password, readOnly, insecureTls, credentials });
 
 export const testWebhook = (
   url: string,

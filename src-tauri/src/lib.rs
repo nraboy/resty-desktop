@@ -5,8 +5,8 @@ mod scheduler;
 mod tasks;
 
 use commands::{
-    auth, backup_plan, browse, cache, notify, plan_listfiles, plan_tree, portal, repo, repo_locks, schedule, snapshot,
-    transfer, webhook,
+    auth, backup_plan, browse, cache, notify, plan_listfiles, plan_tree, portal, repo, repo_locks, rest_probe, schedule,
+    snapshot, transfer, webhook,
 };
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -583,6 +583,9 @@ pub fn run() {
             repo::rename_repo,
             repo::update_repo_path,
             repo::update_repo_read_only,
+            repo::update_repo_insecure_tls,
+            repo::update_repo_append_only,
+            rest_probe::detect_append_only,
             repo::update_repo_defer_prune,
             // plan tree preview
             plan_tree::tree_supported,

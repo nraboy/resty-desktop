@@ -88,6 +88,20 @@ pub fn detect_kind(path: &str) -> BackendKind {
     }
 }
 
+/// True when `rest-server --append-only` means something for this path: a `rest:http(s)://`
+/// URL (it is a rest-server option; no other backend has it). Mirrors the frontend's
+/// `supportsAppendOnly` (`src/lib/backends.ts`), which is what keeps the flag off every other
+/// path in the add/edit forms — this is the check for input that doesn't come through them.
+pub fn supports_append_only(path: &str) -> bool {
+    // `rest:` itself is case-sensitive (restic rejects `REST:`); the scheme after it is not.
+    path.trim()
+        .strip_prefix("rest:")
+        .is_some_and(|rest| {
+            let rest = rest.to_ascii_lowercase();
+            rest.starts_with("http://") || rest.starts_with("https://")
+        })
+}
+
 /// The only `RESTIC_*` vars a stored credential may set. Unlike RESTIC_REPOSITORY /
 /// RESTIC_PASSWORD / RESTIC_FROM_* / RESTIC_COMPRESSION, the app never sets these
 /// itself, so there is no collision for a stored value to win and nothing to
@@ -174,12 +188,147 @@ pub fn validate_credentials(kind: BackendKind, creds: &[(String, String)]) -> Re
     Ok(())
 }
 
+/// Returned (as the start of the error text) when a connection test gives up waiting on
+/// a server restic is still retrying — see `repo::run_restic_with_timeout`.
+pub const CONNECTION_TIMEOUT_MARKER: &str = "Timed out waiting for the server";
+
+/// A short, human explanation for a failed restic call against a `rest:` repository, or
+/// `None` when the failure isn't one we recognize (or the repo isn't REST). Pure — it only
+/// reads restic's stderr, which carries the server's HTTP status in every case below:
+/// `Stat(<config/>) failed: unexpected HTTP response (401): 401 Unauthorized`.
+///
+/// What each status means for rest-server (verified against rest-server's source and a live
+/// instance): a read such as the connection test (`restic snapshots`) can only see
+/// **401** (bad/missing credentials, *or* a `--private-repos` path outside `/<username>/` —
+/// the server doesn't distinguish them) and **404** (unknown path or an uninitialised
+/// repo). **403** only comes from write-type calls: deleting or modifying existing data
+/// under `--append-only` (forget, prune, tag), or re-creating config/blobs that exist.
+/// **507** is `--max-size` / disk-full on a write.
+///
+/// `insecure_tls` suppresses the certificate hint: with verification already off, an x509
+/// error isn't something the checkbox can fix.
+pub fn rest_error_hint(path: &str, insecure_tls: bool, stderr: &str) -> Option<String> {
+    if !path.starts_with("rest:") {
+        return None;
+    }
+    let e = stderr.to_ascii_lowercase();
+    let over_http = path.to_ascii_lowercase().starts_with("rest:http://");
+
+    if e.contains("server gave http response to https client") {
+        return Some(
+            "The server answered in plain HTTP. Change the URL to start with rest:http:// \
+             (or start rest-server with --tls)."
+                .to_string(),
+        );
+    }
+    if e.contains("x509:") || e.contains("failed to verify certificate") {
+        if insecure_tls {
+            return None;
+        }
+        return Some(
+            "Couldn't verify the server's TLS certificate (typical for a self-signed certificate). \
+             Recommended: add the server's certificate, or the CA that signed it, to your \
+             operating system's certificate store. Alternatively, tick \"Skip TLS certificate \
+             verification (--insecure-tls)\" for this repository."
+                .to_string(),
+        );
+    }
+    if has_http_status(&e, 401) {
+        return Some(
+            "Authentication failed (401). Check the username and password. If rest-server runs \
+             with --private-repos, the repository path must start with your username, e.g. \
+             rest:https://host:8000/<username>/."
+                .to_string(),
+        );
+    }
+    if has_http_status(&e, 507) {
+        return Some(
+            "The server is out of storage space or has reached its size limit (507) — check the \
+             disk or rest-server's --max-size."
+                .to_string(),
+        );
+    }
+    if has_http_status(&e, 403) {
+        // The hint is appended to any failed `rest:` call, not only deletes, so it names both
+        // usual causes rather than assuming append-only.
+        return Some(
+            "The server refused the request (403 Forbidden). On a rest-server this usually means \
+             it was started with --append-only, which does not allow deleting or modifying \
+             existing data (forget, prune and tag fail while backups and restores still work), \
+             or that an access rule or proxy in front of the server is blocking the request."
+                .to_string(),
+        );
+    }
+    if has_http_status(&e, 404) || e.contains("repository does not exist") {
+        return Some(
+            "Repository not found (404). Check the path in the URL — with --private-repos it starts \
+             with your username — or initialise a new repository at this URL first."
+                .to_string(),
+        );
+    }
+    if over_http && has_http_status(&e, 400) {
+        return Some(
+            "The server rejected a plain-HTTP request (400). If rest-server runs with --tls, use \
+             rest:https:// instead."
+                .to_string(),
+        );
+    }
+    if e.contains(&CONNECTION_TIMEOUT_MARKER.to_ascii_lowercase())
+        || e.contains("connection refused")
+        || e.contains("no such host")
+        || e.contains("i/o timeout")
+        || e.contains("no route to host")
+        || e.contains("network is unreachable")
+        || e.contains("retrying after")
+    {
+        return Some(
+            "Couldn't reach the server. Check the host name, port and http/https scheme, and that \
+             rest-server is running and reachable from this machine."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// True when the (lower-cased) stderr reports `code` in restic's own
+/// `unexpected HTTP response (NNN)` shape. Matched on that phrase rather than a bare `(404)`:
+/// a failed backup's stderr also carries file names and OS messages, and a file called
+/// `report (404).pdf` must not be read as the server's answer.
+fn has_http_status(e: &str, code: u16) -> bool {
+    e.contains(&format!("unexpected http response ({code})"))
+}
+
+/// `err` with a `rest_error_hint` appended on its own paragraph when one applies, else
+/// `err` unchanged. Appended (never prepended or replacing) so callers that match restic's
+/// own text — the retry-on-"already locked" checks — keep working.
+pub fn append_rest_hint(path: &str, insecure_tls: bool, err: String) -> String {
+    match rest_error_hint(path, insecure_tls, &err) {
+        Some(hint) => format!("{}\n\nHint: {hint}", err.trim_end()),
+        None => err,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn supports_append_only_only_for_rest_http_urls() {
+        assert!(supports_append_only("rest:http://nas:8000/repo"));
+        assert!(supports_append_only("rest:https://nas:8000/repo"));
+        // The scheme after `rest:` is case-insensitive, the `rest:` prefix is not (matches the
+        // frontend and `verifies_tls`), and surrounding whitespace is ignored like the forms do.
+        assert!(supports_append_only("rest:HTTPS://nas/r"));
+        assert!(supports_append_only("  rest:http://nas/r  "));
+        assert!(!supports_append_only("REST:https://nas/r"));
+        // No other backend has the option — nor does a unix-socket rest URL.
+        for path in ["/backups/local", "sftp:u@h:/r", "s3:s3.amazonaws.com/b", "rclone:remote:p", "rest:http+unix:///tmp/s:/r", "rest:", ""] {
+            assert!(!supports_append_only(path), "{path}");
+        }
     }
 
     #[test]
@@ -421,5 +570,114 @@ mod tests {
         let creds = kv(&[("AWS_ACCESS_KEY_ID", "one"), ("AWS_ACCESS_KEY_ID", "two")]);
         let err = validate_credentials(BackendKind::S3, &creds).unwrap_err();
         assert!(err.contains("more than once"));
+    }
+
+    // ── rest_error_hint / append_rest_hint ──────────────────────────────────
+
+    const REST: &str = "rest:https://nas:8000/alice/";
+
+    #[test]
+    fn hint_for_unknown_certificate_authority() {
+        let err = "Fatal: create repository at rest:https://127.0.0.1:8443/repo/ failed: Post \
+                   \"https://:***@127.0.0.1:8443/repo/?create=true\": tls: failed to verify \
+                   certificate: x509: certificate signed by unknown authority";
+        let hint = rest_error_hint(REST, false, err).unwrap();
+        assert!(hint.contains("certificate store"));
+        assert!(hint.contains("--insecure-tls"));
+        // With verification already off, the checkbox can't help — no hint.
+        assert_eq!(rest_error_hint(REST, true, err), None);
+    }
+
+    #[test]
+    fn hint_for_401_mentions_private_repos() {
+        let err = "Fatal: unable to open config file: unexpected HTTP response (401): 401 Unauthorized";
+        let hint = rest_error_hint(REST, false, err).unwrap();
+        assert!(hint.contains("401"));
+        assert!(hint.contains("--private-repos"));
+    }
+
+    #[test]
+    fn hint_for_missing_repository() {
+        let err = "Fatal: repository does not exist: unable to open config file: <config/> does not exist";
+        assert!(rest_error_hint(REST, false, err).unwrap().contains("404"));
+    }
+
+    #[test]
+    fn hint_for_forbidden_names_append_only() {
+        let err = "Remove(<snapshot/45cea74811>) failed: unexpected HTTP response (403): 403 Forbidden";
+        let hint = rest_error_hint(REST, false, err).unwrap();
+        assert!(hint.contains("--append-only"));
+        // The hint is appended to any failed `rest:` call, so it also names the other usual cause.
+        assert!(hint.contains("access rule or proxy"), "{hint}");
+    }
+
+    #[test]
+    fn http_status_hints_ignore_status_numbers_in_file_names_and_os_messages() {
+        // A failed backup's stderr carries paths and OS errors. A name like `report (404).pdf`
+        // is not the server's answer and must not produce a "Repository not found" (etc.) hint.
+        for err in [
+            "error: open /home/u/report (404).pdf: permission denied",
+            "error: open /srv/invoice (401).txt: permission denied",
+            "error: open /srv/photo (403).jpg: no such file or directory",
+            "error: open /srv/dump (507).bin: input/output error",
+            "error: open /srv/log 400 Bad Request.txt: permission denied",
+            "error: open /srv/notes 403 Forbidden.md: permission denied",
+        ] {
+            assert_eq!(rest_error_hint(REST, false, err), None, "{err}");
+            assert_eq!(rest_error_hint("rest:http://nas:8000/r", false, err), None, "{err}");
+        }
+        // …while the same statuses in restic's own shape still explain themselves.
+        for (code, needle) in [(401, "Authentication failed"), (403, "refused the request"), (404, "Repository not found"), (507, "out of storage")] {
+            let err = format!("error: open /srv/report ({code}).pdf: denied\nFatal: unexpected HTTP response ({code}): {code} Reason");
+            assert!(rest_error_hint(REST, false, &err).unwrap().contains(needle), "{code}");
+        }
+    }
+
+    #[test]
+    fn hint_for_storage_full() {
+        let err = "Fatal: unable to save snapshot: error flushing repository: unexpected HTTP response (507): 507 Insufficient Storage";
+        assert!(rest_error_hint(REST, false, err).unwrap().contains("--max-size"));
+    }
+
+    #[test]
+    fn hint_for_scheme_mismatches() {
+        let https_to_http = "Head \"https://:***@127.0.0.1:8503/repo/config\": http: server gave HTTP response to HTTPS client";
+        assert!(rest_error_hint(REST, false, https_to_http).unwrap().contains("rest:http://"));
+
+        let http_to_https = "Stat(<config/>) returned error, retrying after 1.7s: unexpected HTTP response (400): 400 Bad Request";
+        // 400 is only explained for a plain-HTTP URL.
+        assert!(rest_error_hint("rest:http://nas:8000/r", false, http_to_https).unwrap().contains("rest:https://"));
+        assert!(rest_error_hint(REST, false, "unexpected HTTP response (400): 400 Bad Request").is_none());
+    }
+
+    #[test]
+    fn hint_for_unreachable_server() {
+        for err in [
+            "Head \"http://:***@127.0.0.1:9/x/config\": dial tcp 127.0.0.1:9: connect: connection refused",
+            "dial tcp: lookup nonexistent.invalid: no such host",
+            "Timed out waiting for the server after 30 seconds",
+            "Stat(<config/>) returned error, retrying after 2.8s: something",
+        ] {
+            assert!(rest_error_hint(REST, false, err).unwrap().contains("reach"), "{err}");
+        }
+    }
+
+    #[test]
+    fn no_hint_for_non_rest_repos_or_unrecognized_errors() {
+        let err = "unexpected HTTP response (401): 401 Unauthorized";
+        assert_eq!(rest_error_hint("s3:s3.amazonaws.com/b", false, err), None);
+        assert_eq!(rest_error_hint("/local/repo", false, err), None);
+        assert_eq!(rest_error_hint(REST, false, "Fatal: wrong password or no key found"), None);
+    }
+
+    #[test]
+    fn append_rest_hint_appends_and_preserves_the_original_text() {
+        let err = "Fatal: unable to open config file: unexpected HTTP response (401): 401 Unauthorized\n".to_string();
+        let out = append_rest_hint(REST, false, err.clone());
+        assert!(out.starts_with("Fatal: unable to open config file"));
+        assert!(out.contains("\n\nHint: Authentication failed"));
+        // Unrecognized: byte-for-byte unchanged.
+        let other = "Fatal: wrong password or no key found".to_string();
+        assert_eq!(append_rest_hint(REST, false, other.clone()), other);
     }
 }

@@ -8,6 +8,7 @@ import { CANCELLED_BACKUP_ERROR } from "../lib/types";
 import { formatDuration, formatPlanSources, formatRelative, formatTimestamp } from "../lib/format";
 import { useActivity } from "../lib/activity";
 import { isPermissionWarning, isWindows, needsFullDiskAccess, planReadPaths } from "../lib/utils";
+import { APPEND_ONLY_TITLE } from "../lib/backends";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
 import Modal from "../components/Modal";
@@ -188,6 +189,9 @@ export default function BackupPlansPage() {
   // Backup and retention both write to the repo — unavailable once it's read-only
   // (or was deleted out from under the plan, matching the existing "no valid repo" case).
   const planRepoReadOnly = (plan: BackupPlan) => repos.find((r) => r.id === plan.repoId)?.readOnly ?? false;
+  // Retention deletes snapshots, which an append-only server refuses — backups still run there.
+  const planRepoAppendOnly = (plan: BackupPlan) => repos.find((r) => r.id === plan.repoId)?.appendOnly ?? false;
+  const retentionDisabled = (plan: BackupPlan) => planRepoReadOnly(plan) || planRepoAppendOnly(plan);
   const retentionDeferred = retentionPlan
     ? repos.find((r) => r.id === retentionPlan.repoId)?.deferPrune ?? false
     : false;
@@ -485,9 +489,9 @@ export default function BackupPlansPage() {
                 {hasRetentionRules(plan) && (
                   <ActionButton
                     label="Retention"
-                    title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : "Apply retention policy"}
+                    title={planRepoReadOnly(plan) ? "This plan's repository is read-only" : planRepoAppendOnly(plan) ? APPEND_ONLY_TITLE : "Apply retention policy"}
                     tone="yellow"
-                    disabled={planRepoReadOnly(plan)}
+                    disabled={retentionDisabled(plan)}
                     onClick={() => openRetentionModal(plan)}
                     icon={
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -541,7 +545,7 @@ export default function BackupPlansPage() {
               onClick: () => openBackupModal(contextMenu.plan),
             },
             ...(hasRetentionRules(contextMenu.plan)
-              ? [{ label: "Apply Retention Rules", disabled: planRepoReadOnly(contextMenu.plan), onClick: () => openRetentionModal(contextMenu.plan) }]
+              ? [{ label: "Apply Retention Rules", disabled: retentionDisabled(contextMenu.plan), onClick: () => openRetentionModal(contextMenu.plan) }]
               : []),
             { separator: true },
             {
@@ -812,7 +816,7 @@ export default function BackupPlansPage() {
                     warnings={backupOutcome.warnings}
                     warningCount={backupOutcome.warningCount}
                     missingSourceCount={backupOutcome.missingSourceCount}
-                    retentionSkipped={backupOutcome.retentionSkipped && !!backupPlan?.retention && hasRetentionRules(backupPlan)}
+                    retentionSkippedReason={!!backupPlan?.retention && hasRetentionRules(backupPlan) ? backupOutcome.retentionSkippedReason : null}
                     fdaHint={!!fdaStatus?.supported && !fdaStatus.granted && backupOutcome.warnings.some((w) => isPermissionWarning(w.message))}
                   />
                 </div>
@@ -820,6 +824,12 @@ export default function BackupPlansPage() {
               {backupDone && !(backupOutcome && backupOutcome.warningCount > 0) && (
                 <div className="p-3 bg-green-900/30 border border-green-700 rounded-lg text-sm text-green-300">
                   Backup completed successfully.
+                  {backupOutcome?.retentionSkippedReason === "appendOnly" && !!backupPlan?.retention && hasRetentionRules(backupPlan) && (
+                    <span className="block text-amber-300 mt-1">
+                      Retention was not applied: this repository is on an append-only server, which
+                      refuses to delete snapshots.
+                    </span>
+                  )}
                 </div>
               )}
             </div>

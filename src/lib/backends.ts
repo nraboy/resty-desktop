@@ -82,3 +82,103 @@ export function hasInlineRestUserinfo(path: string): boolean {
   if (!parts) return false;
   return parts.lastAt > 0;
 }
+
+/** True when `--insecure-tls` means something for this path: a `rest:https://` URL.
+ * (restic ignores the flag for plain http, and the app only offers it for REST.) */
+export function supportsInsecureTls(path: string): boolean {
+  // The `rest:` prefix is case-sensitive (restic rejects `REST:` as an invalid backend, and
+  // detect_kind treats it as a local path); the URL scheme after it is not.
+  const p = path.trim();
+  return p.startsWith("rest:") && /^https:\/\//i.test(p.slice("rest:".length));
+}
+
+/** Mirrors repo.rs's `verifies_tls`: transports where `--insecure-tls` would change the
+ * security of a repo that doesn't have it set. */
+function verifiesTls(path: string): boolean {
+  const p = path.trim();
+  return supportsInsecureTls(p) || ["s3:", "b2:", "azure:", "gs:"].some((prefix) => p.startsWith(prefix));
+}
+
+/** Mirrors repo.rs's `check_tls_compat`. restic's `--insecure-tls` is process-wide, so a
+ * copy/mirror between a flagged repo and a TLS-verifying one that isn't flagged would
+ * silently turn verification off for the second; the backend refuses it, and the pickers
+ * use this to grey such targets out up front. */
+export function insecureTlsConflict(
+  a: { path: string; insecureTls: boolean },
+  b: { path: string; insecureTls: boolean },
+): boolean {
+  const weakens = (flagged: typeof a, other: typeof a) =>
+    flagged.insecureTls && !other.insecureTls && verifiesTls(other.path);
+  return weakens(a, b) || weakens(b, a);
+}
+
+/** True when append-only means something for this path: a `rest:http(s)://` URL (it is a
+ * rest-server option; no other backend has it). */
+export function supportsAppendOnly(path: string): boolean {
+  // `rest:` itself is case-sensitive (restic rejects `REST:`); the scheme after it is not.
+  const p = path.trim();
+  return p.startsWith("rest:") && /^https?:\/\//i.test(p.slice("rest:".length));
+}
+
+/** Tooltip / title for controls disabled because the repo is on an append-only server. */
+export const APPEND_ONLY_TITLE =
+  "This repository is on an append-only server — existing snapshots can't be deleted or modified";
+
+/** Folds a detection result into the form: the new value for the append-only checkbox and a
+ * line to append to the connection-test message ("" = nothing to add). The probe only ever
+ * turns the checkbox on: an undetermined result, or one saying the server allows deletes,
+ * leaves it alone, because a user may have ticked it for a reason the probe can't see (a proxy
+ * or another server refusing deletes), and clearing it would re-enable forget/prune/tag that
+ * then fail — tag even leaves a duplicate snapshot behind. */
+export function applyAppendOnlyProbe(
+  probe: { status: "appendOnly" | "notAppendOnly" | "undetermined"; detail: string },
+  current: boolean,
+): { appendOnly: boolean; note: string } {
+  switch (probe.status) {
+    case "appendOnly":
+      return {
+        appendOnly: true,
+        note: current
+          ? ""
+          : "Append-only server detected: deleting or modifying snapshots (forget, prune, tag, retention) will be disabled for this repository.",
+      };
+    case "notAppendOnly":
+      return {
+        appendOnly: current,
+        note: current
+          ? "The server allows deletes, so it doesn't look append-only. The append-only setting was left on; untick it if that's no longer wanted."
+          : "",
+      };
+    default:
+      return { appendOnly: current, note: `Append-only check skipped: ${probe.detail}` };
+  }
+}
+
+/** The two env vars restic reads for a `rest:` server's HTTP login. The add/edit dialogs show
+ * them as dedicated "Server username" / "Server password" fields instead of generic rows. */
+export const REST_USERNAME_KEY = "RESTIC_REST_USERNAME";
+export const REST_PASSWORD_KEY = "RESTIC_REST_PASSWORD";
+
+export function isRestLoginKey(key: string): boolean {
+  const k = key.trim();
+  return k === REST_USERNAME_KEY || k === REST_PASSWORD_KEY;
+}
+
+/** Value of the (first) credential row named `key`, or "" when there is none. */
+export function getCredentialValue(rows: [string, string][], key: string): string {
+  return rows.find(([k]) => k.trim() === key)?.[1] ?? "";
+}
+
+/** `rows` with `key` set to `value`: an existing row is updated in place, a missing one is
+ * appended, and an emptied value removes the row (an unset login is the same as no row —
+ * apply_backend_env skips empty values anyway). Other rows are untouched. */
+export function setCredentialValue(
+  rows: [string, string][],
+  key: string,
+  value: string,
+): [string, string][] {
+  const has = rows.some(([k]) => k.trim() === key);
+  if (value === "") return rows.filter(([k]) => k.trim() !== key);
+  if (has) return rows.map(([k, v]): [string, string] => (k.trim() === key ? [k, value] : [k, v]));
+  return [...rows, [key, value]];
+}
