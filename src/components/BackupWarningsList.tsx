@@ -1,12 +1,12 @@
-import type { BackupWarning } from "../lib/types";
+import type { BackupWarning, RetentionSkipReason } from "../lib/types";
 
 interface Props {
   warnings: BackupWarning[];
   /** Total issues reported — can exceed `warnings.length` (the stored list is capped). */
   warningCount: number;
   missingSourceCount: number;
-  /** Show the "retention was skipped" note (live runs only; history doesn't record it). */
-  retentionSkipped?: boolean;
+  /** Show the matching "retention was skipped" note (live runs only; history doesn't record it). */
+  retentionSkippedReason?: RetentionSkipReason | null;
   /** macOS only: at least one warning looks like a permission error and Full Disk Access is off. */
   fdaHint?: boolean;
 }
@@ -22,7 +22,7 @@ export default function BackupWarningsList({
   warnings,
   warningCount,
   missingSourceCount,
-  retentionSkipped,
+  retentionSkippedReason,
   fdaHint,
 }: Props) {
   const missing = warnings.filter((w) => w.missingSource);
@@ -67,10 +67,17 @@ export default function BackupWarningsList({
         <p className="text-amber-300">Details are not available for this run.</p>
       )}
 
-      {retentionSkipped && (
+      {retentionSkippedReason === "missingSource" && (
         <p className="text-amber-300">
           Retention was skipped because a source path was missing. It will run after the next
           complete backup.
+        </p>
+      )}
+
+      {retentionSkippedReason === "appendOnly" && (
+        <p className="text-amber-300">
+          Retention was not applied: this repository is on an append-only server, which refuses to
+          delete snapshots.
         </p>
       )}
 

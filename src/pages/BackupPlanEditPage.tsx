@@ -680,6 +680,12 @@ export default function BackupPlanEditPage() {
             </div>
           </div>
         )}
+        {repos.find((r) => r.id === repoId)?.appendOnly && (
+          <p className="text-sm text-amber-400 mt-2">
+            This repository is on an append-only server, so retention rules can't be applied to it —
+            the server refuses to delete snapshots. Backups still run; old snapshots are kept.
+          </p>
+        )}
         {repos.find((r) => r.id === repoId)?.readOnly && (
           <p className="text-sm text-amber-400 mt-2">
             This plan's repository is marked read-only — backups can't run until you either

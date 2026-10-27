@@ -29,6 +29,9 @@ import {
   updateRepoPath,
   updateRepoDeferPrune,
   updateRepoReadOnly,
+  updateRepoInsecureTls,
+  updateRepoAppendOnly,
+  detectAppendOnly,
   testRepoConnection,
 } from "../lib/invoke";
 import type { ActiveIndexBatchStatus, CheckResult, Repository, ResticStats, TaskEvent } from "../lib/types";
@@ -37,7 +40,12 @@ import {
   commonCredentialKeys,
   detectBackend,
   hasBrokenRestUserinfo,
+  applyAppendOnlyProbe,
   hasInlineRestUserinfo,
+  insecureTlsConflict,
+  isRestLoginKey,
+  supportsAppendOnly,
+  supportsInsecureTls,
 } from "../lib/backends";
 import { formatRelative, formatRepoSize, formatTimestamp } from "../lib/format";
 import Button from "../components/Button";
@@ -48,6 +56,9 @@ import EmptyState from "../components/EmptyState";
 import Spinner from "../components/Spinner";
 import ProgressBar from "../components/ProgressBar";
 import Tooltip from "../components/Tooltip";
+import InsecureTlsField from "../components/InsecureTlsField";
+import AppendOnlyField from "../components/AppendOnlyField";
+import RestServerLogin from "../components/RestServerLogin";
 import TruncatedText from "../components/TruncatedText";
 import { TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, SearchIcon } from "../components/icons";
 
@@ -82,7 +93,13 @@ export default function RepositoriesPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", path: "", password: "" });
   const [noPassword, setNoPassword] = useState(false);
+  // Which required fields the last Open/Create/Test attempt found empty — each is marked on its
+  // field, and cleared as soon as the user edits it.
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; path?: string; password?: string }>({});
   const [readOnly, setReadOnly] = useState(false);
+  const [insecureTls, setInsecureTls] = useState(false);
+  const [appendOnly, setAppendOnly] = useState(false);
   const [pathMode, setPathMode] = useState<"local" | "remote">("local");
   // Optional backend credentials for the add/open modal — a flat key/value list
   // (e.g. ["B2_ACCOUNT_ID", "..."]) shown under the Remote URL field for any
@@ -107,6 +124,8 @@ export default function RepositoriesPage() {
   const [editPassword, setEditPassword] = useState("");
   const [editNoPassword, setEditNoPassword] = useState(false);
   const [editReadOnly, setEditReadOnly] = useState(false);
+  const [editInsecureTls, setEditInsecureTls] = useState(false);
+  const [editAppendOnly, setEditAppendOnly] = useState(false);
   const [editDeferPrune, setEditDeferPrune] = useState(false);
   // Populated with stored credential values when the edit modal opens (see
   // getRepoCredentials — values DO round-trip, same threat model as getRepoPassword).
@@ -505,8 +524,11 @@ export default function RepositoriesPage() {
 
   const resetAddForm = () => {
     setForm({ name: "", path: "", password: "" });
+    setFieldErrors({});
     setNoPassword(false);
     setReadOnly(false);
+    setInsecureTls(false);
+    setAppendOnly(false);
     setPathMode("local");
     setCredentialRows([]);
     setTestResult(null);
@@ -515,11 +537,34 @@ export default function RepositoriesPage() {
     setDuplicateSecretsError(false);
   };
 
+  // The required fields of the add/open/create dialog that are still empty, with the message
+  // to show on each. `needName` is false for Test Connection, which doesn't need a name.
+  const requiredFieldErrors = (needName: boolean) => {
+    const errs: { name?: string; path?: string; password?: string } = {};
+    if (needName && !form.name.trim()) errs.name = "Enter a name for this repository.";
+    if (!form.path) errs.path = pathMode === "local" ? "Choose a folder." : "Enter the repository URL.";
+    if (!noPassword && !form.password) errs.password = "Enter the repository password.";
+    return errs;
+  };
+
+  // The same missing fields, named in one line beside the buttons: the fields themselves are
+  // marked too, but Name sits at the top of the dialog and is out of view when the user has
+  // scrolled down to click Open.
+  const missingFieldLabels = [
+    fieldErrors.name && "Name",
+    fieldErrors.path && (pathMode === "local" ? "Folder" : "Repository URL"),
+    fieldErrors.password && "Repository password",
+  ].filter((l): l is string => !!l);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (duplicateSecretsLoading || duplicateSecretsError) return;
-    if (!form.name || !form.path || (!noPassword && !form.password)) {
-      setError("All fields are required.");
+    const missing = requiredFieldErrors(true);
+    if (Object.keys(missing).length > 0) {
+      setFieldErrors(missing);
+      // Name is the first field and scrolls out of view in a short window; bring it back so the
+      // marker on it is actually seen. (The summary beside the buttons names every missing field.)
+      if (missing.name) nameInputRef.current?.focus();
       return;
     }
     setLoading(true);
@@ -535,9 +580,9 @@ export default function RepositoriesPage() {
     const credentials = buildAddCredentials();
     try {
       if (modalMode === "init") {
-        await initRepo({ id, name: form.name, path, password: form.password, credentials });
+        await initRepo({ id, name: form.name, path, password: form.password, insecureTls: supportsInsecureTls(path) && insecureTls, credentials });
       } else {
-        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, credentials });
+        await addRepo({ id, name: form.name, path, password: noPassword ? "" : form.password, readOnly, insecureTls: supportsInsecureTls(path) && insecureTls, appendOnly: supportsAppendOnly(path) && appendOnly, credentials });
         // A duplicate keeps the source's "prune after retention" choice (add has no checkbox for
         // it). Best-effort: the repo already exists, so a failure here must not read as a failed
         // add and invite a second, duplicate-of-the-duplicate submit.
@@ -633,6 +678,14 @@ export default function RepositoriesPage() {
       if (editReadOnly !== editTarget.readOnly) {
         await updateRepoReadOnly(editTarget.id, editReadOnly);
       }
+      const newInsecureTls = supportsInsecureTls(trimmedPath) && editInsecureTls;
+      if (newInsecureTls !== editTarget.insecureTls) {
+        await updateRepoInsecureTls(editTarget.id, newInsecureTls);
+      }
+      const newAppendOnly = supportsAppendOnly(trimmedPath) && editAppendOnly;
+      if (newAppendOnly !== editTarget.appendOnly) {
+        await updateRepoAppendOnly(editTarget.id, newAppendOnly);
+      }
       // The checkbox is disabled while read-only, so its stored value is left alone rather than
       // reset — unticking read-only later brings the same choice back.
       if (!editReadOnly && editDeferPrune !== editTarget.deferPrune) {
@@ -672,6 +725,8 @@ export default function RepositoriesPage() {
     setEditPassword("");
     setEditNoPassword(false);
     setEditReadOnly(repo.readOnly);
+    setEditInsecureTls(repo.insecureTls);
+    setEditAppendOnly(repo.appendOnly);
     setEditDeferPrune(repo.deferPrune);
     setEditTestResult(null);
     setEditCredentialRows([]);
@@ -723,6 +778,8 @@ export default function RepositoriesPage() {
     setForm({ name: uniqueCopyName(repo.name, repos), path: repo.path, password: "" });
     setPathMode(remote ? "remote" : "local");
     setReadOnly(repo.readOnly);
+    setInsecureTls(repo.insecureTls);
+    setAppendOnly(repo.appendOnly);
     setModalMode("add");
     setDuplicateSecretsError(false);
     setDuplicateSecretsLoading(true);
@@ -748,8 +805,9 @@ export default function RepositoriesPage() {
   };
 
   const handleTest = async () => {
-    if (!form.path || (!noPassword && !form.password)) {
-      setTestResult({ ok: false, message: "Path and password are required to test." });
+    const missing = requiredFieldErrors(false);
+    if (Object.keys(missing).length > 0) {
+      setFieldErrors(missing);
       return;
     }
     setTesting(true);
@@ -758,8 +816,22 @@ export default function RepositoriesPage() {
     // (folder-picker sourced) must not be trimmed.
     const testPath = pathMode === "remote" ? form.path.trim() : form.path;
     try {
-      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, buildAddCredentials());
-      setTestResult({ ok: true, message: "Connection successful — repository is accessible." });
+      const useInsecureTls = supportsInsecureTls(testPath) && insecureTls;
+      const credentials = buildAddCredentials();
+      await testRepoConnection(testPath, noPassword ? "" : form.password, readOnly, useInsecureTls, credentials);
+      let message = "Connection successful — repository is accessible.";
+      // Only now that the connection works is a 403 to the probe unambiguous (auth and path
+      // problems would have failed above) — see rest_probe.rs. A probe failure never fails
+      // the test.
+      if (supportsAppendOnly(testPath)) {
+        const probe = await detectAppendOnly(testPath, useInsecureTls, credentials).catch(() => null);
+        if (probe) {
+          const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, appendOnly);
+          setAppendOnly(detected);
+          if (note) message += "\n" + note;
+        }
+      }
+      setTestResult({ ok: true, message });
     } catch (err: any) {
       setTestResult({ ok: false, message: String(err) });
     } finally {
@@ -769,7 +841,10 @@ export default function RepositoriesPage() {
 
   const pickFolder = async () => {
     const selected = await open({ directory: true, multiple: false });
-    if (selected) setForm((f) => ({ ...f, path: selected as string }));
+    if (selected) {
+      setForm((f) => ({ ...f, path: selected as string }));
+      setFieldErrors((f) => ({ ...f, path: undefined }));
+    }
   };
 
   useEffect(() => {
@@ -981,6 +1056,22 @@ export default function RepositoriesPage() {
                         title="Every restic call uses --no-lock; writing operations are disabled."
                       >
                         Read-only
+                      </span>
+                    )}
+                    {repo.appendOnly && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                        title="The server is append-only: deleting or modifying existing snapshots (forget, prune, tag, retention) is disabled."
+                      >
+                        Append-only
+                      </span>
+                    )}
+                    {repo.insecureTls && (
+                      <span
+                        className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-amber-500 text-amber-400 flex-shrink-0 whitespace-nowrap"
+                        title="TLS certificate verification is turned off for this repository (--insecure-tls)."
+                      >
+                        Insecure TLS
                       </span>
                     )}
                     {repo.deferPrune && !repo.readOnly && (
@@ -1229,8 +1320,8 @@ export default function RepositoriesPage() {
                 {hasBrokenRestUserinfo(editPath.trim() || editTarget.path) ? (
                   <p className="text-xs text-amber-400">
                     A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
-                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
-                    Credentials below instead (or percent-encode them — / → %2F).
+                    Remove them from the URL and enter them as Server username / Server password
+                    below instead (or percent-encode them — / → %2F).
                   </p>
                 ) : hasInlineRestUserinfo(editPath.trim() || editTarget.path) &&
                   editCredentialRows.some(([k]) => k.trim() !== "") ? (
@@ -1258,12 +1349,19 @@ export default function RepositoriesPage() {
                       </button>
                     )}
                   </div>
-                  {commonCredentialKeys(editPath.trim() || editTarget.path) && (
-                    <p className="text-xs text-gray-500">
-                      {commonCredentialKeys(editPath.trim() || editTarget.path)}
-                    </p>
+                  {detectBackend(editPath.trim() || editTarget.path) === "rest" ? (
+                    <RestServerLogin
+                      rows={editCredentialRows}
+                      onChange={(rows) => { setEditCredentialRows(rows); setEditTestResult(null); }}
+                    />
+                  ) : (
+                    commonCredentialKeys(editPath.trim() || editTarget.path) && (
+                      <p className="text-xs text-gray-500">
+                        {commonCredentialKeys(editPath.trim() || editTarget.path)}
+                      </p>
+                    )
                   )}
-                  {editCredentialRows.map(([k, v], i) => (
+                  {editCredentialRows.map(([k, v], i) => detectBackend(editPath.trim() || editTarget.path) === "rest" && isRestLoginKey(k) ? null : (
                     <div key={i} className="flex items-center gap-2">
                       <input
                         type="text"
@@ -1289,14 +1387,16 @@ export default function RepositoriesPage() {
                       </Button>
                     </div>
                   ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setEditCredentialRows((rows) => [...rows, ["", ""]])}
-                  >
-                    + Add credential
-                  </Button>
+                  {detectBackend(editPath.trim() || editTarget.path) !== "rest" && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setEditCredentialRows((rows) => [...rows, ["", ""]])}
+                    >
+                      + Add credential
+                    </Button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1324,16 +1424,15 @@ export default function RepositoriesPage() {
             // re-init (not supported), and flipping a password repo to
             // passwordless would just store "" and brick it.
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-400 font-medium">Password</label>
+              <label className="text-sm text-gray-400 font-medium">Repository password</label>
               <div className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm italic text-gray-500">
                 No Password (--insecure-no-password)
               </div>
             </div>
           ) : (
             <Input
-              label="Password"
+              label="Repository password"
               type="password"
-              placeholder="Repository password"
               value={editPassword}
               onChange={(e) => { setEditPassword(e.target.value); setEditTestResult(null); }}
             />
@@ -1349,6 +1448,16 @@ export default function RepositoriesPage() {
             />
             Read-only repository (--no-lock)
           </label>
+          <InsecureTlsField
+            path={editPath}
+            checked={editInsecureTls}
+            onChange={(v) => { setEditInsecureTls(v); setEditTestResult(null); }}
+          />
+          <AppendOnlyField
+            path={editPath}
+            checked={editAppendOnly}
+            onChange={(v) => { setEditAppendOnly(v); setEditTestResult(null); }}
+          />
           <label className={`flex items-center gap-2 text-sm ${editReadOnly ? "text-gray-500" : "text-gray-400"}`}>
             <input
               type="checkbox"
@@ -1359,7 +1468,7 @@ export default function RepositoriesPage() {
             Prune after retention (forget --prune)
           </label>
           {editTestResult && (
-            <div className={`text-sm rounded-lg px-3 py-2 ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
+            <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${editTestResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {editTestResult.message}
             </div>
           )}
@@ -1383,8 +1492,18 @@ export default function RepositoriesPage() {
                   const credentials = editCredentialRows
                     .map(([k, v]): [string, string] => [k.trim(), credentialValue(k.trim(), v)])
                     .filter(([k]) => k !== "");
-                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, credentials);
-                  setEditTestResult({ ok: true, message: "Connection successful — repository is accessible." });
+                  const useInsecureTls = supportsInsecureTls(editPath) && editInsecureTls;
+                  await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, useInsecureTls, credentials);
+                  let message = "Connection successful — repository is accessible.";
+                  if (supportsAppendOnly(editPath)) {
+                    const probe = await detectAppendOnly(editPath.trim(), useInsecureTls, credentials).catch(() => null);
+                    if (probe) {
+                      const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, editAppendOnly);
+                      setEditAppendOnly(detected);
+                      if (note) message += "\n" + note;
+                    }
+                  }
+                  setEditTestResult({ ok: true, message });
                 } catch (err: any) {
                   setEditTestResult({ ok: false, message: String(err) });
                 } finally {
@@ -1490,9 +1609,17 @@ export default function RepositoriesPage() {
                     // A read-only repo may be a mirror source (already filtered out via
                     // mirrorSource above) but never a destination.
                     .filter((r) => r.id !== mirrorSource?.id && !r.readOnly)
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                    ))}
+                    .map((r) => {
+                      // restic's --insecure-tls is process-wide, so the backend refuses a
+                      // pair where it would silently weaken the other side (repo.rs's
+                      // check_tls_compat) — grey those out rather than fail after the click.
+                      const tlsConflict = !!mirrorSource && insecureTlsConflict(mirrorSource, r);
+                      return (
+                        <option key={r.id} value={r.id} disabled={tlsConflict}>
+                          {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                        </option>
+                      );
+                    })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
@@ -1647,7 +1774,7 @@ export default function RepositoriesPage() {
               // repo except the one currently pruning, so a click on a *different* repo can't
               // silently reopen the modal onto the wrong repo's live progress (the
               // reset-on-open logic below only skips resetting pruneTarget for that same repo).
-              disabled: contextMenu.repo.readOnly || (pruning && pruneTarget?.id !== contextMenu.repo.id),
+              disabled: contextMenu.repo.readOnly || contextMenu.repo.appendOnly || (pruning && pruneTarget?.id !== contextMenu.repo.id),
               onClick: () => {
                 // Only reset to a fresh confirm screen when nothing is running — a
                 // still-running prune (survived a prior Hide) should reopen into its live
@@ -1678,10 +1805,12 @@ export default function RepositoriesPage() {
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
+            ref={nameInputRef}
             label="Name"
             placeholder="e.g. Home Backup"
             value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            error={fieldErrors.name}
+            onChange={(e) => { setForm({ ...form, name: e.target.value }); setFieldErrors((f) => ({ ...f, name: undefined })); }}
             onClear={() => setForm({ ...form, name: "" })}
           />
           <div>
@@ -1706,7 +1835,7 @@ export default function RepositoriesPage() {
             </div>
             {pathMode === "local" ? (
               <div className="flex items-center gap-2">
-                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-500"}`}>
+                <span className={`flex-1 px-3 py-2 rounded-lg bg-gray-800 border ${fieldErrors.path ? "border-red-700" : "border-gray-700"} text-sm font-mono truncate min-w-0 ${form.path ? "text-gray-300" : "text-gray-500"}`}>
                   {form.path || "No folder selected"}
                 </span>
                 <Button type="button" variant="secondary" size="sm" onClick={pickFolder}>
@@ -1717,10 +1846,10 @@ export default function RepositoriesPage() {
               <div className="space-y-3">
                 <input
                   type="text"
-                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500"
+                  className={`w-full px-3 py-2 rounded-lg bg-gray-800 border ${fieldErrors.path ? "border-red-700" : "border-gray-700"} text-sm font-mono text-gray-300 focus:outline-none focus:border-blue-500 placeholder-gray-500`}
                   value={form.path}
-                  onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); }}
-                  placeholder="s3:s3.amazonaws.com/bucket or sftp:user@host:/path"
+                  onChange={(e) => { setForm({ ...form, path: e.target.value }); setTestResult(null); setFieldErrors((f) => ({ ...f, path: undefined })); }}
+                  placeholder="s3:s3.amazonaws.com/bucket, sftp:user@host:/path or rest:https://host:8000/repo"
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
@@ -1730,8 +1859,8 @@ export default function RepositoriesPage() {
                 {hasBrokenRestUserinfo(form.path) ? (
                   <p className="text-xs text-amber-400">
                     A /, @, ?, or # in the username or password breaks restic&rsquo;s URL parsing.
-                    Remove them from the URL and set RESTIC_REST_USERNAME / RESTIC_REST_PASSWORD in
-                    Credentials below instead (or percent-encode them — / → %2F).
+                    Remove them from the URL and enter them as Server username / Server password
+                    below instead (or percent-encode them — / → %2F).
                   </p>
                 ) : hasInlineRestUserinfo(form.path) && credentialRows.some(([k]) => k.trim() !== "") ? (
                   <p className="text-xs text-gray-500">
@@ -1743,12 +1872,19 @@ export default function RepositoriesPage() {
                   <label className="block text-xs font-medium text-gray-400">
                     Credentials (optional)
                   </label>
-                  {commonCredentialKeys(form.path) && (
-                    <p className="text-xs text-gray-500">
-                      {commonCredentialKeys(form.path)}
-                    </p>
+                  {detectBackend(form.path) === "rest" ? (
+                    <RestServerLogin
+                      rows={credentialRows}
+                      onChange={(rows) => { setCredentialRows(rows); setTestResult(null); }}
+                    />
+                  ) : (
+                    commonCredentialKeys(form.path) && (
+                      <p className="text-xs text-gray-500">
+                        {commonCredentialKeys(form.path)}
+                      </p>
+                    )
                   )}
-                  {credentialRows.map(([k, v], i) => (
+                  {credentialRows.map(([k, v], i) => detectBackend(form.path) === "rest" && isRestLoginKey(k) ? null : (
                     <div key={i} className="flex items-center gap-2">
                       <input
                         type="text"
@@ -1774,24 +1910,30 @@ export default function RepositoriesPage() {
                       </Button>
                     </div>
                   ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setCredentialRows((rows) => [...rows, ["", ""]])}
-                  >
-                    + Add credential
-                  </Button>
+                  {/* A rest: URL has its two dedicated fields above; the generic "add a variable"
+                      button stays for every other backend. Other rows already stored on a rest:
+                      repo still show in the list (nothing is hidden or lost). */}
+                  {detectBackend(form.path) !== "rest" && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setCredentialRows((rows) => [...rows, ["", ""]])}
+                    >
+                      + Add credential
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
+            {fieldErrors.path && <p className="text-xs text-red-300 mt-1">{fieldErrors.path}</p>}
           </div>
           <Input
-            label="Password"
+            label="Repository password"
             type="password"
-            placeholder="Repository password"
             value={form.password}
-            onChange={(e) => { setForm({ ...form, password: e.target.value }); setTestResult(null); }}
+            error={fieldErrors.password}
+            onChange={(e) => { setForm({ ...form, password: e.target.value }); setTestResult(null); setFieldErrors((f) => ({ ...f, password: undefined })); }}
             disabled={modalMode === "add" && noPassword}
           />
           {modalMode === "add" && (
@@ -1821,10 +1963,29 @@ export default function RepositoriesPage() {
               Read-only repository (--no-lock)
             </label>
           )}
+          <InsecureTlsField
+            path={form.path}
+            checked={insecureTls}
+            onChange={(v) => { setInsecureTls(v); setTestResult(null); }}
+          />
+          {/* Not offered when creating a repository (init): a brand-new repo can't be known to be
+              append-only yet — set it later from Edit, or let Test Connection detect it. */}
+          {modalMode === "add" && (
+            <AppendOnlyField
+              path={form.path}
+              checked={appendOnly}
+              onChange={(v) => { setAppendOnly(v); setTestResult(null); }}
+            />
+          )}
           {testResult && (
-            <div className={`text-sm rounded-lg px-3 py-2 ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
+            <div className={`text-sm rounded-lg px-3 py-2 whitespace-pre-wrap break-words ${testResult.ok ? "bg-green-900/40 text-green-300 border border-green-700" : "bg-red-900/40 text-red-300 border border-red-700"}`}>
               {testResult.message}
             </div>
+          )}
+          {missingFieldLabels.length > 0 && (
+            <p className="text-sm text-red-300">
+              Missing required {missingFieldLabels.length === 1 ? "field" : "fields"}: {missingFieldLabels.join(", ")}.
+            </p>
           )}
           {error && <p className="text-sm text-red-300">{error}</p>}
           <div className="flex items-center justify-between pt-2">

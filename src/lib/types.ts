@@ -7,6 +7,15 @@ export interface Repository {
    * being a mirror/copy destination) is refused — see CLAUDE.md's Restic
    * Integration section. A read-only repo may still be a mirror/copy *source*. */
   readOnly: boolean;
+  /** The `rest:` server runs `rest-server --append-only`: it refuses deleting or modifying
+   * existing data, so forget / prune / tag / retention are disabled for this repo (backups,
+   * restores and copying into it still work). Set by the user or by the connection test's
+   * detection — see AppendOnlyField, repo.rs's ensure_can_delete and docs/restic.md. */
+  appendOnly: boolean;
+  /** `--insecure-tls`: restic skips TLS certificate verification for this repo (a
+   * `rest:https://` server with a self-signed certificate, say). The user's explicit
+   * acknowledgement — see InsecureTlsField and docs/restic.md. */
+  insecureTls: boolean;
   /** When true, retention runs plain `forget` (no `--prune`) for this repo; storage is
    * reclaimed only by an explicit prune. Lives on the repo because early-deletion fees
    * depend on where it is stored. Prune All still prunes it. */
@@ -39,6 +48,8 @@ export interface NewRepoInput {
   path: string;
   password: string;
   readOnly?: boolean;
+  insecureTls?: boolean;
+  appendOnly?: boolean;
   credentials?: [string, string][];
 }
 
@@ -156,8 +167,20 @@ export interface BackupOutcome {
   warningCount: number;
   missingSourceCount: number;
   warnings: BackupWarning[];
-  /** True when retention must not follow (a whole source path was missing). */
+  /** True when retention must not follow (see `retentionSkippedReason`). */
   retentionSkipped: boolean;
+  /** Why: a whole source path was missing (transient — retention resumes after the next
+   * complete backup) or the repo is append-only (permanent). */
+  retentionSkippedReason?: RetentionSkipReason | null;
+}
+
+export type RetentionSkipReason = "missingSource" | "appendOnly";
+
+/** Result of `detectAppendOnly` (rest_probe.rs): what the server's answer to a harmless
+ * DELETE of a nonexistent blob says about `--append-only`. */
+export interface AppendOnlyProbe {
+  status: "appendOnly" | "notAppendOnly" | "undetermined";
+  detail: string;
 }
 
 /** Sentinel `error` value for a genuinely cancelled backup — see snapshot.rs's

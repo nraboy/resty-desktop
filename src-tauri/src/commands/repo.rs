@@ -23,6 +23,10 @@ pub struct NewRepoInput {
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
+    pub insecure_tls: bool,
+    #[serde(default)]
+    pub append_only: bool,
+    #[serde(default)]
     pub credentials: Vec<(String, String)>,
 }
 
@@ -140,6 +144,7 @@ pub(crate) fn apply_from_repo_password(cmd: &mut std::process::Command, password
 pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
     apply_backend_env(cmd, &repo.credentials);
     apply_repo_password(cmd, &repo.password);
+    apply_tls_flags(cmd, repo);
     if repo.read_only {
         cmd.arg("--no-lock");
     }
@@ -151,9 +156,62 @@ pub(crate) fn apply_repo_flags(cmd: &mut std::process::Command, repo: &FullRepos
 pub(crate) fn apply_from_repo_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
     apply_backend_env(cmd, &repo.credentials);
     apply_from_repo_password(cmd, &repo.password);
+    apply_tls_flags(cmd, repo);
     if repo.read_only {
         cmd.arg("--no-lock");
     }
+}
+
+/// Appends restic's global `--insecure-tls` (skip TLS certificate verification) when the
+/// repo has it set. Restic has no env-var form of this flag, and it is process-wide: there
+/// is no `--from-` counterpart, so on a copy/mirror it covers *both* repositories (see
+/// `check_tls_compat`, which refuses a pair where that would weaken the other side).
+///
+/// `apply_repo_flags`/`apply_from_repo_flags` call this, so every call site going through
+/// them is covered. The sites that build their `Command` inline (backup, prune, and the
+/// copy/mirror destination side) call it explicitly, next to `apply_backend_env`.
+pub(crate) fn apply_tls_flags(cmd: &mut std::process::Command, repo: &FullRepository) {
+    // Idempotent: copy/mirror apply it for the destination explicitly and again through
+    // `apply_from_repo_flags` for the source, and a flag given twice is just noise in the
+    // arg list.
+    if repo.insecure_tls && !cmd.get_args().any(|a| a == "--insecure-tls") {
+        cmd.arg("--insecure-tls");
+    }
+}
+
+/// True when the repo's transport verifies TLS certificates, i.e. `--insecure-tls`
+/// would change its security: `rest:https://` and the HTTPS object stores. Local paths,
+/// `sftp:`, `rclone:` and plain `rest:http://` are unaffected by the flag.
+fn verifies_tls(path: &str) -> bool {
+    // The backend prefix is case-sensitive (restic rejects `REST:`; `detect_kind` agrees);
+    // the URL scheme after `rest:` is not.
+    let https_rest = path
+        .strip_prefix("rest:")
+        .is_some_and(|rest| rest.to_ascii_lowercase().starts_with("https://"));
+    https_rest
+        || path.starts_with("s3:")
+        || path.starts_with("b2:")
+        || path.starts_with("azure:")
+        || path.starts_with("gs:")
+}
+
+pub(crate) const MIXED_INSECURE_TLS_ERROR: &str =
+    "These repositories can't be used together: certificate verification is turned off \
+     (--insecure-tls) for one of them, and restic applies that flag to the whole copy \
+     operation, which would also disable verification for the other one. Turn it on for \
+     both repositories or neither.";
+
+/// Pre-flight for `copy_snapshot`/`mirror_repo`, run alongside `merge_credentials` before
+/// either repo takes a lock: refuses a pair where `--insecure-tls` on one side would
+/// silently disable certificate verification for the other (a TLS-verifying remote).
+pub(crate) fn check_tls_compat(dest: &FullRepository, src: &FullRepository) -> Result<(), String> {
+    let weakens = |flagged: &FullRepository, other: &FullRepository| {
+        flagged.insecure_tls && !other.insecure_tls && verifies_tls(&other.path)
+    };
+    if weakens(dest, src) || weakens(src, dest) {
+        return Err(MIXED_INSECURE_TLS_ERROR.to_string());
+    }
+    Ok(())
 }
 
 /// Sets each stored backend credential (e.g. `AWS_ACCESS_KEY_ID`, `B2_ACCOUNT_ID`) as
@@ -283,24 +341,165 @@ pub(crate) fn ensure_writable(repo: &FullRepository) -> Result<(), String> {
     Ok(())
 }
 
+/// Error returned by every command that deletes or rewrites existing repository data when
+/// the repo sits behind `rest-server --append-only`.
+pub(crate) const APPEND_ONLY_REPO_ERROR: &str =
+    "This repository is on an append-only server: deleting or modifying existing snapshots \
+     (forget, prune, tag) is not allowed. Backups, restores and copying into it still work.";
+
+/// `ensure_writable` plus the append-only rule, for the commands that remove or rewrite
+/// existing data: `delete_snapshot`, `apply_retention`, `prune_repo`/`prune_all_repos`, and
+/// `tag_snapshot` — a tag change rewrites the snapshot (saves a new one, then deletes the
+/// old), so on an append-only server the delete fails and leaves a **duplicate snapshot**
+/// behind; it must be refused up front, not allowed to fail halfway. Backup, restore,
+/// check, unlock (locks are always deletable) and being a copy/mirror destination (they only
+/// add) deliberately stay on plain `ensure_writable`.
+pub(crate) fn ensure_can_delete(repo: &FullRepository) -> Result<(), String> {
+    ensure_writable(repo)?;
+    if repo.append_only {
+        return Err(APPEND_ONLY_REPO_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// The fully-configured one-shot `Command` shared by `run_restic_with_path` and
+/// `run_restic_with_timeout` (repository env, password, credentials, TLS/lock flags, null
+/// stdin, no console window).
+fn one_shot_command(repo: &FullRepository, args: Vec<&str>, restic_path: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(restic_path);
+    cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
+    apply_repo_flags(&mut cmd, repo);
+    cmd.stdin(std::process::Stdio::null()).no_console().augment_path();
+    cmd
+}
+
 pub fn run_restic_with_path(
     repo: &FullRepository,
     args: Vec<&str>,
     restic_path: &str,
 ) -> Result<String, String> {
-    let mut cmd = std::process::Command::new(restic_path);
-    cmd.args(args).env("RESTIC_REPOSITORY", &repo.path);
-    apply_repo_flags(&mut cmd, repo);
-    let output = cmd
-        .stdin(std::process::Stdio::null())
-        .no_console()
-        .augment_path()
+    let output = one_shot_command(repo, args, restic_path)
         .output()
         .map_err(|e| format!("Failed to run restic: {e}"))?;
     if output.status.success() {
         String::from_utf8(output.stdout).map_err(|e| format!("restic output contained invalid UTF-8: {e}"))
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        // A recognized `rest:` failure gets a plain-language hint appended after restic's own
+        // text (never replacing it — callers match on substrings such as "already locked").
+        Err(backends::append_rest_hint(
+            &repo.path,
+            repo.insecure_tls,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+/// How long a remote connection test waits before giving up. restic retries an
+/// unreachable backend with exponential backoff for many minutes (it has no flag to
+/// bound that), so without a deadline "Test Connection" against a wrong host or scheme
+/// would appear to hang.
+const CONNECTION_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How long to wait for the output readers after restic has exited or been killed. A
+/// wrapper backend (e.g. `rclone:`) can leave a helper process holding the inherited
+/// stdout/stderr pipes open, in which case reading to EOF would block forever.
+const READER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What restic prints, per failed attempt, while it backs off and retries a backend error.
+const RESTIC_RETRY_MARKER: &str = "retrying after";
+
+/// Like `run_restic_with_path`, for a *connection test*: it stops at the first sign of
+/// trouble instead of letting restic back off for minutes.
+///
+/// - **Fail fast.** restic treats many failures of its first request (`Stat <config/>`) — a
+///   certificate it can't verify, a refused connection, a wrong scheme — as retryable, and
+///   announces each with a `… retrying after Ns` line. The first such line already says what is
+///   wrong, so restic is killed there and that error (plus the usual `rest:` hint) is returned;
+///   waiting only repeats the same failing handshake against the server.
+/// - **Deadline.** Anything that neither finishes nor reports a retry within `timeout` is killed
+///   and fails with `backends::CONNECTION_TIMEOUT_MARKER`.
+fn run_restic_with_timeout(
+    repo: &FullRepository,
+    args: Vec<&str>,
+    restic_path: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+
+    let mut child = one_shot_command(repo, args, restic_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run restic: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("failed to capture restic stdout")?;
+    let stderr = child.stderr.take().ok_or("failed to capture restic stderr")?;
+    // The readers report over channels rather than being joined: `kill()` only reaches the
+    // direct child, so a helper that inherited the pipes would keep them open and a `join()`
+    // would never return — defeating the very deadline this function exists to enforce. A
+    // reader stuck that way is simply abandoned (it ends when the helper does).
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    let retry_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        stdout.read_to_string(&mut s).ok();
+        let _ = out_tx.send(s);
+    });
+    let retry_flag = std::sync::Arc::clone(&retry_seen);
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut s = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            s.push_str(&line);
+            s.push('\n');
+            if line.contains(RESTIC_RETRY_MARKER) {
+                retry_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _ = err_tx.send(s);
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut failed_fast = false;
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("Failed to wait for restic: {e}"))? {
+            Some(status) => break Some(status),
+            None if retry_seen.load(std::sync::atomic::Ordering::SeqCst) => {
+                failed_fast = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    let stdout = out_rx.recv_timeout(READER_DRAIN_TIMEOUT).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(READER_DRAIN_TIMEOUT).unwrap_or_default();
+
+    match status {
+        Some(status) if status.success() => Ok(stdout),
+        Some(_) => Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, stderr)),
+        // Killed on the first retry line: restic's own message is the answer.
+        None if failed_fast => {
+            let first: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).take(3).collect();
+            Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, first.join("\n")))
+        }
+        None => {
+            let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = tail[tail.len().saturating_sub(3)..].join("\n");
+            let msg = format!(
+                "{} after {} seconds (restic keeps retrying an unreachable server).\n{tail}",
+                backends::CONNECTION_TIMEOUT_MARKER,
+                timeout.as_secs()
+            );
+            Err(backends::append_rest_hint(&repo.path, repo.insecure_tls, msg))
+        }
     }
 }
 
@@ -347,6 +546,8 @@ pub async fn add_repo(
         &nonce,
         &ciphertext,
         input.read_only,
+        input.insecure_tls,
+        input.append_only,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -396,6 +597,24 @@ pub async fn update_repo_read_only(
     read_only: bool,
 ) -> Result<(), String> {
     db.set_repo_read_only(&repo_id, read_only)
+}
+
+#[tauri::command]
+pub async fn update_repo_insecure_tls(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    insecure_tls: bool,
+) -> Result<(), String> {
+    db.set_repo_insecure_tls(&repo_id, insecure_tls)
+}
+
+#[tauri::command]
+pub async fn update_repo_append_only(
+    db: State<'_, AppDb>,
+    repo_id: String,
+    append_only: bool,
+) -> Result<(), String> {
+    db.set_repo_append_only(&repo_id, append_only)
 }
 
 #[tauri::command]
@@ -472,6 +691,9 @@ pub async fn init_repo(
         path: input.path.clone(),
         password: input.password.clone(),
         read_only: false,
+        insecure_tls: input.insecure_tls,
+        // A repository being created is, by definition, not append-only yet.
+        append_only: false,
         credentials: credentials.clone(),
     };
     run_restic_blocking(dummy, vec!["init".into()], restic_path).await.map(|_| ())?;
@@ -486,6 +708,12 @@ pub async fn init_repo(
         &nonce,
         &ciphertext,
         false,
+        input.insecure_tls,
+        // `restic init` creates a repository whose server can't be known to be append-only
+        // yet: the flag is only ever set later, from the edit dialog (manually or via
+        // detection). `NewRepoInput::append_only` applies to `add_repo` (opening an existing
+        // repo) only.
+        false,
         cred_nonce.as_deref(),
         cred_ciphertext.as_deref(),
     )
@@ -499,6 +727,7 @@ pub async fn test_repo_connection(
     path: String,
     password: String,
     read_only: bool,
+    insecure_tls: bool,
     credentials: Vec<(String, String)>,
 ) -> Result<(), String> {
     let kind = backends::detect_kind(&path);
@@ -509,10 +738,21 @@ pub async fn test_repo_connection(
     let task_ctx = OperationCtx::new(app, TaskKind::TestConnection, String::new(), None, TaskOrigin::Manual, None);
     let credentials: Vec<Credential> =
         credentials.into_iter().map(|(key, value)| Credential { key, value }).collect();
-    let dummy = FullRepository { path, password, read_only, credentials };
-    let result = run_restic_blocking(dummy, vec!["snapshots".into(), "--json".into()], restic_path)
-        .await
-        .map(|_| ());
+    let dummy = FullRepository { path, password, read_only, insecure_tls, append_only: false, credentials };
+    // A `rest:` repo gets a deadline: restic would otherwise retry an unreachable host for
+    // many minutes. Other backends (S3/B2/sftp/…) can be legitimately slow to open and have
+    // no hint logic to explain a timeout, so they keep the plain call, as do local paths.
+    let timeout = (kind == backends::BackendKind::Rest).then_some(CONNECTION_TEST_TIMEOUT);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let args = vec!["snapshots", "--json"];
+        match timeout {
+            Some(t) => run_restic_with_timeout(&dummy, args, &restic_path, t),
+            None => run_restic_with_path(&dummy, args, &restic_path),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|_| ());
     match &result {
         Ok(_) => task_ctx.finished(),
         Err(e) => task_ctx.failed(e.clone()),
@@ -807,6 +1047,7 @@ async fn run_one_prune_attempt(
     cmd.arg("prune").env("RESTIC_REPOSITORY", &full.path);
     apply_backend_env(&mut cmd, &full.credentials);
     apply_repo_password(&mut cmd, &full.password);
+    apply_tls_flags(&mut cmd, full);
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -902,7 +1143,8 @@ async fn run_one_prune_attempt(
         Ok(PruneAttempt::Success)
     } else {
         let msg = captured_stderr.trim();
-        Ok(PruneAttempt::Failed(if msg.is_empty() { "Prune failed".to_string() } else { msg.to_string() }))
+        let msg = if msg.is_empty() { "Prune failed".to_string() } else { msg.to_string() };
+        Ok(PruneAttempt::Failed(backends::append_rest_hint(&full.path, full.insecure_tls, msg)))
     }
 }
 
@@ -997,10 +1239,11 @@ pub async fn prune_all_repos(
             Ok(k) => k,
             Err(e) => break 'body Err(e),
         };
-        // Read-only repos are skipped rather than failing the whole batch — prune is a
-        // write, so there's nothing to prune on a repo that can't be written to.
+        // Read-only and append-only repos are skipped rather than failing the whole batch —
+        // prune is a write that deletes, so there's nothing to prune on a repo that can't be
+        // written to or whose server refuses deletes.
         let repos: Vec<Repository> = match db.list_repos() {
-            Ok(r) => r.into_iter().filter(|r| !r.read_only).collect(),
+            Ok(r) => r.into_iter().filter(|r| !r.read_only && !r.append_only).collect(),
             Err(e) => break 'body Err(e),
         };
         let total = repos.len();
@@ -1121,7 +1364,7 @@ pub async fn prune_repo(
             Ok(r) => r,
             Err(e) => break 'body Err(e),
         };
-        if let Err(e) = ensure_writable(&full) {
+        if let Err(e) = ensure_can_delete(&full) {
             break 'body Err(e);
         }
         let restic_path = super::get_restic_path(&db);
@@ -1317,6 +1560,8 @@ mod tests {
         last_nonblank_line, lock_retry_step, merge_credentials, parse_raw_data_size,
         parse_stats_json, validate_init_password, validate_restic_path, LockRetry,
         LOCK_FAILURE_PREFIX, LOCK_RETRIES, READ_ONLY_REPO_ERROR,
+        apply_tls_flags, check_tls_compat, ensure_can_delete, run_restic_with_timeout, APPEND_ONLY_REPO_ERROR,
+        MIXED_INSECURE_TLS_ERROR,
     };
     use super::super::cache::{Credential, FullRepository};
 
@@ -1434,7 +1679,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_omits_no_lock_for_writable_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: false, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(!cmd.get_args().any(|a| a == "--no-lock"));
     }
@@ -1442,7 +1687,7 @@ mod tests {
     #[test]
     fn apply_repo_flags_adds_no_lock_for_read_only_repo() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "hunter2".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         // Password handling is unaffected by read_only.
@@ -1453,7 +1698,7 @@ mod tests {
     #[test]
     fn apply_from_repo_flags_adds_no_lock_for_read_only_source() {
         let mut cmd = std::process::Command::new("restic");
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         apply_from_repo_flags(&mut cmd, &repo);
         assert!(cmd.get_args().any(|a| a == "--no-lock"));
         assert!(cmd.get_args().any(|a| a == "--from-insecure-no-password"));
@@ -1461,14 +1706,259 @@ mod tests {
 
     #[test]
     fn ensure_writable_ok_for_writable_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: false, insecure_tls: false, append_only: false, credentials: vec![] };
         assert!(ensure_writable(&repo).is_ok());
     }
 
     #[test]
     fn ensure_writable_rejects_read_only_repo() {
-        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, credentials: vec![] };
+        let repo = FullRepository { path: "/tmp/repo".into(), password: "".into(), read_only: true, insecure_tls: false, append_only: false, credentials: vec![] };
         assert_eq!(ensure_writable(&repo).unwrap_err(), READ_ONLY_REPO_ERROR);
+    }
+
+    // ── ensure_can_delete (append-only) ─────────────────────────────────────
+
+    fn flagged(read_only: bool, append_only: bool) -> FullRepository {
+        FullRepository {
+            path: "rest:https://nas/r".into(),
+            password: "pw".into(),
+            read_only,
+            insecure_tls: false,
+            append_only,
+            credentials: vec![],
+        }
+    }
+
+    #[test]
+    fn ensure_can_delete_allows_a_normal_writable_repo() {
+        assert!(ensure_can_delete(&flagged(false, false)).is_ok());
+    }
+
+    #[test]
+    fn ensure_can_delete_refuses_append_only_but_ensure_writable_does_not() {
+        let repo = flagged(false, true);
+        assert_eq!(ensure_can_delete(&repo).unwrap_err(), APPEND_ONLY_REPO_ERROR);
+        // Backups, unlock and copy/mirror destinations only add data (locks are deletable on
+        // an append-only server), so they stay on plain ensure_writable.
+        assert!(ensure_writable(&repo).is_ok());
+    }
+
+    #[test]
+    fn ensure_can_delete_reports_read_only_first() {
+        assert_eq!(ensure_can_delete(&flagged(true, true)).unwrap_err(), READ_ONLY_REPO_ERROR);
+    }
+
+    // ── --insecure-tls ──────────────────────────────────────────────────────
+
+    fn tls_repo(path: &str, insecure_tls: bool) -> FullRepository {
+        FullRepository { path: path.into(), password: "pw".into(), read_only: false, insecure_tls, append_only: false, credentials: vec![] }
+    }
+
+    #[test]
+    fn apply_tls_flags_adds_insecure_tls_only_when_set() {
+        let mut off = std::process::Command::new("restic");
+        apply_tls_flags(&mut off, &tls_repo("rest:https://nas/r", false));
+        assert!(!off.get_args().any(|a| a == "--insecure-tls"));
+
+        let mut on = std::process::Command::new("restic");
+        apply_tls_flags(&mut on, &tls_repo("rest:https://nas/r", true));
+        assert!(on.get_args().any(|a| a == "--insecure-tls"));
+    }
+
+    #[test]
+    fn apply_tls_flags_is_idempotent_across_copy_destination_and_source() {
+        let both = tls_repo("rest:https://nas/r", true);
+        let mut cmd = std::process::Command::new("restic");
+        apply_tls_flags(&mut cmd, &both);
+        apply_from_repo_flags(&mut cmd, &both);
+        assert_eq!(cmd.get_args().filter(|a| *a == "--insecure-tls").count(), 1);
+    }
+
+    /// Restic has no env var for `--insecure-tls`, so every `Command` that sets
+    /// `RESTIC_REPOSITORY` must also go through `apply_repo_flags`/`apply_tls_flags` or it
+    /// silently runs with verification on and fails against a self-signed server even though
+    /// Test Connection passed. This pins the call sites: a new inline site fails here until it
+    /// is added (and the count below updated).
+    #[test]
+    fn every_restic_command_site_applies_tls_flags() {
+        let sources = [
+            ("repo.rs", include_str!("repo.rs")),
+            ("snapshot.rs", include_str!("snapshot.rs")),
+            ("browse.rs", include_str!("browse.rs")),
+        ];
+        let mut sites = 0;
+        for (name, src) in sources {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                // Production code only: stop at the test module.
+                if line.contains("#[cfg(test)]") {
+                    break;
+                }
+                if line.contains(".env(\"RESTIC_REPOSITORY\"") {
+                    sites += 1;
+                    let window = lines[i..(i + 15).min(lines.len())].join("\n");
+                    assert!(
+                        window.contains("apply_repo_flags") || window.contains("apply_tls_flags"),
+                        "{name}:{} sets RESTIC_REPOSITORY without applying TLS flags",
+                        i + 1
+                    );
+                }
+            }
+        }
+        // run_restic_with_path, check_repo, prune, backup, copy dest, mirror dest, index/browse.
+        assert_eq!(sites, 7, "a restic Command site was added or removed; update this test");
+    }
+
+    #[test]
+    fn apply_repo_flags_and_from_flags_carry_insecure_tls() {
+        let repo = tls_repo("rest:https://nas/r", true);
+        let mut cmd = std::process::Command::new("restic");
+        apply_repo_flags(&mut cmd, &repo);
+        assert!(cmd.get_args().any(|a| a == "--insecure-tls"));
+
+        let mut from = std::process::Command::new("restic");
+        apply_from_repo_flags(&mut from, &repo);
+        assert!(from.get_args().any(|a| a == "--insecure-tls"));
+    }
+
+    #[test]
+    fn check_tls_compat_refuses_a_pair_where_the_flag_would_weaken_the_other_side() {
+        let insecure = tls_repo("rest:https://nas/a", true);
+        let verified = tls_repo("rest:https://other/b", false);
+        assert_eq!(check_tls_compat(&insecure, &verified).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
+        assert_eq!(check_tls_compat(&verified, &insecure).unwrap_err(), MIXED_INSECURE_TLS_ERROR);
+        // The URL scheme is case-insensitive; the `rest:` backend prefix is not.
+        let mixed = tls_repo("rest:HTTPS://other/b", false);
+        assert!(check_tls_compat(&insecure, &mixed).is_err());
+        assert!(check_tls_compat(&insecure, &tls_repo("REST:https://other/b", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("s3:s3.amazonaws.com/b", false)).is_err());
+    }
+
+    #[test]
+    fn check_tls_compat_allows_pairs_the_flag_cannot_weaken() {
+        let insecure = tls_repo("rest:https://nas/a", true);
+        assert!(check_tls_compat(&insecure, &tls_repo("rest:https://other/b", true)).is_ok());
+        assert!(check_tls_compat(&tls_repo("rest:https://a/", false), &tls_repo("rest:https://b/", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("/backups/local", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("sftp:u@h:/r", false)).is_ok());
+        assert!(check_tls_compat(&insecure, &tls_repo("rest:http://nas/r", false)).is_ok());
+    }
+
+    // ── run_restic_with_timeout / rest hints (fake restic scripts) ──────────
+
+    /// Writes an executable shell script standing in for the restic binary.
+    #[cfg(unix)]
+    fn fake_restic(name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("resty-fake-restic-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("restic");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_kills_a_hung_restic_and_names_the_problem() {
+        let bin = fake_restic(
+            "hang",
+            "exec sleep 30",
+        );
+        let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(3)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "should not wait for the 30s sleep");
+        assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+        assert!(err.contains("Hint: Couldn't reach the server"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_fails_fast_on_the_first_retry_line_with_the_real_cause() {
+        // restic announces each retryable failure and then sleeps through the backoff; the
+        // connection test must report the first one, not wait out the deadline.
+        let bin = fake_restic(
+            "x509",
+            "echo 'Stat(<config/>) returned error, retrying after 2.8s: Head \"https://:***@127.0.0.1:8443/repo/config\": tls: failed to verify certificate: x509: certificate signed by unknown authority' >&2\nexec sleep 30",
+        );
+        let repo = tls_repo("rest:https://127.0.0.1:8443/repo", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited out the backoff: {err}");
+        assert!(!err.contains(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+        assert!(err.contains("x509: certificate signed by unknown authority"), "{err}");
+        assert!(err.contains("Hint: Couldn't verify the server's TLS certificate"), "{err}");
+
+        // The same failure with certificate verification already off has no TLS hint to give.
+        let insecure = tls_repo("rest:https://127.0.0.1:8443/repo", true);
+        let err = run_restic_with_timeout(&insecure, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
+        assert!(!err.contains("Hint: Couldn't verify"), "{err}");
+    }
+
+    /// Manual check against a real server: `RESTY_TEST_URL=rest:https://127.0.0.1:8443/repo
+    /// [RESTY_TEST_INSECURE=1] cargo test live_connection_test -- --ignored --nocapture`
+    /// (restic on PATH, repository password `pw`).
+    #[test]
+    #[ignore]
+    fn live_connection_test_reports_the_real_cause_quickly() {
+        let url = std::env::var("RESTY_TEST_URL").expect("set RESTY_TEST_URL");
+        let repo = FullRepository {
+            path: url,
+            password: "pw".into(),
+            read_only: false,
+            insecure_tls: std::env::var("RESTY_TEST_INSECURE").is_ok(),
+            append_only: false,
+            credentials: vec![],
+        };
+        let started = std::time::Instant::now();
+        let result = run_restic_with_timeout(&repo, vec!["snapshots", "--json"], "restic", std::time::Duration::from_secs(45));
+        println!("LIVE after {:?}: {:?}", started.elapsed(), result.map(|s| s.len()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_returns_even_if_a_helper_keeps_the_pipes_open() {
+        // The fake restic backgrounds a grandchild that inherits stdout/stderr and outlives
+        // it; killing restic must not leave the call waiting on those pipes.
+        let bin = fake_restic("grandchild", "sleep 30 &\nexec sleep 30");
+        let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(2)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "hung on the inherited pipes: {err}");
+        assert!(err.starts_with(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_returns_stdout_on_success_and_hinted_stderr_on_failure() {
+        let ok = fake_restic("ok", "echo '[]'");
+        let repo = tls_repo("rest:https://nas:8000/alice/", false);
+        let out = run_restic_with_timeout(&repo, vec!["snapshots"], &ok, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(out.trim(), "[]");
+
+        let bad = fake_restic(
+            "401",
+            "echo 'Fatal: unable to open config file: unexpected HTTP response (401): 401 Unauthorized' >&2\nexit 1",
+        );
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bad, std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(err.contains("401 Unauthorized"));
+        assert!(err.contains("Hint: Authentication failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_path_appends_the_hint_after_restic_text() {
+        let bad = fake_restic(
+            "403",
+            "echo 'Remove(<snapshot/45cea74811>) failed: unexpected HTTP response (403): 403 Forbidden' >&2\nexit 1",
+        );
+        let err = super::run_restic_with_path(&tls_repo("rest:https://nas/r", false), vec!["forget", "x"], &bad).unwrap_err();
+        assert!(err.starts_with("Remove(<snapshot/45cea74811>) failed"));
+        assert!(err.contains("Hint: The server refused the request (403 Forbidden)"));
+        // A non-REST repo's error is untouched.
+        let plain = super::run_restic_with_path(&tls_repo("/local/repo", false), vec!["forget", "x"], &bad).unwrap_err();
+        assert!(!plain.contains("Hint:"));
     }
 
     // ── apply_backend_env ───────────────────────────────────────────────────
@@ -1542,6 +2032,8 @@ mod tests {
             path: "/real/repo".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
+            append_only: false,
             credentials: vec![cred("RESTIC_REPOSITORY", "/attacker/repo")],
         };
         apply_repo_flags(&mut cmd, &repo);
@@ -1576,6 +2068,8 @@ mod tests {
             path: "rest:https://real/".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
+            append_only: false,
             credentials: vec![
                 cred("RESTIC_REST_PASSWORD", "pass/word"),
                 cred("RESTIC_REPOSITORY", "rest:https://attacker/"),
@@ -1595,6 +2089,8 @@ mod tests {
             path: "b2:bucket:path".into(),
             password: "hunter2".into(),
             read_only: false,
+            insecure_tls: false,
+            append_only: false,
             credentials: vec![cred("B2_ACCOUNT_ID", "id")],
         };
         apply_repo_flags(&mut cmd, &repo);

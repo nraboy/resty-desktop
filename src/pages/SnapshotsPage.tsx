@@ -6,6 +6,7 @@ import { cancelCopy, cancelRestore, checkRepo, clearSnapshotIndex, copySnapshot,
 import type { IndexStartOutcome } from "../lib/invoke";
 import type { CheckResult, Repository, RestoreProgress, Snapshot, SnapshotStats, TaskEvent } from "../lib/types";
 import { isRemoteRepo } from "../lib/types";
+import { APPEND_ONLY_TITLE, insecureTlsConflict } from "../lib/backends";
 import { capList, formatBytes, formatDate, formatSize } from "../lib/format";
 import Button from "../components/Button";
 import ActionButton from "../components/ActionButton";
@@ -409,6 +410,11 @@ export default function SnapshotsPage() {
     );
   }, [snapshots, filter]);
 
+  // Deleting or rewriting existing snapshots (delete, tag) is refused on a read-only repo and on
+  // an append-only server alike (repo.rs's ensure_can_delete); the title says which.
+  const cannotModify = !!(repo?.readOnly || repo?.appendOnly);
+  const modifyTitle = repo?.readOnly ? "This repository is read-only" : repo?.appendOnly ? APPEND_ONLY_TITLE : undefined;
+
   // Used exclusively as the copy-destination list — a read-only repo may be a copy
   // *source* (this page, when repoId itself is read-only) but never a destination.
   const otherRepos = useMemo(
@@ -492,6 +498,14 @@ export default function SnapshotsPage() {
                   Read-only
                 </span>
               )}
+              {repo.appendOnly && (
+                <span
+                  className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400"
+                  title={APPEND_ONLY_TITLE}
+                >
+                  Append-only
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -555,8 +569,8 @@ export default function SnapshotsPage() {
             )}
             <Button
               variant="danger"
-              disabled={repo?.readOnly ?? false}
-              title={repo?.readOnly ? "This repository is read-only" : undefined}
+              disabled={cannotModify}
+              title={modifyTitle}
               onClick={() => { setMultiDeleteOpen(true); setMultiDeleteDone(false); setMultiDeleteError(""); }}
             >
               Delete selected
@@ -684,8 +698,8 @@ export default function SnapshotsPage() {
                             {!selectMode && (
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleRemoveTag(snap, tag); }}
-                                disabled={repo?.readOnly ?? false}
-                                title={repo?.readOnly ? "This repository is read-only" : undefined}
+                                disabled={cannotModify}
+                                title={modifyTitle}
                                 className="text-gray-500 hover:text-red-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-500"
                               >
                                 ×
@@ -696,8 +710,8 @@ export default function SnapshotsPage() {
                         {!selectMode && (
                           <button
                             onClick={() => { setTagTarget(snap); setNewTag(""); }}
-                            disabled={repo?.readOnly ?? false}
-                            title={repo?.readOnly ? "This repository is read-only" : undefined}
+                            disabled={cannotModify}
+                            title={modifyTitle}
                             className="text-xs text-gray-400 hover:text-blue-400 transition-colors px-1 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-gray-400"
                           >
                             + tag
@@ -748,10 +762,10 @@ export default function SnapshotsPage() {
                           />
                           <ActionButton
                             label="Delete"
-                            title={repo?.readOnly ? "This repository is read-only" : "Delete snapshot"}
+                            title={modifyTitle ?? "Delete snapshot"}
                             tone="red"
                             onClick={() => setDeleteTarget(snap)}
-                            disabled={repo?.readOnly ?? false}
+                            disabled={cannotModify}
                             icon={<TrashIcon className="w-4 h-4" />}
                           />
                         </div>
@@ -923,9 +937,16 @@ export default function SnapshotsPage() {
                   disabled={multiCopying}
                 >
                   <option value="">Select a repository…</option>
-                  {otherRepos.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                  ))}
+                  {otherRepos.map((r) => {
+                    // --insecure-tls is process-wide in restic; the backend refuses a pair where
+                    // it would weaken the other repo (repo.rs's check_tls_compat).
+                    const tlsConflict = !!repo && insecureTlsConflict(repo, r);
+                    return (
+                      <option key={r.id} value={r.id} disabled={tlsConflict}>
+                        {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
@@ -1175,9 +1196,16 @@ export default function SnapshotsPage() {
                   disabled={copying}
                 >
                   <option value="">Select a repository…</option>
-                  {otherRepos.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name} — {r.path}</option>
-                  ))}
+                  {otherRepos.map((r) => {
+                    // --insecure-tls is process-wide in restic; the backend refuses a pair where
+                    // it would weaken the other repo (repo.rs's check_tls_compat).
+                    const tlsConflict = !!repo && insecureTlsConflict(repo, r);
+                    return (
+                      <option key={r.id} value={r.id} disabled={tlsConflict}>
+                        {r.name} — {r.path}{tlsConflict ? " (TLS verification differs)" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500"><ChevronDownIcon className="w-4 h-4" /></div>
               </div>
@@ -1227,7 +1255,7 @@ export default function SnapshotsPage() {
             },
             {
               label: "Add Tag…",
-              disabled: repo?.readOnly ?? false,
+              disabled: cannotModify,
               onClick: () => { setTagTarget(contextMenu.snap); setNewTag(""); },
             },
             {
@@ -1310,7 +1338,7 @@ export default function SnapshotsPage() {
             {
               label: "Delete",
               variant: "danger",
-              disabled: repo?.readOnly ?? false,
+              disabled: cannotModify,
               onClick: () => setDeleteTarget(contextMenu.snap),
             },
           ] satisfies ContextMenuItemDef[]}

@@ -38,7 +38,12 @@ base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 # Blocking HTTP client for webhook delivery, run under spawn_blocking (the app's
 # existing pattern for blocking I/O). `tls` is rustls-based — no native-tls/OpenSSL.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
+# Direct deps only so the rest-server append-only probe (commands/rest_probe.rs) can build its
+# own TLS config (skip-verify for a repo flagged insecure_tls) and parse the repo URL. Both are
+# already in the tree via ureq — same versions, no new crates. `ring` matches ureq's provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+url = "2"
 # Auto-unlock's OS credential-manager access — see commands/keychain.rs. The default `v1`
 # feature selects a platform store itself: macOS Keychain, Windows Credential Manager, and
 # (pure-Rust zbus, no libdbus) Secret Service on Linux. No longer target-scoped — see

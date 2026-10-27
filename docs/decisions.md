@@ -9,6 +9,65 @@ to this file specifically so these aren't re-litigated from scratch.
 These have come up as apparent inefficiencies during codebase audits and were deliberately kept
 as-is. Don't re-flag or "fix" them without understanding why first:
 
+- **`--insecure-tls` is a per-repo, user-acknowledged flag; the recommended fix is trusting the CA in
+  the OS store; mixed copy/mirror pairs are refused.** Self-signed `rest-server --tls` endpoints (the
+  usual NAS setup) fail restic's verification with no built-in override, so `rest:https://` repos get an
+  explicit "Skip TLS certificate verification" checkbox whose tooltip steers users to the secure
+  alternative (add the cert/CA to Keychain / the Windows root store / `update-ca-certificates` — restic
+  uses the system store when `--cacert` is unset). Decisions, each with its reason:
+  - It is a stored per-repo boolean, not a global setting, so one self-signed NAS never weakens any
+    other repo, and it is only offered (and only saved) for `rest:https://` paths.
+  - Restic has no env var for it, so it is appended as a flag at **every** Command site —
+    `apply_repo_flags`/`apply_from_repo_flags` cover the helpers, and the inline sites (backup, prune,
+    copy/mirror destination) call `apply_tls_flags` explicitly. A new inline `Command` must do the same,
+    or that operation will fail on a self-signed server even though Test Connection passed.
+  - `--insecure-tls` is process-wide (no `--from-` form), so `check_tls_compat` **refuses** a
+    copy/mirror pair where it would silently disable verification for the other, unflagged TLS-verifying
+    repo, rather than applying it to both with a warning. Both-flagged and non-TLS counterparts
+    (local, `sftp:`, `rclone:`, `rest:http://`) are allowed. The pickers grey the same targets out.
+  - Import never carries `insecure_tls` over (export still writes it): bundles are plaintext and
+    hand-editable, and the flag sends the repo password to an unauthenticated endpoint, so turning it
+    on must be an explicit act in the edit dialog, never a side effect of importing a file.
+  - `apply_tls_flags` is idempotent, and `every_restic_command_site_applies_tls_flags` (repo.rs tests)
+    pins the `RESTIC_REPOSITORY` call sites so a new inline `Command` can't forget the flag.
+  - Not done on purpose (deferred, not forgotten): TLS client certificates (`RESTIC_TLS_CLIENT_CERT`,
+    PEM with cert + key, stored as a path only) and a per-repo `--cacert` path. Don't add a global
+    "ignore TLS errors" toggle.
+- **`rest:` failure hints are appended, advisory, and keyed off restic's own HTTP status text; a remote
+  connection test of a `rest:` repo has a 45s deadline.** What each status means was read from rest-server's source and
+  checked against a live instance: reads only ever see 401 (credentials *or* a `--private-repos` path
+  mismatch — indistinguishable server-side) and 404; **403 comes only from writes** (deleting/modifying
+  under `--append-only`, re-creating existing config/blobs), so the hint for 403 names append-only and
+  the connection test never claims a path problem for it. Hints are appended after restic's text, never
+  replacing it (callers substring-match for "already locked"), and never change state. The connection test
+  **fails fast** (kills restic at its first "retrying after" line) and also has a 45s deadline, because
+  restic retries a refused/misdirected/untrusted-certificate first request for ~15 minutes with no flag
+  to cap it — verified: `restic init` fails at once on an untrusted certificate but `restic snapshots`
+  (what the test runs) backs off and re-handshakes repeatedly. Don't "simplify" `test_repo_connection`
+  back to `run_restic_blocking` for `rest:` repos.
+- **Append-only is a user-visible, stored flag (`append_only`) with advisory auto-detection; `tag` is
+  blocked along with forget/prune/retention; retention on such a repo is "not applicable".** Decisions,
+  each with its reason:
+  - The server's mode can't be read from restic, so the flag is stored per repo and editable — the
+    probe (`rest_probe.rs`) only *suggests* it after a successful connection test, and a wrong or
+    undetermined answer can always be overridden by hand. It is not re-run on a schedule.
+  - The probe is a `DELETE /data/<64 zeros>`: a 403 can only mean append-only once auth and path are known
+    good (reads never 403; wrong path/credentials are 401, a missing repo 404), and the all-zero id can't
+    match any real object. That precondition is also what lets a probe
+    **404 count as "deletes allowed"**: rest-server 0.10/0.11 answer 404 for a missing blob, but only after
+    the append-only 403 check. Don't "improve" it to a random id (no safer, harder to recognise in server
+    logs) or to a real blob/lock (`locks` are deletable even under `--append-only`, so that would
+    report the wrong thing).
+  - `tag_snapshot` is refused (`ensure_can_delete`) because restic's tag edit is save-new-then-delete-old:
+    on an append-only server it fails halfway and leaves a duplicate snapshot — confirmed live. `unlock`
+    stays enabled (locks are deletable) and copying *into* the repo stays enabled (it only adds).
+  - Retention folds into `BackupOutcome::retention_skipped` (+ `retention_skipped_reason`) instead of
+    running and failing: the scheduler, manual modal and Activity panel already key off that flag, and a
+    plan with retention on an append-only repo would otherwise log a retention failure after every
+    backup. `AppendOnly` outranks `MissingSource` because it is permanent while a missing source is not.
+  - Direct HTTP via `ureq` + `native-certs` (not shelling out to `curl`): no extra binary, no password on
+    a command line, and the OS trust store matches restic's. Its TLS is webpki-strict, so some
+    hand-made self-signed certs trusted by Go are rejected — detection then reports undetermined.
 - **Restic exit 3 = completed with warnings; retention skips only on a missing source path
   (issue #36).** Restic exits 3 after *saving* the snapshot when some source data was unreadable;
   `execute_backup` used to treat every non-zero exit as a failure, so such runs logged a failure
