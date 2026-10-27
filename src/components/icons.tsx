@@ -140,3 +140,30 @@ export function LockIcon({ className = "w-4 h-4" }: IconProps) {
     </svg>
   );
 }
+
+export function FolderIcon({ className = "w-4 h-4" }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+        d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+    </svg>
+  );
+}
+
+export function FileIcon({ className = "w-4 h-4" }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+        d="M7 3h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2zM14 3v5h5" />
+    </svg>
+  );
+}
+
+export function LinkIcon({ className = "w-4 h-4" }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+        d="M10 14a4 4 0 005.657 0l3-3a4 4 0 00-5.657-5.657l-1.5 1.5M14 10a4 4 0 00-5.657 0l-3 3a4 4 0 005.657 5.657l1.5-1.5" />
+    </svg>
+  );
+}

@@ -52,6 +52,12 @@ src/
     InsecureTlsField.tsx  # "Skip TLS certificate verification (--insecure-tls)" checkbox + tooltip, for `rest:https` paths only — see docs/frontend.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
+    plan/                 # The plan editor's pieces: PlanHeader (editable title, repo, actions), PlanTabs (accessible tablist), FilesTab (the file tree, ListFilesCard, FdaNotice, ExcludeCard, MarkersCard; SourcesCard = plain path list, fallback only), RetentionTab, AdvancedTab (+ WebhooksCard), TagsTab
+    SegmentedToggle.tsx   # Bordered two/three-way switch used inside cards
+    PlanTreeEditDialog.tsx # Include/exclude dialog behind a click in the plan tree: pattern scopes + live match count, or the exact rules an include will add
+    PlanTreeExportDialog.tsx # "Use with restic CLI": the exclude file(s) and restic command for the plan
+    PlanTreeParts.tsx     # The tree's checkbox-style state marker (incl. the distinct "holds a source" look), Source pill and state labels
+    PlanTreePreview.tsx   # The plan editor's file tree: where sources are picked (one click adds/removes, click inside a source opens the dialog) and a preview of what's included, with the reason per row — see docs/backup-plan-tree.md
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
     RestServerLogin.tsx   # "Server username" / "Server password" pair shown instead of the generic credential rows for `rest:` URLs — see docs/frontend.md
     RetentionFields.tsx   # The five `keep_*` inputs, shared by the plan editor and Settings' default retention card
@@ -73,6 +79,9 @@ src/
     difftree.ts           # computeChildren/toSegments — pure tree-building for DiffPage, unit-tested
     breakpoints.test.ts   # Pins Sidebar's `useIsCompact` 1280 query to Tailwind's stock `xl` (and fails if tailwind.config.js overrides it)
     node-stubs.d.ts       # Ambient node:* types for the file-reading tests (the project has no @types/node)
+    planTreeEdit.ts       # Pattern-scope options, glob escaping and edit-summary helpers for the tree's dialogs — pure, unit-tested
+    planForm.ts           # The plan editor's form as pure functions: state, load a plan, validate (naming the tab an error belongs to), build the plan, tab summaries — unit-tested
+    planTree.ts           # Row states, reason text and row flattening for PlanTreePreview — pure, unit-tested
   pages/
     AuthPage.tsx          # Master password setup (first launch) and unlock screen
     RepositoriesPage.tsx  # Add/open/duplicate/delete/edit repos, remote URL + credentials, read-only flag, stats refresh, mirror, prune, check, Index All — see docs/frontend.md
@@ -82,7 +91,7 @@ src/
     RepoSearchPage.tsx    # Full-text file search across every indexed snapshot in a repo; Index All batch — see docs/frontend.md
     DiffPage.tsx          # Diff viewer between two snapshots; client-side tree, restore from diff
     BackupPlansPage.tsx   # List/run/delete plans; per-plan "Last run" line (newest `backup_history` attempt, manual or scheduled); backup modal with progress; auto-applies retention — see docs/frontend.md
-    BackupPlanEditPage.tsx # Create/edit plan: sources (Paths | List files tabs, `--files-from`), tags, excludes (Simple | Expert) + exclude pattern files (`--(i)exclude-file`), retention, bandwidth limits, advanced options (pack size; Windows-only cloud-files/VSS flags), webhooks — see docs/frontend.md
+    BackupPlanEditPage.tsx # Create/edit plan shell: loads/saves the form (lib/planForm.ts), sticky header (editable name h1, repository, Save/Cancel/Delete) and Files | Retention | Advanced | Tags tabs (components/plan/) — see docs/frontend.md
     SchedulesPage.tsx     # List schedules; toggle/delete; read-only-repo warnings
     ScheduleEditPage.tsx  # Create/edit schedule (cron expr, backup plans); read-only-repo badges
     LogsPage.tsx          # Backup history log; paginated; expandable error rows
@@ -101,6 +110,10 @@ src-tauri/
       crypto.rs             # Argon2id key derivation, AES-GCM encrypt/decrypt
       keychain.rs           # Auto-unlock's OS credential-manager access — see docs/data.md
       portal.rs             # AppImage-only file-chooser portal probe (`file_portal_missing`); false everywhere else — see docs/decisions.md
+      plan_rules.rs         # Verified port of restic's exclude matching: decides what a plan includes — see docs/backup-plan-tree.md
+      plan_edit.rs          # Turns tree clicks into verified source/pattern edits (carve-out chains, glob escaping) and renders a plan as restic CLI files — see docs/backup-plan-tree.md
+      plan_listfiles.rs     # Reads `--files-from` list files like restic (trim, comments, Go filepath.Glob) into read-only extra sources for the tree — see docs/backup-plan-tree.md
+      plan_tree.rs          # Commands behind the plan editor's tree preview: list folders, classify paths, streamed subtree scans — see docs/backup-plan-tree.md
       notify.rs             # Global notification toggles (started/success-changed/success-unchanged/warnings/failures); classify_success is pure/unit-tested — see docs/restic.md
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
@@ -142,6 +155,7 @@ src-tauri/
 | Schema/migrations, encryption, caching, import/export | `docs/data.md` |
 | Page/component behavior, theming detail | `docs/frontend.md` |
 | Tauri command internals not covered by the three docs above | `docs/backend.md` |
+| What a backup plan includes/excludes (rule engine, file tree) | `docs/backup-plan-tree.md` |
 | Before "fixing" something that looks like a bug or inefficiency | `docs/decisions.md` (check the index below first) |
 
 ## Restic Integration
@@ -246,6 +260,16 @@ proposing a change — several are pinned by a named test or reference a confirm
   periodic sweep (rejected: background cloud traffic, fixes nothing until the next tick), never
   `--remove-all`, and not for read ops or copy/mirror; every path goes through `lock_retry_step`. See
   docs/decisions.md before widening it
+- `commands/plan_rules.rs` is a literal port of restic's exclude-pattern matching (Go's
+  `filepath.Match`, `filter.Match/ChildMatch/List`, `RejectIfPresent`), including quirks such as the
+  `**` expansion bound; it is verified against Go's/restic's own test tables and a differential test
+  against the real restic. Don't "simplify" or "fix" it without re-running that test — see
+  docs/backup-plan-tree.md. Platform path rules live in `PathStyle` (Unix | Windows; UNC paths
+  unsupported); `.github/workflows/restic-compat.yml` runs the restic-backed `#[ignore]` tests on
+  Linux/macOS/Windows against restic 0.17.3 and 0.19.1. The two differ on **explicit source paths**
+  (restic#5767: exempt from excludes/markers from 0.19, judged like any node before) — the engine
+  models both (`PlanRules::judge_sources`, set from `restic version` via `TreeEnv`), and the
+  harnesses compare each restic against its own rule, so don't hard-code one
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`
@@ -377,10 +401,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   distro restic lags (Ubuntu ships 0.18.x) and an unknown flag fails the whole backup; see
   docs/decisions.md before widening it
 - Plans can source from `--files-from` list files and exclude via `--exclude-file`/`--iexclude-file`
-  files (no version/platform gate — all predate restic 0.17). **Sources are either/or in the
-  editor only** (Paths | List files tabs; only the active tab is saved) while **excludes are
-  deliberately combinable** (patterns + exclude files apply together); the backend and imports stay
-  permissive, so an imported plan holding both still runs. A list-file plan **must have a tag**,
+  files (no version/platform gate — all predate restic 0.17). **Sources and excludes are both
+  combinable in the editor**: folders picked in the tree and path-list files save together (the old
+  Paths | List files either/or tabs saved only the active side; they went when the tree became the
+  source editor), as do exclude patterns and exclude files. A plan **with any list file must have a tag**,
   retention or not (editor error + `validate_plan_sources`): its snapshots' paths live in the list
   files, so a tag is the only handle retention has, and requiring it from the first save means adding
   retention later still covers the plan's whole history. `apply_retention`'s `check_retention_scope`

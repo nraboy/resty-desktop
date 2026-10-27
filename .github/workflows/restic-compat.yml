@@ -1,0 +1,91 @@
+name: Restic compatibility
+
+# The backup-plan rule engine (src-tauri/src/commands/plan_rules.rs and friends) has to decide
+# what is included exactly the way restic does. Besides the unit tests, it ships differential
+# tests that build random trees and rule sets and compare the engine, node by node, with a real
+# `restic backup --dry-run`. They need `restic` on PATH, so the ordinary test job skips them; this
+# workflow runs them on every OS (the engine has Unix and Windows path rules) and on the oldest
+# and newest restic the app supports. The two differ on explicit source paths (restic#5767: exempt
+# from excludes/markers from 0.19, judged like any node before), so the tests detect the installed
+# restic's version and compare against that behaviour.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src-tauri/src/commands/plan_*.rs'
+      - 'src-tauri/src/commands/plan_*/**'
+      - '.github/workflows/restic-compat.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src-tauri/src/commands/plan_*.rs'
+      - 'src-tauri/src/commands/plan_*/**'
+      - '.github/workflows/restic-compat.yml'
+
+jobs:
+  compat:
+    # Skipped on non-GitHub CI (same guard as release.yml).
+    if: github.server_url == 'https://github.com'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        restic: ['0.17.3', '0.19.1']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RESTY_DIFF_CASES: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: restic-compat
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Install restic (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          v='${{ matrix.restic }}'
+          curl -fsSL -o restic.bz2 "https://github.com/restic/restic/releases/download/v${v}/restic_${v}_linux_amd64.bz2"
+          bunzip2 restic.bz2
+          chmod +x restic
+          sudo mv restic /usr/local/bin/restic
+
+      - name: Install restic (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          v='${{ matrix.restic }}'
+          curl -fsSL -o restic.bz2 "https://github.com/restic/restic/releases/download/v${v}/restic_${v}_darwin_arm64.bz2"
+          bunzip2 restic.bz2
+          chmod +x restic
+          sudo mv restic /usr/local/bin/restic
+
+      - name: Install restic (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = '${{ matrix.restic }}'
+          Invoke-WebRequest -Uri "https://github.com/restic/restic/releases/download/v$v/restic_${v}_windows_amd64.zip" -OutFile restic.zip
+          Expand-Archive restic.zip -DestinationPath restic-bin
+          Rename-Item "restic-bin\restic_${v}_windows_amd64.exe" restic.exe
+          Add-Content $env:GITHUB_PATH "$PWD\restic-bin"
+
+      - name: Show restic version
+        run: restic version
+
+      # The engine's own tests (including the Windows-path rules, which are pure string logic and
+      # run everywhere) plus the differential tests against the real restic.
+      - name: Engine tests and differential tests against restic
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- plan_ restic_ --include-ignored --nocapture
