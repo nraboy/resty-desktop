@@ -19,7 +19,10 @@
 //!   a node is included only if it *and every ancestor below its source root* pass
 //!   ([`Engine::classify`]). Re-including something inside an excluded directory is
 //!   impossible without re-including the directory first.
-//! - A source path is exempt from the patterns itself (the root node), but not its contents.
+//! - A source path is exempt from the patterns itself (the root node), but not its contents —
+//!   **from restic 0.19** (#5767). Before that, `restic backup` applied every exclude to the paths
+//!   named on the command line too, so a source matching a pattern, or sitting beside an
+//!   exclude-if-present marker, was dropped. `PlanRules::judge_sources` selects the old rule.
 //! - `exclude-if-present` rejects every item whose parent directory holds the marker file —
 //!   except the marker itself; the directory stays.
 //!
@@ -947,6 +950,10 @@ pub struct PlanRules {
     pub exclude_caches: bool,
     /// How the paths and patterns above are spelled (the platform's, unless a test says otherwise).
     pub style: PathStyle,
+    /// restic before 0.19 judges the source paths themselves like any other node (an exclude that
+    /// matches a source, or a marker file beside it, drops the whole source); from 0.19 they are
+    /// exempt and only their contents are judged. `false` (the default) is the 0.19 behaviour.
+    pub judge_sources: bool,
 }
 
 /// Why a node is excluded.
@@ -979,6 +986,7 @@ impl Verdict {
 
 pub struct Engine {
     style: PathStyle,
+    judge_sources: bool,
     sources: Vec<String>,
     /// Case-sensitive patterns (`--exclude`, `--exclude-file`), with the rule id of each.
     cs: PatternList,
@@ -1021,6 +1029,7 @@ impl Engine {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Engine {
             style: rules.style,
+            judge_sources: rules.judge_sources,
             sources: {
                 let mut seen = std::collections::HashSet::new();
                 rules
@@ -1044,6 +1053,11 @@ impl Engine {
     }
 
     /// How this engine's paths are spelled (see [`PathStyle`]).
+    /// Does this engine judge the source paths themselves (restic < 0.19)? See `PlanRules::judge_sources`.
+    pub fn judges_sources(&self) -> bool {
+        self.judge_sources
+    }
+
     pub fn style(&self) -> PathStyle {
         self.style
     }
@@ -1055,7 +1069,8 @@ impl Engine {
     }
 
     /// Would restic reject *this node by itself* — by pattern or marker — ignoring its
-    /// ancestors? `None` means it passes. (The source root is exempt: callers skip it.)
+    /// ancestors? `None` means it passes. (From restic 0.19 the source root is exempt and callers
+    /// skip it; before that they judge it too — see `judge_sources`.)
     pub fn judge_node(&self, path: &str, probe: &dyn Probe) -> Option<Reason> {
         let a = self.cs.evaluate(path);
         if a.matched {
@@ -1077,6 +1092,11 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// Is another explicit source somewhere below `dir`?
+    fn leads_to_a_source(&self, dir: &str) -> bool {
+        self.sources.iter().any(|s| strip_source(s, dir).is_some_and(|rel| !rel.is_empty()))
     }
 
     /// The `!` rule (if any) that last re-included `path`, for provenance.
@@ -1105,13 +1125,28 @@ impl Engine {
         for src in &self.sources {
             let Some(rel) = strip_source(&path, src) else { continue };
             under_any = true;
+            // restic < 0.19 judges the source path itself like any other node, and nothing below a
+            // rejected source is reached; from 0.19 the source is exempt and only its contents count.
+            if self.judge_sources {
+                if let Some(reason) = self.judge_node(src, probe) {
+                    // A rejected source is its own `at` unless the queried path is the source itself.
+                    let at = if rel.is_empty() { None } else { Some(src.clone()) };
+                    first_rejection.get_or_insert(Verdict { included: false, reason: Some(reason), at, reincluded_by: None });
+                    continue;
+                }
+            }
             if rel.is_empty() {
-                return Verdict::included(); // the source root itself is exempt
+                return Verdict::included(); // the source root itself (exempt, or it passed)
             }
             let mut current = src.clone();
             let mut rejected: Option<Verdict> = None;
             for comp in rel.split('/') {
                 current = self.style.join(&current, comp);
+                // From 0.19 a folder on the way to another explicit source is never rejected, so
+                // restic walks through it; its other children are then judged one by one.
+                if !self.judge_sources && self.leads_to_a_source(&current) {
+                    continue;
+                }
                 if let Some(reason) = self.judge_node(&current, probe) {
                     rejected = Some(Verdict {
                         included: false,

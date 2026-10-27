@@ -61,3 +61,6 @@ impl NoConsole for std::process::Command {
         self
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;

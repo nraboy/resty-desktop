@@ -374,6 +374,8 @@ fn restic_reads_list_files_like_the_engine_does() {
             list_sources: expanded.entries.iter().map(|e| e.path.clone()).collect(),
             excludes: excludes.clone(),
             style: style(),
+            // Entries are source paths too: exempt from the excludes from restic 0.19, judged before.
+            judge_sources: crate::commands::test_support::restic_judges_sources(),
             ..Default::default()
         };
         let read = |p: &str| std::fs::read_to_string(p);
@@ -391,7 +393,7 @@ fn restic_reads_list_files_like_the_engine_does() {
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter(|j| j["message_type"] == "verbose_status")
-            .filter_map(|j| j["item"].as_str().map(|i| canon(i).trim_end_matches('/').to_string()))
+            .filter_map(|j| j["item"].as_str().map(|i| crate::commands::test_support::restic_item_path(i, cfg!(windows)).trim_end_matches('/').to_string()))
             .collect();
 
         let entry_paths: Vec<&str> = expanded.entries.iter().map(|e| e.path.as_str()).collect();

@@ -157,6 +157,96 @@ fn the_source_root_is_exempt_but_its_contents_are_not() {
 }
 
 #[test]
+fn a_folder_on_the_way_to_another_source_is_walked_through_even_when_a_rule_rejects_it() {
+    let mut r = rules(&["/s", "/s/a/b/c"], &[]);
+    r.markers = vec![".nobackup".to_string()];
+    let mut probe = MockProbe::default();
+    probe.markers.insert(("/s".to_string(), ".nobackup".to_string())); // rejects its sibling `a`
+    let e = Engine::new(&r).unwrap();
+    // `a` leads to the source `/s/a/b/c`, so it is not rejected and its other children are judged alone.
+    assert!(e.classify("/s/a", &probe).included);
+    assert!(e.classify("/s/a/other.txt", &probe).included);
+    assert!(e.classify("/s/a/b/c/f", &probe).included);
+    // A sibling that leads nowhere is still dropped by the marker.
+    assert!(!e.classify("/s/z", &probe).included);
+    // Older restics judge it like any node.
+    r.judge_sources = true;
+    let old = Engine::new(&r).unwrap();
+    assert!(!old.classify("/s/a/other.txt", &probe).included);
+}
+
+// ── restic before 0.19 judges the source paths themselves (restic #5767) ─────
+
+/// The same plan as `rules`, for a restic older than 0.19.
+fn old_restic(sources: &[&str], patterns: &[&str]) -> PlanRules {
+    PlanRules { judge_sources: true, ..rules(sources, patterns) }
+}
+
+#[test]
+fn before_0_19_a_source_that_matches_an_exclude_is_dropped_with_everything_in_it() {
+    // 0.19+: the source is exempt, its contents are judged.
+    let new = Engine::new(&rules(&["/s/node_modules"], &["node_modules"])).unwrap();
+    assert!(included(&new, "/s/node_modules"));
+    // Before: the source itself is excluded by the pattern, so nothing under it is reached.
+    let old = Engine::new(&old_restic(&["/s/node_modules"], &["node_modules"])).unwrap();
+    let v = old.classify("/s/node_modules", &MockProbe::default());
+    assert!(!v.included);
+    assert_eq!(v.reason, Some(Reason::Pattern { rule_id: 1 }));
+    assert_eq!(v.at, None, "the queried path is the rejected source itself");
+    let inside = old.classify("/s/node_modules/x.js", &MockProbe::default());
+    assert!(!inside.included);
+    assert_eq!(inside.at.as_deref(), Some("/s/node_modules"));
+}
+
+#[test]
+fn before_0_19_a_source_passing_every_rule_is_still_included() {
+    let old = Engine::new(&old_restic(&["/s", "/t/keep.txt"], &["*.log", "node_modules"])).unwrap();
+    for p in ["/s", "/s/a/b.txt", "/t/keep.txt"] {
+        assert!(included(&old, p), "{p}");
+    }
+    assert!(!included(&old, "/s/a/x.log"));
+    // No rules at all: nothing to judge.
+    let none = Engine::new(&old_restic(&["/s"], &[])).unwrap();
+    assert!(included(&none, "/s") && included(&none, "/s/a/b"));
+}
+
+#[test]
+fn before_0_19_an_explicit_file_matching_a_pattern_is_excluded_but_not_a_sibling_source() {
+    let new = Engine::new(&rules(&["/s", "/s/a/keep.txt"], &["*.txt"])).unwrap();
+    assert!(included(&new, "/s/a/keep.txt"), "0.19: named paths are exempt");
+    let old = Engine::new(&old_restic(&["/s/a/keep.txt", "/s/b/other.log"], &["*.txt"])).unwrap();
+    assert!(!included(&old, "/s/a/keep.txt"), "before 0.19 it is excluded like any file");
+    assert!(included(&old, "/s/b/other.log"), "the other source passes the rule");
+}
+
+#[test]
+fn before_0_19_a_marker_beside_a_source_drops_it() {
+    let mut r = rules(&["/s/proj"], &[]);
+    r.markers = vec![".nobackup".to_string()];
+    let mut probe = MockProbe::default();
+    probe.markers.insert(("/s".to_string(), ".nobackup".to_string()));
+    // 0.19+: `/s/proj` was named on the command line, so the marker next to it is ignored.
+    assert!(Engine::new(&r).unwrap().classify("/s/proj", &probe).included);
+    // Before: `/s/proj` is a sibling of the marker like any other item of `/s`.
+    r.judge_sources = true;
+    let v = Engine::new(&r).unwrap().classify("/s/proj", &probe);
+    assert!(!v.included);
+    assert_eq!(v.reason, Some(Reason::Marker { spec: ".nobackup".to_string() }));
+}
+
+#[test]
+fn before_0_19_a_path_under_several_sources_is_included_if_any_source_survives() {
+    // `/s/a` is a source dropped by the pattern, but `/s` itself survives and holds `/s/a/f`... only
+    // if `a` doesn't match: here it does, so the contents are still rejected by the parent source.
+    let old = Engine::new(&old_restic(&["/s", "/s/a"], &["a"])).unwrap();
+    assert!(!included(&old, "/s/a"));
+    assert!(!included(&old, "/s/a/f"));
+    // An unrelated name pattern leaves both sources standing.
+    let old = Engine::new(&old_restic(&["/s", "/s/a"], &["zzz"])).unwrap();
+    assert!(included(&old, "/s/a") && included(&old, "/s/a/f"));
+}
+
+#[test]
 fn all_but_one_with_a_later_negation() {
     let e = Engine::new(&rules(&["/s"], &["/s/*", "!/s/a"])).unwrap();
     assert!(included(&e, "/s/a"));
@@ -288,13 +378,16 @@ fn exclude_caches_uses_the_cachedir_tag_signature() {
     std::fs::write(cache.join("CACHEDIR.TAG"), format!("{}\n# rest", &CACHEDIR_TAG_SPEC[CACHEDIR_TAG_SPEC.find(':').unwrap() + 1..])).unwrap();
     std::fs::write(fake.join("CACHEDIR.TAG"), "not the signature").unwrap();
 
-    let mut r = rules(&[dir.to_str().unwrap()], &[]);
+    // Real paths in the engine's own spelling (`/` separators, `C:/…` on Windows) and the host's rules.
+    let path = |p: &std::path::Path| canon(p.to_str().unwrap());
+    let mut r = rules(&[path(&dir).as_str()], &[]);
+    r.style = PathStyle::NATIVE;
     r.exclude_caches = true;
     let e = Engine::new(&r).unwrap();
     let probe = FsProbe::default();
-    assert!(!e.classify(cache.join("data").to_str().unwrap(), &probe).included);
-    assert!(e.classify(cache.join("CACHEDIR.TAG").to_str().unwrap(), &probe).included);
-    assert!(e.classify(fake.join("data").to_str().unwrap(), &probe).included);
+    assert!(!e.classify(&path(&cache.join("data")), &probe).included);
+    assert!(e.classify(&path(&cache.join("CACHEDIR.TAG")), &probe).included);
+    assert!(e.classify(&path(&fake.join("data")), &probe).included);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -480,14 +573,14 @@ fn make_tree(rng: &mut rand::rngs::StdRng, root: &std::path::Path) -> Vec<std::p
     all
 }
 
-/// The set of absolute paths restic reports for a dry run of `backup <root>` with `args`.
-fn restic_paths(repo: &std::path::Path, root: &std::path::Path, args: &[String]) -> HashSet<String> {
+/// The set of absolute paths restic reports for a dry run of `backup <sources>` with `args`.
+fn restic_paths(repo: &std::path::Path, sources: &[std::path::PathBuf], args: &[String]) -> HashSet<String> {
     let out = std::process::Command::new("restic")
         .args(["backup", "--repo"])
         .arg(repo)
         .args(["--dry-run", "-vv", "--json", "--no-scan"])
         .args(args)
-        .arg(root)
+        .args(sources)
         .env("RESTIC_PASSWORD", "pw")
         .output()
         .expect("run restic");
@@ -495,7 +588,7 @@ fn restic_paths(repo: &std::path::Path, root: &std::path::Path, args: &[String])
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|j| j["message_type"] == "verbose_status")
-        .filter_map(|j| j["item"].as_str().map(|i| canon(i).trim_end_matches('/').to_string()))
+        .filter_map(|j| j["item"].as_str().map(|i| crate::commands::test_support::restic_item_path(i, cfg!(windows)).trim_end_matches('/').to_string()))
         .collect()
 }
 
@@ -524,6 +617,7 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
     let seed: u64 = std::env::var("RESTY_DIFF_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
     let mut checked = 0usize;
     let (mut n_included, mut n_excluded, mut n_negated_cases, mut n_marker_cases, mut n_ci_cases) = (0, 0, 0, 0, 0);
+    let mut n_extra_source_cases = 0usize;
     for case in 0..cases {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed * 1000 + case);
         let root = base.join(format!("tree{case}"));
@@ -557,28 +651,49 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
         n_negated_cases += usize::from(rule_inputs.iter().any(|r| r.pattern.starts_with('!')));
         n_marker_cases += usize::from(!markers.is_empty());
         n_ci_cases += usize::from(rule_inputs.iter().any(|r| r.ignore_case));
+        // The tree's root, and half the time one or two more paths named explicitly — a folder or a
+        // file somewhere inside it — which is where restic's rules for *source paths* show: from
+        // 0.19 they are exempt from the excludes, before that they are judged like anything else.
+        let mut sources = vec![root.clone()];
+        if rng.gen_range(0..2) == 0 {
+            for _ in 0..rng.gen_range(1..=2) {
+                let extra = nodes[rng.gen_range(0..nodes.len())].clone();
+                if !sources.contains(&extra) {
+                    sources.push(extra);
+                }
+            }
+        }
+        n_extra_source_cases += usize::from(sources.len() > 1);
+        let judge = crate::commands::test_support::restic_judges_sources();
         let engine = Engine::new(&PlanRules {
-            sources: vec![root_str.clone()],
+            sources: sources.iter().map(|s| canon(s.to_str().unwrap())).collect(),
             rules: rule_inputs.clone(),
             markers,
             exclude_caches: false,
             style: PathStyle::NATIVE,
+            judge_sources: judge,
             ..Default::default()
         })
         .unwrap();
         let probe = FsProbe::default();
-        let reported = restic_paths(&repo, &root, &args);
+        let reported = restic_paths(&repo, &sources, &args);
 
         let mut all_nodes = nodes.clone();
         all_nodes.push(root.join(".nobackup"));
         for node in all_nodes.iter().filter(|p| p.exists()) {
+            // Before 0.19 a folder on the way to an explicit source is saved as a bare directory
+            // whatever the rules say about it as content of another source, so restic's list says
+            // nothing about whether the *rules* include it. (From 0.19 the engine models it.)
+            if judge && sources.iter().skip(1).any(|s| s != node && s.starts_with(node)) {
+                continue;
+            }
             let path = canon(node.to_str().unwrap());
             let path = path.as_str();
             let want = reported.contains(path);
             let got = engine.classify(path, &probe);
             assert_eq!(
                 got.included, want,
-                "case {case} (seed {seed}): {path}\nrules: {args:?}\nengine said {got:?}, restic {}",
+                "case {case} (seed {seed}): {path}\nsources: {sources:?}\nrules: {args:?}\nengine said {got:?}, restic {}",
                 if want { "included it" } else { "excluded it" }
             );
             checked += 1;
@@ -587,7 +702,8 @@ fn restic_agrees_with_the_engine_on_random_trees_and_rules() {
     }
     eprintln!(
         "engine and restic agree on {checked} nodes over {cases} random cases \
-         ({n_included} included, {n_excluded} excluded; cases with a `!`: {n_negated_cases}, a marker: {n_marker_cases}, an --iexclude: {n_ci_cases})"
+         ({n_included} included, {n_excluded} excluded; cases with a `!`: {n_negated_cases}, a marker: {n_marker_cases}, an --iexclude: {n_ci_cases}, extra explicit sources: {n_extra_source_cases}; restic {} source paths)",
+        if crate::commands::test_support::restic_judges_sources() { "judges" } else { "exempts" }
     );
     let _ = std::fs::remove_dir_all(&base);
 }

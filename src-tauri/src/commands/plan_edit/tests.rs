@@ -503,7 +503,7 @@ fn restic_included(repo: &std::path::Path, sources: &[String], args: &[String], 
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|j| j["message_type"] == "verbose_status")
-        .filter_map(|j| j["item"].as_str().map(|i| canon(i).trim_end_matches('/').to_string()))
+        .filter_map(|j| j["item"].as_str().map(|i| crate::commands::test_support::restic_item_path(i, cfg!(windows)).trim_end_matches('/').to_string()))
         .collect()
 }
 
@@ -574,7 +574,8 @@ fn restic_confirms_every_edit_the_engine_offers() {
                 _ => "*.log".to_string(),
             });
         }
-        let plan = TreeRulesInput { sources: vec![rs.clone()], excludes: excludes.clone(), ..Default::default() };
+        let judge = crate::commands::test_support::restic_judges_sources();
+        let plan = TreeRulesInput { sources: vec![rs.clone()], excludes: excludes.clone(), judge_sources: judge, ..Default::default() };
         let probe = FsProbe::default();
         let read = |p: &str| std::fs::read_to_string(p);
         let (before, _) = match build_engine(&plan, &read, &no_env) {
@@ -624,7 +625,7 @@ fn restic_confirms_every_edit_the_engine_offers() {
         );
 
         // And the engine still agrees with restic about every node.
-        let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..Default::default() };
+        let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), judge_sources: judge, ..Default::default() };
         let (after, _) = build_engine(&after_plan, &read, &no_env).unwrap();
         for node in nodes.iter().filter(|p| p.exists()) {
             let p = canon(node.to_str().unwrap());

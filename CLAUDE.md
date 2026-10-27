@@ -266,7 +266,10 @@ proposing a change — several are pinned by a named test or reference a confirm
   against the real restic. Don't "simplify" or "fix" it without re-running that test — see
   docs/backup-plan-tree.md. Platform path rules live in `PathStyle` (Unix | Windows; UNC paths
   unsupported); `.github/workflows/restic-compat.yml` runs the restic-backed `#[ignore]` tests on
-  Linux/macOS/Windows against restic 0.17.3 and 0.19.1
+  Linux/macOS/Windows against restic 0.17.3 and 0.19.1. The two differ on **explicit source paths**
+  (restic#5767: exempt from excludes/markers from 0.19, judged like any node before) — the engine
+  models both (`PlanRules::judge_sources`, set from `restic version` via `TreeEnv`), and the
+  harnesses compare each restic against its own rule, so don't hard-code one
 - Backend credentials use their own nonce/ciphertext columns, not folded into the password blob
 - `apply_backend_env` filters reserved credential keys itself, not just `validate_credentials`
 - `validate_credentials` deliberately allows arbitrary keys for `BackendKind::Rest`

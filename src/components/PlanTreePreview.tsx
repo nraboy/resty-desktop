@@ -182,7 +182,7 @@ export default function PlanTreePreview({
     for (const e of listResult.entries) if (!m.has(e.path)) m.set(e.path, e);
     return m;
   }, [listResult]);
-  const fullRules: TreeRulesInput = { ...rules, listSources };
+  const fullRules: TreeRulesInput = { ...rules, listSources, judgeSources: env?.resticJudgesSources ?? false };
 
   // Rules are debounced: typing a pattern shouldn't rescan on every keystroke.
   const rulesKey = JSON.stringify(fullRules);
@@ -582,6 +582,12 @@ export default function PlanTreePreview({
           Pick what to back up: click the box next to a folder or file. Inside a folder you picked, click a box to leave
           something out — or to bring it back.
         </p>
+        {env?.resticJudgesSources && (
+          <p className="text-xs text-gray-500 mt-1">
+            Your restic is older than 0.19, which also applies the exclude rules to a folder or file you pick directly: a
+            rule that matches it leaves it out.
+          </p>
+        )}
       </div>
 
       <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">

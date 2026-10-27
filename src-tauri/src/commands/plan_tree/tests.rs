@@ -13,7 +13,26 @@ fn scratch(label: &str) -> std::path::PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    let c = dir.canonicalize().unwrap();
+    // Windows' canonicalize adds a `\\?\` prefix that neither restic nor our paths use.
+    #[cfg(windows)]
+    {
+        if let Some(rest) = c.to_string_lossy().strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    c
+}
+
+/// A real path in the spelling the engine works in: `/` separators, `C:/…` on Windows. The tests
+/// that walk a real folder build their rules with `PathStyle::NATIVE` and these strings.
+fn p(path: &std::path::Path) -> String {
+    let s = path.to_str().unwrap();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    }
 }
 
 fn touch(path: &std::path::Path) {
@@ -174,7 +193,8 @@ fn classify_reports_reasons_ancestors_and_folders_that_contain_sources() {
 const GENEROUS: ScanLimits = ScanLimits { budget: Duration::from_secs(30), max_entries: 10_000_000 };
 
 fn engine_for(root: &std::path::Path, excludes: &[&str], markers: &[&str]) -> Engine {
-    let mut i = input(&[root.to_str().unwrap()], excludes);
+    let mut i = input(&[p(root).as_str()], excludes);
+    i.style = PathStyle::NATIVE;
     i.exclude_if_present = markers.iter().map(|m| m.to_string()).collect();
     Engine::new(&build_rules(&i, &no_files, &no_env).rules).unwrap()
 }
@@ -187,10 +207,10 @@ fn a_scan_finds_the_shallowest_excluded_item_and_stops() {
     touch(&root.join("b/node_modules/y.js"));
     let engine = engine_for(&root, &["node_modules"], &[]);
     let cancel = AtomicBool::new(false);
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &cancel);
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &cancel);
     assert!(o.partial && o.complete);
     // Breadth first: b/node_modules (depth 2) is found before a/deep/er/node_modules (depth 4).
-    assert_eq!(o.first_excluded.as_deref(), Some(root.join("b/node_modules").to_str().unwrap()));
+    assert_eq!(o.first_excluded.as_deref(), Some(p(&root.join("b/node_modules")).as_str()));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -200,7 +220,7 @@ fn a_scan_that_finds_nothing_reports_a_completely_included_folder() {
     touch(&root.join("a/keep.txt"));
     touch(&root.join("b/c/d.txt"));
     let engine = engine_for(&root, &["node_modules", "*.log"], &[]);
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(false));
     assert_eq!((o.partial, o.complete, o.unreadable), (false, true, false));
     assert!(o.scanned >= 4);
     let _ = std::fs::remove_dir_all(&root);
@@ -226,13 +246,13 @@ fn a_scan_does_not_enter_excluded_directories_or_follow_symlinks() {
     std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
     let vendor_rule = format!("{}/vendor", root.display());
     let engine = engine_for(&root, &[vendor_rule.as_str(), "*.log"], &[]);
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(false));
     // vendor itself is rejected, so that *is* the first excluded item — and nothing past it.
-    assert_eq!(o.first_excluded.as_deref(), Some(root.join("vendor").to_str().unwrap()));
+    assert_eq!(o.first_excluded.as_deref(), Some(p(&root.join("vendor")).as_str()));
 
     let engine = engine_for(&root, &["*.log"], &[]);
     let _ = std::fs::remove_dir_all(root.join("vendor"));
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(false));
     assert!(!o.partial, "the symlinked folder's x.log must not count: {o:?}");
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside);
@@ -244,9 +264,9 @@ fn markers_make_the_siblings_of_the_marker_excluded() {
     touch(&root.join("proj/.nobackup"));
     touch(&root.join("proj/data.bin"));
     let engine = engine_for(&root, &[], &[".nobackup"]);
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(false));
     assert!(o.partial);
-    assert_eq!(o.first_excluded.as_deref(), Some(root.join("proj/data.bin").to_str().unwrap()));
+    assert_eq!(o.first_excluded.as_deref(), Some(p(&root.join("proj/data.bin")).as_str()));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -259,10 +279,10 @@ fn an_exhausted_budget_or_a_cancel_leaves_the_verdict_incomplete() {
     let engine = engine_for(&root, &["*.log"], &[]);
     // Entry budget exhausted (checked every 256 entries).
     let tight = ScanLimits { budget: Duration::from_secs(30), max_entries: 100 };
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), tight, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), tight, &AtomicBool::new(false));
     assert!(!o.complete && !o.partial, "{o:?}");
     // Cancelled.
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(true));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(true));
     assert!(!o.complete, "{o:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -276,7 +296,7 @@ fn an_unreadable_folder_means_nothing_can_be_asserted() {
     touch(&root.join("locked/b.txt"));
     std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
     let engine = engine_for(&root, &["*.log"], &[]);
-    let o = scan_dir(&engine, &FsProbe::default(), root.to_str().unwrap(), GENEROUS, &AtomicBool::new(false));
+    let o = scan_dir(&engine, &FsProbe::default(), &p(&root), GENEROUS, &AtomicBool::new(false));
     std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
     // Running as root can read it anyway; either way the outcome must be consistent.
     if o.unreadable {
@@ -311,7 +331,7 @@ fn count(root: &std::path::Path, base_excludes: &[&str], pattern: &str) -> Match
         &base,
         &with,
         &FsProbe::default(),
-        &[root.to_str().unwrap().to_string()],
+        &[p(root)],
         GENEROUS,
         &AtomicBool::new(false),
     )
@@ -349,7 +369,7 @@ fn a_pattern_preview_stops_at_its_budget_and_says_so() {
     let base = engine_for(&root, &[], &[]);
     let with = engine_for(&root, &["*.nomatch"], &[]);
     let tight = ScanLimits { budget: Duration::from_secs(30), max_entries: 100 };
-    let p = count_matches(&base, &with, &FsProbe::default(), &[root.to_str().unwrap().to_string()], tight, &AtomicBool::new(false));
+    let p = count_matches(&base, &with, &FsProbe::default(), &[p(&root)], tight, &AtomicBool::new(false));
     assert!(p.capped && p.count == 0);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -404,4 +424,57 @@ fn windows_style_classification_reports_ancestors_of_sources_per_drive() {
     assert!(!v[3].included && v[3].contains_sources);
     assert!(!v[4].included && !v[4].contains_sources);
     assert!(v[5].included);
+}
+
+// ── the user's restic version ───────────────────────────────────────────────
+
+#[test]
+fn restics_before_0_19_judge_the_source_paths_themselves() {
+    for old in [
+        "restic 0.17.3 compiled with go1.23.4 on linux/amd64",
+        "restic 0.18.1 compiled with go1.24.1 on darwin/arm64",
+        "restic 0.16.0 compiled with go1.20 on windows/amd64",
+        "restic 0.9.6 compiled with go1.13.4 on linux/amd64",
+    ] {
+        assert!(restic_version_judges_sources(old), "{old}");
+    }
+    for modern in [
+        "restic 0.19.0 compiled with go1.26 on linux/amd64",
+        "restic 0.19.1 compiled with go1.26.5 on darwin/arm64",
+        "restic 0.20.2 compiled with go1.27 on linux/amd64",
+        "restic 1.0.0 compiled with go1.30 on linux/amd64",
+    ] {
+        assert!(!restic_version_judges_sources(modern), "{modern}");
+    }
+    // Unreadable output means the current behaviour rather than a guess.
+    for junk in ["", "restic", "command not found", "restic dev (compiled manually)"] {
+        assert!(!restic_version_judges_sources(junk), "{junk:?}");
+    }
+}
+
+#[test]
+fn a_pattern_preview_counts_a_source_the_pattern_would_newly_drop_on_an_older_restic() {
+    let root = scratch("preview-judge");
+    touch(&root.join("proj/app.log"));
+    touch(&root.join("proj/data/keep.txt"));
+    let file = p(&root.join("proj/app.log"));
+    let dir = p(&root.join("proj/data"));
+    let sources = [file.clone(), dir];
+    let engines = |extra: &[&str], judge: bool| {
+        let srcs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let mut i = input(&srcs, extra);
+        i.style = PathStyle::NATIVE;
+        i.judge_sources = judge;
+        Engine::new(&build_rules(&i, &no_files, &no_env).rules).unwrap()
+    };
+    let count = |judge: bool| {
+        count_matches(&engines(&[], judge), &engines(&["*.log"], judge), &FsProbe::default(), &sources, GENEROUS, &AtomicBool::new(false))
+    };
+    // restic 0.19+: a source file is exempt from patterns, and nothing in the other source matches.
+    assert_eq!(count(false).count, 0);
+    // Older: the pattern drops the source file itself — counted once, as itself.
+    let old = count(true);
+    assert_eq!(old.count, 1);
+    assert_eq!(old.sample, vec![file]);
+    let _ = std::fs::remove_dir_all(&root);
 }

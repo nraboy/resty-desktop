@@ -31,9 +31,20 @@ Don't "simplify" it: every oddity below was found by running restic.
   (`Engine::classify`). Re-including a file inside an excluded directory is impossible; the
   workaround is excluding the directory's *contents* (`dir/*`) and re-including the child
   (`!dir/child`), or the chain `!X`, `X/*`, `!X/child`.
-- **A source path is exempt itself, not its contents.** An explicit file source inside an excluded
-  directory is backed up; an explicit directory source is, but its contents are still judged (a
-  prefix rule still excludes them).
+- **A source path is exempt itself, not its contents — from restic 0.19.** (restic#5767, 0.19.0
+  "Change": paths named on the command line are exempt from excludes, markers and caches.) An
+  explicit file source inside an excluded directory is backed up; an explicit directory source is,
+  but its contents are still judged (a prefix rule still excludes them). **Before 0.19 a source is
+  judged like any other node**: a pattern or marker that matches it drops it, and nothing below it
+  is reached. The engine does both: `PlanRules::judge_sources` selects the old rule. The default is
+  the 0.19 behaviour; `tree_env` reads `restic version` into `TreeEnv.restic_judges_sources`, the
+  tree sends it back as `TreeRulesInput.judge_sources`, and the editor says so in a one-line note
+  when it applies. An unreadable version means 0.19 behaviour. `count_matches` (the pattern
+  dialog's live count) also counts a source a new pattern would drop under the old rule.
+- **A folder on the way to another explicit source is walked through (0.19).** With sources `/s`
+  and `/s/a/b`, a marker or pattern that rejects `/s/a` does not stop restic reaching `/s/a/b`; the
+  folder is kept and its other children are judged one by one (`Engine::leads_to_a_source`).
+  Before 0.19 this is unverified and the engine judges it as any node.
 - **`exclude-if-present name[:header]`:** every item whose *parent directory* holds the marker file
   (header bytes must match, if given) is rejected, except the marker itself; the directory stays.
   `--exclude-caches` is `CACHEDIR.TAG:Signature: 8a477f597d28d172789f06886806bc55`.
@@ -106,7 +117,13 @@ What a macOS/Linux machine cannot prove is the end-to-end behaviour on a real Wi
   every `plan_` and `restic_` test with `--include-ignored` (on PRs/pushes touching `plan_*` files,
   or on demand via "Run workflow"). Still worth running locally after touching the engine.
   The harnesses are platform-aware (`PathStyle::NATIVE`), so on Windows they compare the Windows
-  rules against real Windows restic.
+  rules against real Windows restic. Two things make that work: restic on Windows reports an item
+  as its *snapshot path* (`/C/Users/me/x`: the drive becomes the first folder), which
+  `test_support::restic_item_path` maps back to `C:/Users/me/x`; and the tests that use real temp
+  directories build their rules from canonical spellings (no `\\?\` prefix, `/` separators).
+  Each matrix entry compares against **its own restic's** source rule: the harnesses call
+  `test_support::restic_judges_sources()` (parses `restic version`) and half of the random cases
+  name one or two extra explicit sources inside the tree, which is where 0.17 and 0.19 differ.
 
 ## Performance (single thread, release build, 13 rules)
 

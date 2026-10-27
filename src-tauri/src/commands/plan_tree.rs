@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use super::cache::ExcludeFile;
+use super::cache::{AppDb, ExcludeFile};
 use super::plan_edit::{apply_edit, export_rules, EditAction, EditOutcome, ExportOut};
 use super::plan_rules::{
     strip_source, Engine, FsProbe, Marker, PathStyle, Pattern, PlanRules, Probe, Reason, RuleInput,
@@ -48,6 +48,10 @@ pub struct TreeRulesInput {
     /// override it to exercise the other platform's rules).
     #[serde(skip)]
     pub style: PathStyle,
+    /// The user's restic applies excludes to the source paths themselves (restic < 0.19, see
+    /// `PlanRules::judge_sources`). Comes from `TreeEnv::restic_judges_sources`.
+    #[serde(default)]
+    pub judge_sources: bool,
 }
 
 /// Where a rule came from, so a verdict can say "excluded by line 12 of ~/.ignore".
@@ -210,6 +214,7 @@ pub(crate) fn build_rules(
             markers,
             exclude_caches: input.exclude_caches,
             style: input.style,
+            judge_sources: input.judge_sources,
         },
         origins,
         problems,
@@ -258,7 +263,8 @@ const FLAG_CHECK_MAX_ENTRIES: usize = 5000;
 /// Is this entry hidden? Unix: a leading `.`; macOS also its `UF_HIDDEN` flag (how `~/Library`
 /// and `/usr` are hidden, needs an `lstat`); Windows: the hidden or system attribute (free — it
 /// comes with the directory read).
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_variables))]
+// Only macOS reads the name and the flag check; Windows asks for the attribute, Linux just the name.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn entry_hidden(ent: &std::fs::DirEntry, name: &str, check_flags: bool) -> bool {
     #[cfg(windows)]
     {
@@ -498,9 +504,23 @@ pub(crate) fn count_matches(
     let start = Instant::now();
     let mut scanned: u64 = 0;
     for src in sources {
+        // restic < 0.19 judges the source path itself: a pattern can newly drop the whole source.
+        if base.judges_sources() {
+            let root = base.style().clean(src);
+            if base.judge_node(&root, probe).is_some() {
+                continue; // already left out
+            }
+            if with.judge_node(&root, probe).is_some() {
+                out.count += 1;
+                if out.sample.len() < MATCH_SAMPLE {
+                    out.sample.push(root);
+                }
+                continue;
+            }
+        }
         let is_dir = std::fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false);
         if !is_dir {
-            continue; // a source file is exempt from patterns
+            continue; // a source file is exempt from patterns (from restic 0.19)
         }
         let mut queue: VecDeque<String> = VecDeque::from([base.style().clean(src)]);
         while let Some(current) = queue.pop_front() {
@@ -591,6 +611,10 @@ pub struct TreeEnv {
     pub roots: Vec<TreeRoot>,
     /// The user's home folder, for the "Home" jump (`/Users/me`, `C:/Users/me`).
     pub home: Option<String>,
+    /// Their restic is older than 0.19, which applies excludes to the source paths themselves; the
+    /// frontend sends it back as `TreeRulesInput::judge_sources`. `false` when the version can't be
+    /// read (the 0.19 behaviour, matching the restic the app targets).
+    pub restic_judges_sources: bool,
 }
 
 #[cfg(windows)]
@@ -623,12 +647,35 @@ pub(crate) fn tree_environment(home_var: Option<String>) -> TreeEnv {
         vec![TreeRoot { label: "Computer".to_string(), path: "/".to_string() }]
     };
     let home = home_var.filter(|h| !h.is_empty()).map(|h| style.clean(&h));
-    TreeEnv { windows, roots, home }
+    TreeEnv { windows, roots, home, restic_judges_sources: false }
+}
+
+/// Does this `restic version` output name a release older than 0.19, which still applies excludes
+/// to the paths named on the command line (restic #5767)? `restic 0.17.3 compiled with go1.23 on
+/// linux/amd64` → true. Anything unreadable → false.
+pub(crate) fn restic_version_judges_sources(version_output: &str) -> bool {
+    let mut parts = version_output
+        .split_whitespace()
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or("")
+        .split('.');
+    let (Some(major), Some(minor)) = (
+        parts.next().and_then(|v| v.parse::<u32>().ok()),
+        parts.next().and_then(|v| v.parse::<u32>().ok()),
+    ) else {
+        return false;
+    };
+    (major, minor) < (0, 19)
 }
 
 #[tauri::command]
-pub fn tree_env() -> TreeEnv {
-    tree_environment(std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok())
+pub fn tree_env(db: State<'_, AppDb>) -> TreeEnv {
+    let mut env = tree_environment(std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok());
+    // A failed `restic version` just means the 0.19 behaviour; the rest of the app reports the error.
+    env.restic_judges_sources = super::repo::get_restic_version(db)
+        .map(|v| restic_version_judges_sources(&v))
+        .unwrap_or(false);
+    env
 }
 
 #[tauri::command]

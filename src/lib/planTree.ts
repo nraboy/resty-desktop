@@ -33,6 +33,9 @@ export interface TreeRulesInput {
   excludeIfPresent: string[];
   excludeCaches: boolean;
   excludeFiles: ExcludeFile[];
+  /** The user's restic is older than 0.19 and applies the excludes to the paths you pick directly
+   * too (`TreeEnv.resticJudgesSources`); the backend judges them the same way. */
+  judgeSources?: boolean;
 }
 
 export interface RuleOrigin {
@@ -86,6 +89,9 @@ export interface TreeEnv {
   windows: boolean;
   roots: TreeRoot[];
   home?: string | null;
+  /** restic < 0.19 (restic#5767): an exclude pattern or marker can also drop a folder or file you
+   * picked directly, not only what is inside it. Absent/false = the 0.19 behaviour. */
+  resticJudgesSources?: boolean;
 }
 
 export interface Classification {

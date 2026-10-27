@@ -5,7 +5,9 @@ name: Restic compatibility
 # tests that build random trees and rule sets and compare the engine, node by node, with a real
 # `restic backup --dry-run`. They need `restic` on PATH, so the ordinary test job skips them; this
 # workflow runs them on every OS (the engine has Unix and Windows path rules) and on the oldest
-# and newest restic the app supports.
+# and newest restic the app supports. The two differ on explicit source paths (restic#5767: exempt
+# from excludes/markers from 0.19, judged like any node before), so the tests detect the installed
+# restic's version and compare against that behaviour.
 
 on:
   workflow_dispatch:
