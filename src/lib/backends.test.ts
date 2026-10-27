@@ -150,11 +150,11 @@ describe("applyAppendOnlyProbe", () => {
     expect(applyAppendOnlyProbe(probe("appendOnly"), true)).toEqual({ appendOnly: true, note: "" });
   });
 
-  it("clears the flag when the server allows deletes, saying so only if it was on", () => {
+  it("never clears the flag when the server allows deletes, only noting it if it was on", () => {
     expect(applyAppendOnlyProbe(probe("notAppendOnly"), false)).toEqual({ appendOnly: false, note: "" });
     expect(applyAppendOnlyProbe(probe("notAppendOnly"), true)).toEqual({
-      appendOnly: false,
-      note: expect.stringContaining("no longer append-only"),
+      appendOnly: true,
+      note: expect.stringContaining("left on"),
     });
   });
 

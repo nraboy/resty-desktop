@@ -822,8 +822,9 @@ export default function RepositoriesPage() {
       let message = "Connection successful — repository is accessible.";
       // Only now that the connection works is a 403 to the probe unambiguous (auth and path
       // problems would have failed above) — see rest_probe.rs. A probe failure never fails
-      // the test.
-      if (supportsAppendOnly(testPath)) {
+      // the test. Skipped for a read-only repo: the probe sends a DELETE, which a repo the
+      // user marked read-only should never receive, and the flag is moot there anyway.
+      if (!readOnly && supportsAppendOnly(testPath)) {
         const probe = await detectAppendOnly(testPath, useInsecureTls, credentials).catch(() => null);
         if (probe) {
           const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, appendOnly);
@@ -1495,7 +1496,8 @@ export default function RepositoriesPage() {
                   const useInsecureTls = supportsInsecureTls(editPath) && editInsecureTls;
                   await testRepoConnection(editPath.trim(), editNoPassword ? "" : editPassword.trim(), editReadOnly, useInsecureTls, credentials);
                   let message = "Connection successful — repository is accessible.";
-                  if (supportsAppendOnly(editPath)) {
+                  // Skipped for a read-only repo — see the add dialog's handleTest.
+                  if (!editReadOnly && supportsAppendOnly(editPath)) {
                     const probe = await detectAppendOnly(editPath.trim(), useInsecureTls, credentials).catch(() => null);
                     if (probe) {
                       const { appendOnly: detected, note } = applyAppendOnlyProbe(probe, editAppendOnly);

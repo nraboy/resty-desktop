@@ -42,15 +42,18 @@ src/
   index.css             # Tailwind directives + global styles
   components/
     ActionButton.tsx      # Canonical row-action button: icon + label, label reveals as text at the `wide` breakpoint — see docs/frontend.md
+    AppendOnlyField.tsx   # "Append-only server" checkbox + info tooltip, for `rest:http(s)` paths only — see docs/frontend.md
     BackupWarningsList.tsx # Shared detail view for a backup that completed with warnings (restic exit 3): missing sources first, unreadable files, retention-skipped note, macOS FDA hint — see docs/frontend.md
     Button.tsx            # primary/secondary/danger/ghost variants
     ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen
     EmptyState.tsx        # Empty list placeholder
     icons.tsx             # Canonical glyph icons — single source for every icon used in more than one place; same meaning = same drawing
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
+    InsecureTlsField.tsx  # "Skip TLS certificate verification (--insecure-tls)" checkbox + tooltip, for `rest:https` paths only — see docs/frontend.md
     Input.tsx             # Labeled input with error state; optional inline clear
     Modal.tsx             # Overlay modal dialog
     ProgressBar.tsx       # Determinate/indeterminate progress bar, shared across modals
+    RestServerLogin.tsx   # "Server username" / "Server password" pair shown instead of the generic credential rows for `rest:` URLs — see docs/frontend.md
     RetentionFields.tsx   # The five `keep_*` inputs, shared by the plan editor and Settings' default retention card
     Spinner.tsx           # Shared animated loading spinner
     Tooltip.tsx            # Portal-rendered hover tooltip (@floating-ui/react); ContextMenu's styled sibling — for content hovers only, not icon-button labels (those stay on native title) — see docs/frontend.md and docs/decisions.md
@@ -102,6 +105,7 @@ src-tauri/
       backends.rs           # Backend credential registry (S3/B2/REST) — see docs/restic.md
       repo.rs               # Repo CRUD, stats, restic path/version, prune, FDA checks — see docs/restic.md and docs/concurrency.md
       repo_locks.rs         # RepoLocks: per-repo shared/exclusive lock registry — see docs/concurrency.md
+      rest_probe.rs         # `detect_append_only`: the `DELETE /data/<64 zeros>` probe that suggests a rest-server's `--append-only` mode; pure helpers unit-tested — see docs/restic.md
       snapshot.rs           # List/delete/tag snapshots; execute_backup; copy/mirror; retention — see docs/restic.md and docs/concurrency.md
       browse.rs             # File listing, restore, indexing (single + batch) — see docs/concurrency.md and docs/decisions.md
       backup_plan.rs        # List/save/remove backup plans; `validate_plan_sources` (paths-or-list-files, list-file plans need a tag) — see docs/restic.md
@@ -257,7 +261,8 @@ proposing a change — several are pinned by a named test or reference a confirm
   `rest_probe`'s `DELETE /data/<64 zeros>` after a successful connection test): `ensure_can_delete`
   blocks delete/tag/retention/prune (`tag` too — restic's tag edit leaves a duplicate snapshot when the
   delete 403s), backup/unlock/copy-into stay allowed, and retention is folded into
-  `BackupOutcome::retention_skipped` rather than failing — see docs/decisions.md
+  `BackupOutcome::retention_skipped` rather than failing; the probe only ever ticks the box (never
+  clears it) and is skipped for read-only repos — see docs/decisions.md
 - `"rest:"` stays listed in `REMOTE_PREFIXES` even though a dedicated `detect_kind` arm exists
 - Sync `#[tauri::command]`s are not wrapped in `spawn_blocking` (Tauri already offloads them)
 - `scheduler.rs` calls sync `apply_retention` directly, not via `spawn_blocking`
@@ -555,7 +560,7 @@ git push origin v0.0.X
 ## Testing
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
-- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,schedule,snapshot,transfer,webhook}.rs`.
+- Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,rest_probe,schedule,snapshot,transfer,webhook}.rs`.
 - Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
   build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
   controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a

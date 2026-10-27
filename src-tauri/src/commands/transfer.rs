@@ -468,7 +468,10 @@ pub fn import_data(
             read_only: r.read_only,
             // Deliberately not carried over — see ExportRepo::insecure_tls.
             insecure_tls: false,
-            append_only: r.append_only,
+            // Kept only where it means something. The UI offers the checkbox for `rest:http(s)`
+            // paths alone, so on any other path a stray flag would block forget/prune/tag with
+            // no control to clear it. (Unlike `insecure_tls` it only restricts, so it is carried.)
+            append_only: r.append_only && super::backends::supports_append_only(&r.path),
             credentials_nonce: cred_nonce,
             credentials_ciphertext: cred_ciphertext,
             defer_prune: r.defer_prune,

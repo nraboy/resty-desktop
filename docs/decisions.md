@@ -37,20 +37,30 @@ as-is. Don't re-flag or "fix" them without understanding why first:
   connection test of a `rest:` repo has a 45s deadline.** What each status means was read from rest-server's source and
   checked against a live instance: reads only ever see 401 (credentials *or* a `--private-repos` path
   mismatch — indistinguishable server-side) and 404; **403 comes only from writes** (deleting/modifying
-  under `--append-only`, re-creating existing config/blobs), so the hint for 403 names append-only and
-  the connection test never claims a path problem for it. Hints are appended after restic's text, never
-  replacing it (callers substring-match for "already locked"), and never change state. The connection test
+  under `--append-only`, re-creating existing config/blobs), so the hint for 403 names append-only (or an access rule/proxy, since hints are appended to any failed
+  `rest:` call) and the connection test never claims a path problem for it. Hints are appended after
+  restic's text, never replacing it (callers substring-match for "already locked"), and never change state.
+  Statuses are matched only in restic's `unexpected HTTP response (NNN)` shape (identical in 0.17–0.19),
+  never as a bare `(404)`, because a failed backup's stderr also carries file names. The connection test
   **fails fast** (kills restic at its first "retrying after" line) and also has a 45s deadline, because
   restic retries a refused/misdirected/untrusted-certificate first request for ~15 minutes with no flag
   to cap it — verified: `restic init` fails at once on an untrusted certificate but `restic snapshots`
-  (what the test runs) backs off and re-handshakes repeatedly. Don't "simplify" `test_repo_connection`
+  and `restic cat config` back off and re-handshake repeatedly. The test runs `cat config` for a `rest:`
+  repo (not `snapshots`): the same first request and the same retry lines, and it still checks the repo
+  password, but it reads one small object instead of listing every snapshot, so a large or slow repo
+  can't outlast the deadline. Don't "simplify" `test_repo_connection`
   back to `run_restic_blocking` for `rest:` repos.
 - **Append-only is a user-visible, stored flag (`append_only`) with advisory auto-detection; `tag` is
   blocked along with forget/prune/retention; retention on such a repo is "not applicable".** Decisions,
   each with its reason:
   - The server's mode can't be read from restic, so the flag is stored per repo and editable — the
     probe (`rest_probe.rs`) only *suggests* it after a successful connection test, and a wrong or
-    undetermined answer can always be overridden by hand. It is not re-run on a schedule.
+    undetermined answer can always be overridden by hand. It is not re-run on a schedule. It only ever
+    **ticks** the box: a "not append-only" or undetermined answer leaves a ticked box alone, because the
+    user may have set it for a reason the probe can't see (a proxy or another server refusing deletes) and
+    clearing it would re-enable forget/prune/tag that then fail (`tag` leaves a duplicate) — a stale flag
+    is unticked by hand, and the result line says so. It is skipped for a read-only repo (it sends a
+    `DELETE`, and the flag is moot there).
   - The probe is a `DELETE /data/<64 zeros>`: a 403 can only mean append-only once auth and path are known
     good (reads never 403; wrong path/credentials are 401, a missing repo 404), and the all-zero id can't
     match any real object. That precondition is also what lets a probe

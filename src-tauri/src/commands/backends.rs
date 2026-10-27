@@ -88,6 +88,20 @@ pub fn detect_kind(path: &str) -> BackendKind {
     }
 }
 
+/// True when `rest-server --append-only` means something for this path: a `rest:http(s)://`
+/// URL (it is a rest-server option; no other backend has it). Mirrors the frontend's
+/// `supportsAppendOnly` (`src/lib/backends.ts`), which is what keeps the flag off every other
+/// path in the add/edit forms — this is the check for input that doesn't come through them.
+pub fn supports_append_only(path: &str) -> bool {
+    // `rest:` itself is case-sensitive (restic rejects `REST:`); the scheme after it is not.
+    path.trim()
+        .strip_prefix("rest:")
+        .is_some_and(|rest| {
+            let rest = rest.to_ascii_lowercase();
+            rest.starts_with("http://") || rest.starts_with("https://")
+        })
+}
+
 /// The only `RESTIC_*` vars a stored credential may set. Unlike RESTIC_REPOSITORY /
 /// RESTIC_PASSWORD / RESTIC_FROM_* / RESTIC_COMPRESSION, the app never sets these
 /// itself, so there is no collision for a stored value to win and nothing to
@@ -219,7 +233,7 @@ pub fn rest_error_hint(path: &str, insecure_tls: bool, stderr: &str) -> Option<S
                 .to_string(),
         );
     }
-    if e.contains("(401)") || e.contains("401 unauthorized") {
+    if has_http_status(&e, 401) {
         return Some(
             "Authentication failed (401). Check the username and password. If rest-server runs \
              with --private-repos, the repository path must start with your username, e.g. \
@@ -227,29 +241,32 @@ pub fn rest_error_hint(path: &str, insecure_tls: bool, stderr: &str) -> Option<S
                 .to_string(),
         );
     }
-    if e.contains("(507)") || e.contains("507 insufficient storage") {
+    if has_http_status(&e, 507) {
         return Some(
             "The server is out of storage space or has reached its size limit (507) — check the \
              disk or rest-server's --max-size."
                 .to_string(),
         );
     }
-    if e.contains("(403)") || e.contains("403 forbidden") {
+    if has_http_status(&e, 403) {
+        // The hint is appended to any failed `rest:` call, not only deletes, so it names both
+        // usual causes rather than assuming append-only.
         return Some(
-            "The server refused the request (403 Forbidden). A rest-server started with \
-             --append-only does not allow deleting or modifying existing data, so forget, prune \
-             and tag fail there while backups and restores still work."
+            "The server refused the request (403 Forbidden). On a rest-server this usually means \
+             it was started with --append-only, which does not allow deleting or modifying \
+             existing data (forget, prune and tag fail while backups and restores still work), \
+             or that an access rule or proxy in front of the server is blocking the request."
                 .to_string(),
         );
     }
-    if e.contains("(404)") || e.contains("404 not found") || e.contains("repository does not exist") {
+    if has_http_status(&e, 404) || e.contains("repository does not exist") {
         return Some(
             "Repository not found (404). Check the path in the URL — with --private-repos it starts \
              with your username — or initialise a new repository at this URL first."
                 .to_string(),
         );
     }
-    if over_http && (e.contains("(400)") || e.contains("400 bad request")) {
+    if over_http && has_http_status(&e, 400) {
         return Some(
             "The server rejected a plain-HTTP request (400). If rest-server runs with --tls, use \
              rest:https:// instead."
@@ -273,6 +290,14 @@ pub fn rest_error_hint(path: &str, insecure_tls: bool, stderr: &str) -> Option<S
     None
 }
 
+/// True when the (lower-cased) stderr reports `code` in restic's own
+/// `unexpected HTTP response (NNN)` shape. Matched on that phrase rather than a bare `(404)`:
+/// a failed backup's stderr also carries file names and OS messages, and a file called
+/// `report (404).pdf` must not be read as the server's answer.
+fn has_http_status(e: &str, code: u16) -> bool {
+    e.contains(&format!("unexpected http response ({code})"))
+}
+
 /// `err` with a `rest_error_hint` appended on its own paragraph when one applies, else
 /// `err` unchanged. Appended (never prepended or replacing) so callers that match restic's
 /// own text — the retry-on-"already locked" checks — keep working.
@@ -289,6 +314,21 @@ mod tests {
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn supports_append_only_only_for_rest_http_urls() {
+        assert!(supports_append_only("rest:http://nas:8000/repo"));
+        assert!(supports_append_only("rest:https://nas:8000/repo"));
+        // The scheme after `rest:` is case-insensitive, the `rest:` prefix is not (matches the
+        // frontend and `verifies_tls`), and surrounding whitespace is ignored like the forms do.
+        assert!(supports_append_only("rest:HTTPS://nas/r"));
+        assert!(supports_append_only("  rest:http://nas/r  "));
+        assert!(!supports_append_only("REST:https://nas/r"));
+        // No other backend has the option — nor does a unix-socket rest URL.
+        for path in ["/backups/local", "sftp:u@h:/r", "s3:s3.amazonaws.com/b", "rclone:remote:p", "rest:http+unix:///tmp/s:/r", "rest:", ""] {
+            assert!(!supports_append_only(path), "{path}");
+        }
     }
 
     #[test]
@@ -565,7 +605,32 @@ mod tests {
     #[test]
     fn hint_for_forbidden_names_append_only() {
         let err = "Remove(<snapshot/45cea74811>) failed: unexpected HTTP response (403): 403 Forbidden";
-        assert!(rest_error_hint(REST, false, err).unwrap().contains("--append-only"));
+        let hint = rest_error_hint(REST, false, err).unwrap();
+        assert!(hint.contains("--append-only"));
+        // The hint is appended to any failed `rest:` call, so it also names the other usual cause.
+        assert!(hint.contains("access rule or proxy"), "{hint}");
+    }
+
+    #[test]
+    fn http_status_hints_ignore_status_numbers_in_file_names_and_os_messages() {
+        // A failed backup's stderr carries paths and OS errors. A name like `report (404).pdf`
+        // is not the server's answer and must not produce a "Repository not found" (etc.) hint.
+        for err in [
+            "error: open /home/u/report (404).pdf: permission denied",
+            "error: open /srv/invoice (401).txt: permission denied",
+            "error: open /srv/photo (403).jpg: no such file or directory",
+            "error: open /srv/dump (507).bin: input/output error",
+            "error: open /srv/log 400 Bad Request.txt: permission denied",
+            "error: open /srv/notes 403 Forbidden.md: permission denied",
+        ] {
+            assert_eq!(rest_error_hint(REST, false, err), None, "{err}");
+            assert_eq!(rest_error_hint("rest:http://nas:8000/r", false, err), None, "{err}");
+        }
+        // …while the same statuses in restic's own shape still explain themselves.
+        for (code, needle) in [(401, "Authentication failed"), (403, "refused the request"), (404, "Repository not found"), (507, "out of storage")] {
+            let err = format!("error: open /srv/report ({code}).pdf: denied\nFatal: unexpected HTTP response ({code}): {code} Reason");
+            assert!(rest_error_hint(REST, false, &err).unwrap().contains(needle), "{code}");
+        }
     }
 
     #[test]

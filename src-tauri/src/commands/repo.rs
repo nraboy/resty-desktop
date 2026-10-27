@@ -449,9 +449,20 @@ fn run_restic_with_timeout(
     std::thread::spawn(move || {
         use std::io::BufRead;
         let mut s = String::new();
-        for line in std::io::BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
-            s.push_str(&line);
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut raw = Vec::new();
+        // Raw bytes per line, converted lossily: `lines()` errors on the first non-UTF-8 byte
+        // (a localized message or a non-UTF-8 path echoed by restic), and bailing out would drop
+        // the pipe — truncating the error, hiding later retry lines and risking a broken pipe.
+        loop {
+            raw.clear();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&raw);
+            let line = line.trim_end_matches(['\n', '\r']);
+            s.push_str(line);
             s.push('\n');
             if line.contains(RESTIC_RETRY_MARKER) {
                 retry_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -744,10 +755,14 @@ pub async fn test_repo_connection(
     // no hint logic to explain a timeout, so they keep the plain call, as do local paths.
     let timeout = (kind == backends::BackendKind::Rest).then_some(CONNECTION_TEST_TIMEOUT);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let args = vec!["snapshots", "--json"];
         match timeout {
-            Some(t) => run_restic_with_timeout(&dummy, args, &restic_path, t),
-            None => run_restic_with_path(&dummy, args, &restic_path),
+            // `cat config`, not `snapshots`: same first request (`Stat <config/>`, so the
+            // retry detection is identical) and it still needs the repo password, but it reads
+            // one small object instead of listing every snapshot — a reachable repo with many
+            // snapshots on a slow link could otherwise outlast the deadline and be misreported
+            // as unreachable.
+            Some(t) => run_restic_with_timeout(&dummy, vec!["cat", "config"], &restic_path, t),
+            None => run_restic_with_path(&dummy, vec!["snapshots", "--json"], &restic_path),
         }
     })
     .await
@@ -1894,6 +1909,23 @@ mod tests {
         let insecure = tls_repo("rest:https://127.0.0.1:8443/repo", true);
         let err = run_restic_with_timeout(&insecure, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
         assert!(!err.contains("Hint: Couldn't verify"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_restic_with_timeout_keeps_reading_stderr_past_non_utf8_bytes() {
+        // A line that isn't valid UTF-8 must not stop the stderr reader: the retry line after
+        // it still has to be seen (fail fast), and the real cause kept in the error.
+        let bin = fake_restic(
+            "non-utf8",
+            "printf 'bad bytes \\377\\376 here\\n' >&2\necho 'Stat(<config/>) returned error, retrying after 2.8s: connection refused' >&2\nexec sleep 30",
+        );
+        let repo = tls_repo("rest:http://127.0.0.1:9/x", false);
+        let started = std::time::Instant::now();
+        let err = run_restic_with_timeout(&repo, vec!["snapshots"], &bin, std::time::Duration::from_secs(30)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited out the deadline: {err}");
+        assert!(!err.contains(crate::commands::backends::CONNECTION_TIMEOUT_MARKER), "{err}");
+        assert!(err.contains("connection refused"), "{err}");
     }
 
     /// Manual check against a real server: `RESTY_TEST_URL=rest:https://127.0.0.1:8443/repo

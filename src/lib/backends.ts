@@ -125,8 +125,11 @@ export const APPEND_ONLY_TITLE =
   "This repository is on an append-only server — existing snapshots can't be deleted or modified";
 
 /** Folds a detection result into the form: the new value for the append-only checkbox and a
- * line to append to the connection-test message ("" = nothing to add). An undetermined
- * probe leaves the checkbox alone and says why, so the user can still set it by hand. */
+ * line to append to the connection-test message ("" = nothing to add). The probe only ever
+ * turns the checkbox on: an undetermined result, or one saying the server allows deletes,
+ * leaves it alone, because a user may have ticked it for a reason the probe can't see (a proxy
+ * or another server refusing deletes), and clearing it would re-enable forget/prune/tag that
+ * then fail — tag even leaves a duplicate snapshot behind. */
 export function applyAppendOnlyProbe(
   probe: { status: "appendOnly" | "notAppendOnly" | "undetermined"; detail: string },
   current: boolean,
@@ -141,8 +144,10 @@ export function applyAppendOnlyProbe(
       };
     case "notAppendOnly":
       return {
-        appendOnly: false,
-        note: current ? "The server is no longer append-only, so the append-only setting was cleared." : "",
+        appendOnly: current,
+        note: current
+          ? "The server allows deletes, so it doesn't look append-only. The append-only setting was left on; untick it if that's no longer wanted."
+          : "",
       };
     default:
       return { appendOnly: current, note: `Append-only check skipped: ${probe.detail}` };
