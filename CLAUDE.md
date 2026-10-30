@@ -275,7 +275,8 @@ proposing a change — several are pinned by a named test or reference a confirm
   models both (`PlanRules::judge_sources`, set from `restic version` via `TreeEnv`), and the
   harnesses compare each restic against its own rule, so don't hard-code one
 - Plan-tree clicks (`plan_edit.rs`) act on the **exact item** and never touch a broad rule: include
-  deletes P's own exact line(s), else appends the specific `!P`; exclude deletes lone `!P` lines (plus
+  deletes P's own exact line(s), else appends the specific `!P` (inside an excluded folder, the carve-out
+  chain `!X`, `X/*`, …, `!P` from the highest still-excluded folder `X` down); exclude deletes lone `!P` lines (plus
   orphaned carve-out scaffolding — only if every folder it reopened ends up excluded again; that gate and
   `orphan_scaffolding`'s per-pair rule stay together), else appends P's exact rule. A `!` on a folder also
   brings back what other rules hid inside it (restic F1): accepted, disclosed in the Undo line, not worked
@@ -600,7 +601,7 @@ git push origin v0.0.X
 
 - Frontend tests use **Vitest**; test files live alongside source as `src/lib/*.test.ts`.
 - Rust unit tests use `#[cfg(test)]` modules in `lib.rs`, `tasks.rs`, `gpu_compat.rs`, `scheduler.rs`, `cache_warmer.rs`, and `commands/{auth,backends,backup_plan,browse,cache,crypto,keychain,notify,repo,repo_locks,rest_probe,schedule,snapshot,transfer,webhook}.rs`.
-  The plan-tree engine (`plan_rules`, `plan_edit` incl. `plan_edit/tests.rs`, `plan_tree`, `plan_listfiles`) also carries `#[ignore]` differential tests against the real restic (`cargo test restic_ -- --ignored`, also in `restic-compat`) — see docs/backup-plan-tree.md.
+  The plan-tree engine (`plan_rules`, `plan_edit` via `plan_edit/tests.rs`, `plan_listfiles`) also carries `#[ignore]` differential tests against the real restic (`cargo test restic_ -- --ignored`, also in `restic-compat`) — see docs/backup-plan-tree.md.
 - Layout tests live in `tests/layout/` (`run.mjs` + `mock.js` + `pages.html`/`modals.html`): the real production
   build in headless Chrome with the Tauri IPC mocked and long-name data, failing on horizontal scroll, clipped
   controls, wrapped short text or a modal escaping its dialog — see docs/frontend.md ("Layout tests"). Needs a

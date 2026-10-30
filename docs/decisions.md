@@ -1098,7 +1098,7 @@ F1–F6 these rest on are listed there and verified by the differential tests.
   chain from the highest still-excluded node (F3 — re-appending the full chain for a second file drops
   the first carve-out).
 - **Clicking twice returns the list to where it started — for lines the tree itself wrote.** If the first
-  click appended rules, the second deletes exactly those and their comment: the identical list. If the
+  click appended rules and deleted none, the second deletes exactly those and their comment: the identical list. If the
   first click deleted lines, the second re-adds its rules at the end, so a deleted *hand-written* line
   can't come back to its old position or regain a comment it never had; there the guarantee is the same
   included set (the harness classes it `SameSet`/`SameRules`). The documented case is an exact line plus
@@ -1119,9 +1119,10 @@ F1–F6 these rest on are listed there and verified by the differential tests.
   verdicts before and after over a bounded walk (750 ms, 2M entries) and refuses with the item named
   rather than applying. A scan that runs out of budget lets the edit through, verified on what it saw
   (a refusal on a huge tree would make the click unusable). Exempt on purpose: the `exclude` *pattern*
-  kind (a pattern exists to match many items) and edits that add or remove sources. The cost — three
-  extra engine builds and a walk per click — is accepted: a click that silently rewrote another item's
-  fate is the failure this feature must never have.
+  kind (a pattern exists to match many items) and edits that add or remove sources. The cost — two
+  extra engine builds and a walk per click, plus two more builds and a second walk for the brought-back
+  count when an include ends in a `!` on a folder — is accepted: a click that silently rewrote another
+  item's fate is the failure this feature must never have.
 - **Carve-out scaffolding is deleted under a gate.** Undoing the last carve-out out of a folder
   also deletes the scaffolding that reopened it (`!A`, `A/*`), otherwise an empty `A/` stays backed up
   (F4). Two rules do that and must stay together: `orphan_scaffolding` judges each `!A`/`A/*` pair on its

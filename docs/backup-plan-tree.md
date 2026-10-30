@@ -379,7 +379,7 @@ so a `!` can't override it; the message names file and line), a case-insensitive
 precedence over the plan's earlier ones.
 
 **Click twice.** Clicking an item and clicking it again returns the exclude list to where it started —
-identical lines, comments included — whenever the first click *added* lines: the second deletes exactly
+identical lines, comments included — whenever the first click *added* lines and deleted none: the second deletes exactly
 what the tree wrote, comment and all. When the first click *deleted* lines (an include removing an exact
 line, an exclude removing a `!P`), the second puts its rules back at the **end** of the list, so what is
 guaranteed is the same included set (the same rules too when the deleted lines were at the end): a
@@ -396,8 +396,8 @@ would include it, not remove the pattern): delete it in the exclude list.
 left clicks, "Exclude by pattern…", and "Include everything inside it" on a partly included folder or an
 excluded folder — never on a file) to random hand-written plans and trees and checks with real dry runs, run both before and after the edit,
 that the clicked item ended up as asked, the engine agrees on every node and **nothing outside P, its
-subtree and the path to P changed** (skipped only for name-pattern excludes, which are meant to match
-other items). `restic_confirms_click_sequences` runs 2–6 clicks per case (about half of the later ones
+subtree and the path to P changed** (skipped for any `exclude` pattern other than P's exact path — a name
+pattern, say — which is meant to match other items; `held_to_its_target`). `restic_confirms_click_sequences` runs 2–6 clicks per case (about half of the later ones
 the inverse click on the same node; a third of the plans carry a user comment) and checks the same after
 every click, plus that only P's own lines were deleted with every other line surviving in order, plus
 the click-twice rule per class: *Identical* (first click only appended), *SameRules* (only deleted lines at the end),
@@ -443,7 +443,10 @@ list); don't add it without an export story.
    `--files-from-verbatim` list at backup time (restic has no include patterns).
    Known test gap: the layout tests (`tests/layout`) never render the tree or open its dialogs
    (`tree_supported` is unmocked in `mock.js`), so the click, menu and dialog behaviour is covered by the
-   pure helpers' unit tests, the Rust/restic harnesses and manual passes only.
+   pure helpers' unit tests, the Rust/restic harnesses and manual passes only. Also unverified so far: the
+   click-sequence harness has run only locally (restic 0.19.1, macOS), not yet on any `restic-compat` leg —
+   notably restic 0.17.3 and Windows — and the menu's ContextMenu key / Shift+F10 route has been driven
+   only with synthesized key events in desktop Chrome, never in the real webviews.
 3b. Path-list files in the tree — done, read-only (above). Still to do: edit the list file from the
    tree (with a warning), and open it from the app.
 4. Polish: size estimates, keyboard/accessibility; verifying on a real Windows machine.
