@@ -1373,22 +1373,47 @@ fn assert_engine_agrees(plan: &TreeRulesInput, nodes: &[String], reported: &Hash
     }
 }
 
-/// The click the UI makes on `target`. On an included item: a left click excludes it, or a quarter
+/// Is `target` a folder the tree shows as partly included: included itself, with at least one of
+/// `nodes` inside it excluded by the plan `engine` judges?
+fn partly_included(engine: &Engine, nodes: &[String], target: &str) -> bool {
+    let probe = FsProbe::default();
+    is_folder(PathStyle::NATIVE, target)
+        && engine.classify(target, &probe).included
+        && nodes
+            .iter()
+            .any(|n| matches!(strip_source(n, target), Some(r) if !r.is_empty()) && !engine.classify(n, &probe).included)
+}
+
+/// The click the UI makes on `target` in the plan `engine` judges, over the tree `nodes`. On a
+/// partly included folder ([`partly_included`]): a quarter of the time the menu's "Include
+/// everything inside it". Otherwise, on an included item: a left click excludes it, or a quarter
 /// of the time the menu's "Exclude by pattern…" with its exact path or its name. On an excluded
-/// one: a left click includes it, or a quarter of the time the menu's "include everything inside
-/// it".
-fn ui_click(rng: &mut rand::rngs::StdRng, target: &str, included: bool) -> EditAction {
+/// item: a left click includes it, or on a folder a quarter of the time the menu's "include
+/// everything inside it" (the menu offers that only when the folder has its own exact line; here
+/// any excluded folder gets it, and the engine refuses it with a reason where `!P` can't help). A
+/// file never gets it: the menu doesn't offer it there.
+fn ui_click(rng: &mut rand::rngs::StdRng, engine: &Engine, nodes: &[String], target: &str) -> EditAction {
     use rand::Rng;
+    if partly_included(engine, nodes, target) && rng.gen_range(0..4) == 0 {
+        return include_everything(target);
+    }
+    let included = engine.classify(target, &FsProbe::default()).included;
     let from_the_menu = rng.gen_range(0..4) == 0;
     match (included, from_the_menu) {
-        (false, false) => include(target),
-        (false, true) => include_everything(target),
+        (false, true) if is_folder(PathStyle::NATIVE, target) => include_everything(target),
+        (false, _) => include(target),
         (true, false) => exclude_item(target),
         (true, true) => {
             let name = target.rsplit('/').next().unwrap();
             exclude(target, &if rng.gen_range(0..2) == 0 { esc(target) } else { esc(name) })
         }
     }
+}
+
+/// Does `action` ask for its target to end up included? Every click flips its target, except
+/// "include everything" on a partly included folder, which leaves it included.
+fn wants_included(action: &EditAction) -> bool {
+    matches!(action.kind.as_str(), "include" | "includeEverything")
 }
 
 /// Does `action` promise to change nothing but its target, what is inside it and the folders on
@@ -1490,7 +1515,7 @@ fn restic_confirms_every_edit_the_engine_offers() {
     let judge = crate::commands::test_support::restic_judges_sources();
     let probe = FsProbe::default();
     let read = |p: &str| std::fs::read_to_string(p);
-    let (mut applied, mut refused, mut nodes_checked) = (0, 0, 0usize);
+    let (mut applied, mut refused, mut nodes_checked, mut on_partly_included) = (0, 0, 0usize, 0);
     let mut by_kind: HashMap<String, usize> = HashMap::new();
     for case in 0..cases {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed * 1000 + case);
@@ -1522,7 +1547,7 @@ fn restic_confirms_every_edit_the_engine_offers() {
             nodes[rng.gen_range(0..nodes.len())].clone()
         };
         let target_included = before.classify(&target, &probe).included;
-        let action = ui_click(&mut rng, &target, target_included);
+        let action = ui_click(&mut rng, &before, &nodes, &target);
         let ctx = format!("case {case} (seed {seed}): {} {target} {:?}", action.kind, action.pattern);
 
         let out = match apply_edit(&plan, &action, &probe, &read, &no_env) {
@@ -1535,12 +1560,15 @@ fn restic_confirms_every_edit_the_engine_offers() {
         };
         applied += 1;
         *by_kind.entry(action.kind.clone()).or_default() += 1;
+        if action.kind == "includeEverything" && target_included {
+            on_partly_included += 1;
+        }
 
         // What the GUI would run, before and after: the patterns as --exclude flags over the sources.
         let reported_before = restic_plan(&repo, &plan, &base);
         let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..plan.clone() };
         let reported = restic_plan(&repo, &after_plan, &base);
-        let want = !target_included; // include flips it in, exclude flips it out
+        let want = wants_included(&action);
         assert_eq!(
             reported.contains(&target),
             want,
@@ -1559,7 +1587,10 @@ fn restic_confirms_every_edit_the_engine_offers() {
             assert!(hit.is_empty(), "{ctx}: also changed {hit:?}\nbefore: {excludes:?}\nafter:  {:?}", out.excludes);
         }
     }
-    eprintln!("restic confirmed {applied} edits ({by_kind:?}; {refused} refused as impossible), {nodes_checked} nodes agree");
+    eprintln!(
+        "restic confirmed {applied} edits ({by_kind:?}, {on_partly_included} of the includeEverything on a partly included folder; \
+         {refused} refused as impossible), {nodes_checked} nodes agree"
+    );
     assert!(applied > 0);
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -1589,6 +1620,11 @@ enum RoundTrip {
     /// Neither applies (see [`check_round_trip`]); the item is in the state the second click asked
     /// for, which every click is checked for.
     StateOnly,
+    /// The first click left the item as it was ("include everything" on a partly included folder),
+    /// so the second is no undo but a plain exclude: it keeps the `!P` and appends P's exact rule
+    /// after it (the `P` / `!P` pair), or, when deleting `!P` lines alone excludes P (an older `!P`
+    /// was what included it), only deletes.
+    Pair,
 }
 
 /// Checks a click (`first`) followed by the inverse click on the same item (`second`, which left
@@ -1601,13 +1637,24 @@ enum RoundTrip {
 ///   same included set, when no `!` line comes after a deleted one (a hand-written line in the middle
 ///   can't be put back in place, and moving an exclude past a `!` would change what that `!` does);
 /// - an excludeItem that deleted lines the include can't write back (a re-include that is not the
-///   last line, or `!P` where the include deletes P's exact line instead): only the state.
+///   last line, or `!P` where the include deletes P's exact line instead): only the state;
+/// - "include everything" on a folder that was already included: no undo at all (see
+///   [`RoundTrip::Pair`]).
 fn check_round_trip(first: &Click, second: &EditOutcome, reported: &HashSet<String>, ctx: &str) -> RoundTrip {
     let (l0, o1) = (&first.before, &first.outcome);
     let l2 = &second.excludes;
     let what = || format!("{ctx}: {} then the inverse\nstart:  {l0:?}\nfirst:  {:?}\nsecond: {l2:?}", first.action.kind, o1.excludes);
     if !held_to_its_target(&first.action) {
         return RoundTrip::StateOnly; // a name pattern is not what a click on the item undoes
+    }
+    if first.action.kind == "includeEverything" && first.reported_before.contains(&first.target) {
+        if second.removed_rules.is_empty() {
+            assert_eq!(second.added_rules, [exact_rule(PathStyle::NATIVE, &first.target)], "{}", what());
+            assert!(l2.starts_with(&o1.excludes), "{}: the `!P` must stay", what());
+        } else {
+            assert!(second.added_rules.is_empty(), "{}", what());
+        }
+        return RoundTrip::Pair;
     }
     if o1.removed_rules.is_empty() {
         assert_eq!(l2, l0, "{}", what());
@@ -1654,9 +1701,11 @@ fn restic_confirms_click_sequences() {
     let judge = crate::commands::test_support::restic_judges_sources();
     let probe = FsProbe::default();
     let read = |p: &str| std::fs::read_to_string(p);
-    let (mut applied, mut refused, mut nodes_checked) = (0, 0, 0usize);
+    let (mut applied, mut refused, mut nodes_checked, mut on_partly_included) = (0, 0, 0usize, 0);
     let mut by_kind: HashMap<String, usize> = HashMap::new();
     let mut round_trips: HashMap<RoundTrip, usize> = HashMap::new();
+    // The same round trips by the kind of their first click.
+    let mut round_trips_after: HashMap<String, usize> = HashMap::new();
     for case in 0..cases {
         let mut rng = rand::rngs::StdRng::seed_from_u64(500_000 + seed * 1000 + case);
         let root = base.join(format!("t{case}"));
@@ -1691,7 +1740,7 @@ fn restic_confirms_click_sequences() {
             let action = match (inverse, included) {
                 (true, true) => exclude_item(&target),
                 (true, false) => include(&target),
-                (false, _) => ui_click(&mut rng, &target, included),
+                (false, _) => ui_click(&mut rng, &engine, &nodes, &target),
             };
             let ctx = format!("case {case} step {step} (seed {seed}): {} {target} {:?}", action.kind, action.pattern);
             let out = match apply_edit(&plan, &action, &probe, &read, &no_env) {
@@ -1711,11 +1760,14 @@ fn restic_confirms_click_sequences() {
             };
             applied += 1;
             *by_kind.entry(action.kind.clone()).or_default() += 1;
+            if action.kind == "includeEverything" && included {
+                on_partly_included += 1;
+            }
 
             let next = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..plan.clone() };
             let after = restic_plan(&repo, &next, &base);
             let ctx = format!("{ctx}\nbefore: {:?}\nafter:  {:?}", plan.excludes, out.excludes);
-            assert_eq!(after.contains(&target), !included, "{ctx}: the item isn't as asked");
+            assert_eq!(after.contains(&target), wants_included(&action), "{ctx}: the item isn't as asked");
             assert_engine_agrees(&next, &nodes, &after, &ctx);
             nodes_checked += nodes.len();
             if held_to_its_target(&action) {
@@ -1725,6 +1777,7 @@ fn restic_confirms_click_sequences() {
             let deleted = assert_only_own_lines_deleted(&plan.excludes, &out, &target, &ctx);
             if let Some(first) = prev.as_ref().filter(|_| inverse) {
                 *round_trips.entry(check_round_trip(first, &out, &after, &ctx)).or_default() += 1;
+                *round_trips_after.entry(first.action.kind.clone()).or_default() += 1;
             }
             prev = Some(Click { target, action, before: plan.excludes.clone(), deleted, outcome: out, reported_before: reported });
             plan = next;
@@ -1732,8 +1785,9 @@ fn restic_confirms_click_sequences() {
         }
     }
     eprintln!(
-        "restic confirmed {applied} clicks in {cases} sequences ({by_kind:?}; {refused} refused as impossible), \
-         {} round trips {round_trips:?}, {nodes_checked} nodes agree",
+        "restic confirmed {applied} clicks in {cases} sequences ({by_kind:?}, {on_partly_included} of the includeEverything on a \
+         partly included folder; {refused} refused as impossible), {} round trips {round_trips:?} (by first click \
+         {round_trips_after:?}), {nodes_checked} nodes agree",
         round_trips.values().sum::<usize>()
     );
     assert!(applied > 0 && !round_trips.is_empty());

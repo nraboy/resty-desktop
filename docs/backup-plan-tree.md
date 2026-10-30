@@ -392,21 +392,26 @@ next click deletes that exact line. A pattern from the dialog is not undone by c
 would include it, not remove the pattern): delete it in the exclude list.
 
 **Verification against restic.** Two `#[ignore]` harnesses (need restic; also in `restic-compat`).
-`restic_confirms_every_edit_the_engine_offers` applies random clicks (the way the UI picks them) to
-random hand-written plans and trees and checks with real dry runs, run both before and after the edit,
+`restic_confirms_every_edit_the_engine_offers` applies random clicks (the way the UI picks them, `ui_click`:
+left clicks, "Exclude by pattern…", and "Include everything inside it" on a partly included folder or an
+excluded folder — never on a file) to random hand-written plans and trees and checks with real dry runs, run both before and after the edit,
 that the clicked item ended up as asked, the engine agrees on every node and **nothing outside P, its
 subtree and the path to P changed** (skipped only for name-pattern excludes, which are meant to match
 other items). `restic_confirms_click_sequences` runs 2–6 clicks per case (about half of the later ones
 the inverse click on the same node; a third of the plans carry a user comment) and checks the same after
 every click, plus that only P's own lines were deleted with every other line surviving in order, plus
 the click-twice rule per class: *Identical* (first click only appended), *SameRules* (only deleted lines at the end),
-*SameSet* (hand-written line deleted elsewhere), and otherwise only that the inverse click succeeds and
-the item is in the state asked for — a refused inverse fails the test. Run both after touching
+*SameSet* (hand-written line deleted elsewhere), *Pair* ("include everything" on a partly included
+folder leaves it included, so the next click is no undo but an exclude: the `!P` stays and P's exact rule
+is appended after it, or only `!P` lines are deleted when an older one was what included P), and
+otherwise only that the inverse click succeeds and the item is in the state asked for — a refused inverse
+fails the test. Run both after touching
 plan_edit.rs: `cargo test restic_confirms -- --ignored --nocapture` (`RESTY_DIFF_CASES`,
-`RESTY_DIFF_SEED`; the sequence test costs ~4–5 restic runs per case). Last run (restic 0.19.1, 300 cases per seed, seeds 3 and 7): 289 and 286 edits, 1,188 and
-1,157 clicks in 300 sequences each, 465 and 444 round trips (mostly *Identical*, then *SameRules*), 20,535
-and 18,300 nodes compared — zero disagreements, collateral changes, foreign-line deletions or refused
-inverse clicks (the 11–28 "refused as impossible" per run are clicks the engine refuses with a reason,
+`RESTY_DIFF_SEED`; the sequence test costs ~4–5 restic runs per case). Last run (restic 0.19.1, 300 cases per seed, seeds 3 and 7): 297 and 296 edits, 1,211 and
+1,175 clicks in 300 sequences each (19 and 32 "include everything", 16 and 25 of them on a partly
+included folder), 476 and 445 round trips (mostly *Identical*, then *SameRules*; 5 and 7 *Pair*), 20,974
+and 18,613 nodes compared — zero disagreements, collateral changes, foreign-line deletions or refused
+inverse clicks (the 3–5 "refused as impossible" per run are clicks the engine refuses with a reason,
 e.g. "include everything" below an excluded folder, where `!P` can't help).
 
 **CLI parity (`tree_export`, "Use with restic CLI…").** Everything the GUI generates is a plain
