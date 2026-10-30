@@ -148,17 +148,31 @@ every plan; the entries of its path-list files appear read-only (see below). The
 with nothing selected; a "Sources only" view is a shortcut for deep sources. Save needs at least one
 source (a folder/file or a path-list file).
 
-- **Clicking a box.** `boxClick` (pure, tested) decides: a **source** is removed in one click; an
-  item **outside every source** becomes one in one click (`tree_plan_edit` computes and verifies it
-  first); anything **inside a source** opens the dialog to pick the pattern scope (exclude) or the
-  carve-out (include). A click that would **swallow existing sources** (the folder holds them) or
-  that needs extra patterns opens the dialog too, which lists exactly what is added and replaced —
-  that is the only confirmation. Clicks are ignored while the verdicts on screen lag the last edit
-  (`settled`), so a quick second click can't act on stale state.
+- **Clicking a row.** A left-click acts on exactly that item and never asks for a scope (`leftClick`,
+  pure, tested): a **source** is removed; an item **outside every source** becomes one
+  (`tree_plan_edit` computes and verifies it first); inside a source, an **included** item is excluded
+  and an **excluded** one included. The one click that still opens a dialog is adding a source whose
+  edit would **swallow existing sources**, **add rules** (restic < 0.19) or **delete a rule** (its own
+  exact line; `needsConfirmation`): the dialog lists exactly what is added, replaced and removed and is
+  the only confirmation, so a click never changes rules unseen. A right-click on a row — or the
+  ContextMenu key / Shift+F10 on its box button, which opens the same menu under the button — opens the
+  shared `ContextMenu` with `menuEntries` (pure, tested). The first entry is always the left-click's
+  action, so a right-click is never dead: an included item gets **Exclude** and **Exclude by
+  pattern…** (the pattern dialog, scopes unchanged), plus **Include everything inside it** (`!P`) on a
+  partly included folder; an excluded item gets **Include**, plus **Include, plus everything inside it
+  that other rules exclude** on a folder that has an exact rule (the plain click would only delete that
+  line; this keeps it and appends `!P`); a source or an outside row gets its single add/remove action.
+  There is deliberately no entry on a file inside an excluded folder that includes the folder too — if
+  that were the intent the user would click the folder. A hint under the tree says "Click to
+  include or exclude · Right-click for more options". Clicks and the menu are ignored while the
+  verdicts on screen lag the last edit (`settled`) or an edit is in flight, and a row whose subtree scan
+  has not come back (`pending`) has no box button and no menu.
 - **Undo** is a stack (20 deep) kept by `FilesTab`: each record holds the sources/patterns before and
   after. The line under the toolbar undoes the latest and says how many earlier ones remain. Any
   change to the sources or patterns made another way (typing a pattern, the fallback list) empties
-  the stack, because restoring an older state would throw that change away.
+  the stack, because restoring an older state would throw that change away. The line summarises the
+  edit (`summarizeEdit`: "added pattern", "removed rule", and — for a `!` on a folder — "also brought
+  back N items other rules exclude", "at least N" when the scan was capped, left out when 0).
 - **Source pill and states.** A source row carries a "Source" pill. A folder that is not backed up
   itself but holds a source has its own look (dashed outline + dot, "holds a source") so it can't be
   mistaken for "partly included" (backed up, but something inside is left out).
@@ -241,48 +255,170 @@ workflow): random trees, random list files (explicit paths, `*`/`?`/`[..]`/`**`,
 comments, padding, CRLF) plus exclude patterns, engine vs a dry run, node by node — last run
 2,764 nodes over 180 cases and three seeds, zero disagreements.
 
-## Editing from the tree (phase 3, slice 1)
+## Editing from the tree
 
-Clicking a row's box inside a source opens a dialog (`PlanTreeEditDialog`); nothing changes until the user confirms,
-and the card shows "Updated your plan: … Undo" afterwards. The exclude editors stay in place and
-simply show the result (the Simple list is the rules list; Expert text keeps its comments). Adding
-or removing a *source* skips the dialog (see above) unless it would absorb other sources. Include patterns (the `.env`-anywhere idea) are deliberately deferred.
+A click edits the plan at once and the card shows "Updated your plan: … Undo" afterwards. The exclude
+editors stay in place and simply show the result (the Simple list is the rules list, comments included;
+Expert text is the same lines). Two dialogs remain (`PlanTreeEditDialog`), both reached on purpose:
+**Exclude by pattern…** from the row's menu, and the **add-source confirmation** described above. Include
+patterns (the `.env`-anywhere idea) are deliberately deferred.
 
-- **Exclude** offers pattern scopes for the clicked path — this exact item, a folder's contents
-  only, the name anywhere, the name under a nearer ancestor (never above the source), a file
-  extension — as an editable pattern, with a live "would leave out N items — e.g. …" from a
-  bounded scan (`tree_count_matches`: items included now that the new pattern would reject, a
-  folder counted once). Paths and names are glob-escaped (`escape_glob`), so a folder called
-  `we[ird]` is excluded literally.
-- **Include** is computed up front (`tree_plan_edit`) and the exact sources/patterns it will add are
-  shown: an item outside every source becomes a source (absorbing sources nested in it); a folder
-  excluded by a pattern gets `!folder`; an item below an excluded folder gets the carve-out chain
-  `!X`, `X/*`, `!X/child`, …, `!target` (or `!X` for "the whole folder"). Excluding a source by its
-  exact path removes the source.
-- **Every edit is verified by the engine** (`plan_edit.rs::apply_edit`) after being applied to a
-  copy of the plan: the clicked item must really end up as asked, otherwise the click is refused
-  with a reason — an ancestor excluded by a marker file, a pattern in an exclude file (applied after
-  the plan's own patterns, so a `!` can't override it; the message names file and line), a
-  case-insensitive rule (a separate list `!` can't cancel), or a source root that patterns don't
-  apply to. New rules are appended last so they take precedence over the plan's earlier ones.
-- **Verification against restic:** `restic_confirms_every_edit_the_engine_offers` (`#[ignore]`,
-  needs restic) applies random clicks to random plans and trees and checks with real dry runs that
-  the clicked item ended up as asked and the engine agrees on every node — last run 360 edits
-  (~240 re-includes, many from deep inside excluded folders), ~5,800 nodes, zero disagreements.
-  Run it after touching plan_edit.rs: `cargo test restic_confirms -- --ignored --nocapture`.
-- **CLI parity (`tree_export`, "Use with restic CLI…"):** everything the GUI generates is a plain
-  restic pattern, so the plan's rules render as the files and command a user would run by hand:
-  one ordered `restic-excludes.txt` (the flag patterns and every exclude file's lines, in the order
-  restic evaluates them — one list, so `!` works across all of it), `restic-iexcludes.txt` for
-  case-insensitive rules (restic keeps those in a separate list), `--exclude-if-present` /
-  `--exclude-caches` as flags, and the sources. In files restic expands `$VAR` on every line, so a
-  literal `$` is written `$$`. The repository and password are never written (they come from
-  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD`), and non-inclusion settings (tags, bandwidth, compression)
-  aren't in the command. `restic_confirms_exported_files_match_the_gui_flags` (`#[ignore]`) checks
-  that `--exclude-file` gives the same included set as the GUI's `--exclude` flags (1,477 reported
-  nodes over 80 random cases). The one feature that would break parity by construction is the
-  deferred include-pattern resolution (a runtime-built file list); don't add it without an export
-  story.
+The engine side is `commands/plan_edit.rs` (the edits and their verification), with
+`plan_edit/lines.rs` (rule-list bookkeeping: a path's exact lines, `# Tree:` comments, carve-out
+scaffolding — text on the stored list only, the rule engine decides what a list *means*),
+`plan_edit/scan.rs` (the bounded walks: collateral finder, brought-back counter) and `plan_edit/tests.rs`
+(unit tests and the restic harnesses).
+
+**Edit kinds** (`tree_plan_edit`, `EditAction { kind, path, pattern }`; the earlier include variant that
+also reopened the excluded ancestor folder is gone):
+
+- `excludeItem` — left-click on an included item: exactly that item.
+- `include` — left-click on an excluded item (and an item outside every source, which becomes a source).
+- `includeEverything` — `!P`: the item and everything inside it that other rules exclude (menu only).
+- `exclude` + `pattern` — the pattern dialog's choice (this exact item, a folder's contents only, the
+  name anywhere, the name under a nearer ancestor, a file extension; paths and names glob-escaped, so a
+  folder called `we[ird]` is excluded literally), with a live "would leave out N items — e.g. …" from a
+  bounded scan (`tree_count_matches`). Excluding a source by its exact path removes the source.
+
+`EditOutcome` carries the plan's new `sources` and full `excludes` (comment lines included), the real
+patterns `addedRules`/`removedRules` (never comments), `addedSources`/`removedSources`, and `broughtBack`.
+An add-source edit can return `removedRules` with no `addedRules` (it deleted the clicked path's own exact
+line), so the confirmation opens on any of them.
+
+**What the edits rely on** (restic 0.19.1 dry runs; the differential tests are the authority). `X` is a
+folder, rules are in order:
+
+- **F1** `!P` brings back P and *everything below it*, overriding earlier excludes of items below P:
+  `[*.tmp, sub, !sub]` backs up `sub/*.tmp`; `[sub/c.txt, sub, !sub]` backs up `sub/c.txt`.
+- **F2** Deleting P's exact line leaves other rules about P's contents in force: `[sub/c.txt, sub]` →
+  delete `sub` → `c.txt` stays excluded, siblings return.
+- **F3** Carve-out chain for a file directly in excluded `X`: `[X, !X, X/*, !X/a]` backs up only `a`.
+  Re-appending the *full* chain for a second file (`…, !X, X/*, !X/b`) **drops `a`**, so the chain starts
+  at the highest still-excluded node (for `b` that is `X/b`, so only `!X/b` is added). Keep that property.
+- **F4** Scaffolding without a leaf (`[X, !X, X/*]`) backs up an *empty folder* `X`: not back to how it
+  started.
+- **F5** With a broad rule also excluding P (`[*.txt, a.txt]`), deleting the exact line changes nothing.
+- **F6** `[X, !X, X/*, !X/a]` then `X` appended excludes everything again; then `!X` appended brings back
+  *all* of X (F1).
+
+*Exact rule* = a non-negated, case-sensitive line of the plan's **own** pattern list (never an exclude
+file's) whose trimmed text equals P's path with glob characters escaped for the platform
+(`PathStyle::escape_glob`; Windows writes `[` as `[[]`). A hand-typed line with that text counts
+(`exact_lines`; the frontend mirrors it as `hasExactRule`).
+
+**Including P** (`do_include`; "already included" is refused):
+1. Outside every source: P becomes a source, absorbing sources nested in it.
+2. Only the plan's own case-sensitive patterns can be changed. A marker, an exclude-file line or a
+   case-insensitive rule that rejects P is refused with the reason.
+3. P excluded at itself: its exact line(s) are deleted, newest first, until P is included. If a broader
+   rule still excludes it, the lines stay deleted (they did nothing, F5) and the specific `!P` is
+   appended. A broad rule (`*.png`, `node_modules`, an exclude-file line) is **never** touched.
+4. P inside an excluded folder: the minimal carve-out chain from the highest still-excluded node down —
+   `!X`, `X/*`, then per level `!child`, `child/*`, ending `!P`. A file directly in X takes 3 rules, each
+   extra level 2, a sibling of an earlier carve-out 1 (F3). P's own exact lines stay.
+
+**Excluding P** (`do_exclude_item`; a source is removed instead):
+1. Lone `!P` lines (a tree include, "include everything", a hand-written one) are deleted newest first
+   until P is excluded, restoring the earlier state. A `!P` that is carve-out scaffolding (directly
+   followed by `P/*`, or with `!P/…` below it) is never deleted by a click on P itself — that would
+   strand the carve-out as dead lines. If deleting them all still leaves P included they weren't what
+   included it: they are put back and step 2 applies. When the deleted line was the last carve-out
+   out of a folder, the scaffolding that opened the folder for it (`!A`, `A/*` per level that
+   no remaining re-include below still needs) goes too, so no empty `X/` stays backed up (F4).
+2. Otherwise P's exact rule is appended. The next click on P then deletes that exact line.
+
+**The scaffolding pair is deliberate.** `orphan_scaffolding` (lines.rs) judges each `!A`/`A/*`
+pair on its own — a `!` line *above* the pair doesn't keep it in use, because the pair's `A/*` overrides
+it and restic applies the last matching rule — and `remove_orphan_scaffolding` (plan_edit.rs) deletes the
+pairs only if every folder they reopened is excluded again without them. The two only work together:
+the new pair semantics alone would delete scaffolding that is the only thing keeping a folder's
+contents out (its siblings would come back), and the gate alone, with the old "any remaining re-include
+under `A/` keeps the pair in use" reading, left the scaffolding in place whenever an older `!` sat above
+it, so the undo left an empty folder backed up (F4) and click twice was not the identity. Never relax one
+without revisiting the other.
+
+**Scope of deletions.** A click may delete only P's exact lines, a `!P` line, the orphaned scaffolding
+above and the tree comment directly above a deleted line (below). It never deletes or rewrites any other
+line: broad rules, exclude-file lines and the user's own comments are never touched (the differential
+harness asserts it on every click).
+
+**Comments.** Every edit that adds rules puts one comment line directly above them, `# Tree: excluded
+<path>` or `# Tree: included <path>`, plus an optional ` — note` saying why the rules look as they do
+("a broader rule excludes it; this re-includes only this item", "out of the excluded X: reopen it,
+exclude what is inside, bring this back"; pattern-dialog edits read "with pattern …"). One line;
+control characters in a path become `?`. Adding or removing a source on its own adds no rules and no
+comment. restic never sees them: `build_exclude_args`, `build_rules` and the rule counts already skip
+`#` lines. A comment is
+deleted with the rules it introduced and only then: it must sit directly above the first deleted line
+and start with `# Tree: excluded|included <P>` for the same P (`comment_names`, matched against the
+known path, no general parser). A comment for another path or one the user wrote is never deleted. A
+comment left above scaffolding that a click on a different path orphaned stays: harmless. The
+"Use with restic CLI" export renders parsed rules, so it carries no comments.
+
+**Collateral check** (`scan.rs::find_collateral`). A click may flip only P, nodes inside P and the
+folders on the way down to P. After computing an edit the engine builds the plan before and after and
+walks the sources breadth first (750 ms / 2M entries; never into a rejected folder or a symlink),
+comparing every node's verdict; if anything else flipped the edit is refused ("This change would also
+change …, so it wasn't made.") and nothing is applied. A scan that runs out of budget lets the edit
+through, verified on what it saw. It applies to every kind except the `exclude` pattern kind (a pattern
+exists to match many items) and edits that add or remove sources.
+
+**Brought-back count** (`scan.rs::count_brought_back`). By F1 a `!` on a *folder* also brings back items
+inside it that other rules exclude. That is accepted, and disclosed: when the last added rule is the `!`
+on a folder, the plan without the lines that matched the folder itself is walked (cap 5000, same budget)
+and `broughtBack { count, capped }` goes into the Undo line. Items hidden by a marker file don't count
+(advisory number; an item both pattern-matched and inside a marker-hidden folder is still counted).
+
+**Every edit is verified by the engine** (`plan_edit.rs::apply_edit`) after being applied to a copy of the
+plan: the clicked item must really end up as asked, otherwise the click is refused with a reason — an
+ancestor excluded by a marker file, a pattern in an exclude file (applied after the plan's own patterns,
+so a `!` can't override it; the message names file and line), a case-insensitive rule (a separate list
+`!` can't cancel), or a source root that patterns don't apply to. New rules are appended last so they take
+precedence over the plan's earlier ones.
+
+**Click twice.** Clicking an item and clicking it again returns the exclude list to where it started —
+identical lines, comments included — whenever the first click *added* lines: the second deletes exactly
+what the tree wrote, comment and all. When the first click *deleted* lines (an include removing an exact
+line, an exclude removing a `!P`), the second puts its rules back at the **end** of the list, so what is
+guaranteed is the same included set (the same rules too when the deleted lines were at the end): a
+hand-written line cannot return to its old position or regain a comment it never had.
+`[*.txt, /s/a.txt]` + include `a.txt` is the documented case: the dead exact line goes and `!a.txt` is
+added, so the second click yields an equivalent list without the dead line. A `P` / `!P` pair can
+appear only when the `!P` isn't what includes the folder (a partly included folder after "Include
+everything inside it", or scaffolding): the `!P` stays, the exact rule is appended after it, and the
+next click deletes that exact line. A pattern from the dialog is not undone by clicking the item (that
+would include it, not remove the pattern): delete it in the exclude list.
+
+**Verification against restic.** Two `#[ignore]` harnesses (need restic; also in `restic-compat`).
+`restic_confirms_every_edit_the_engine_offers` applies random clicks (the way the UI picks them) to
+random hand-written plans and trees and checks with real dry runs, run both before and after the edit,
+that the clicked item ended up as asked, the engine agrees on every node and **nothing outside P, its
+subtree and the path to P changed** (skipped only for name-pattern excludes, which are meant to match
+other items). `restic_confirms_click_sequences` runs 2–6 clicks per case (about half of the later ones
+the inverse click on the same node; a third of the plans carry a user comment) and checks the same after
+every click, plus that only P's own lines were deleted with every other line surviving in order, plus
+the click-twice rule per class: *Identical* (first click only appended), *SameRules* (only deleted lines at the end),
+*SameSet* (hand-written line deleted elsewhere), and otherwise only that the inverse click succeeds and
+the item is in the state asked for — a refused inverse fails the test. Run both after touching
+plan_edit.rs: `cargo test restic_confirms -- --ignored --nocapture` (`RESTY_DIFF_CASES`,
+`RESTY_DIFF_SEED`; the sequence test costs ~4–5 restic runs per case). Last run (restic 0.19.1, 300 cases per seed, seeds 3 and 7): 289 and 286 edits, 1,188 and
+1,157 clicks in 300 sequences each, 465 and 444 round trips (mostly *Identical*, then *SameRules*), 20,535
+and 18,300 nodes compared — zero disagreements, collateral changes, foreign-line deletions or refused
+inverse clicks (the 11–28 "refused as impossible" per run are clicks the engine refuses with a reason,
+e.g. "include everything" below an excluded folder, where `!P` can't help).
+
+**CLI parity (`tree_export`, "Use with restic CLI…").** Everything the GUI generates is a plain
+restic pattern, so the plan's rules render as the files and command a user would run by hand:
+one ordered `restic-excludes.txt` (the flag patterns and every exclude file's lines, in the order
+restic evaluates them — one list, so `!` works across all of it), `restic-iexcludes.txt` for
+case-insensitive rules (restic keeps those in a separate list), `--exclude-if-present` /
+`--exclude-caches` as flags, and the sources. In files restic expands `$VAR` on every line, so a
+literal `$` is written `$$`. The repository and password are never written (they come from
+`RESTIC_REPOSITORY`/`RESTIC_PASSWORD`), and non-inclusion settings (tags, bandwidth, compression)
+aren't in the command. `restic_confirms_exported_files_match_the_gui_flags` (`#[ignore]`) checks
+that `--exclude-file` gives the same included set as the GUI's `--exclude` flags. The one feature that
+would break parity by construction is the deferred include-pattern resolution (a runtime-built file
+list); don't add it without an export story.
 
 ## Status / roadmap
 
@@ -291,10 +427,16 @@ or removing a *source* skips the dialog (see above) unless it would absorb other
 2. **Read-only tree** — done (this section); keyboard navigation (arrow keys) and a filter box for
    huge folders are not yet.
 3. Editing — done: the tree is the source editor (one-click add/remove, multi-step undo, hidden-files
-   switch, Home, resizable), plus the pattern dialog for items inside a source, verified edits and
-   the CLI export. Still to do: copy-on-import of exclude files, a rules list that replaces the
-   exclude editors, and (deferred) include patterns resolved to an explicit
+   switch, Home, resizable); inside a source a click excludes or includes exactly the item and a
+   right-click menu (also from the keyboard) holds the pattern dialog and "include everything inside it";
+   edits are engine-verified, delete the rules they supersede instead of stacking `P` and `!P`, write
+   `# Tree:` comments, are checked for collateral changes and click-twice round trips against real
+   restic, and the CLI export is in. Still to do: copy-on-import of exclude files, a rules list that
+   replaces the exclude editors, and (deferred) include patterns resolved to an explicit
    `--files-from-verbatim` list at backup time (restic has no include patterns).
+   Known test gap: the layout tests (`tests/layout`) never render the tree or open its dialogs
+   (`tree_supported` is unmocked in `mock.js`), so the click, menu and dialog behaviour is covered by the
+   pure helpers' unit tests, the Rust/restic harnesses and manual passes only.
 3b. Path-list files in the tree — done, read-only (above). Still to do: edit the list file from the
    tree (with a warning), and open it from the app.
 4. Polish: size estimates, keyboard/accessibility; verifying on a real Windows machine.

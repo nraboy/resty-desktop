@@ -1064,6 +1064,79 @@ needed `PruneHandle.busy` handling and its own prune progress/Hide state for no 
 earlier "batch forget rejected as double the work" judgement was wrong. A schedule action for
 "prune repo X" is the remaining open follow-up.
 
+## Plan tree edits: what one click may change (plan-editor rework)
+
+Rationale for how a tree click edits the exclude list (`plan_edit.rs`, `plan_edit/lines.rs`,
+`plan_edit/scan.rs`; behaviour in docs/backup-plan-tree.md "Editing from the tree"). The restic facts
+F1–F6 these rest on are listed there and verified by the differential tests.
+
+- **Left-click means "this exact item", with no dialog; the advanced choices live in a right-click
+  menu.** People wanted the click to mean the file or folder they pointed at, not a question about
+  pattern scopes. The pattern dialog survives behind **Exclude by pattern…**, unchanged. Because the
+  dialog is now reachable only through the menu, the shared `ContextMenu` became keyboard-operable
+  (focus, Up/Down/Home/End, Enter/Space, Escape/Tab) and the tree opens it from the ContextMenu key /
+  Shift+F10 on a row's box. Don't put a scope question back on the plain click.
+- **Re-including never touches a broad rule.** To include P the engine first deletes P's *own* exact
+  line(s) (newest first, until P is included), and only when a broader rule still excludes P appends the
+  specific `!P`. `*.png`, `node_modules`, a user's hand-written pattern and every exclude-file line are
+  never deleted or rewritten: they exist for other items, and an exclude-file line can't be overridden
+  from the plan at all. Deleting P's exact line is safe (F2, F5): other rules about P's contents stay in
+  force. A tree click may delete only P's exact lines, a `!P`, orphaned carve-out scaffolding and the
+  `# Tree:` comment above a deleted line; the differential harness asserts it on every click.
+- **`!P` brings back everything below P, and that is accepted.** By F1 a `!` on a folder overrides earlier
+  excludes of items below it (`[*.tmp, sub, !sub]` backs up `sub/*.tmp`), so re-including a folder that a
+  broad rule excludes also brings back whatever other rules hid inside it. The only way around it would
+  be rewriting the broad rules, which is ruled out above. Agreed with the user instead of worked around;
+  the Undo line discloses it ("also brought back N items other rules exclude", "at least N" when the
+  bounded scan was capped, silent for 0), and the same disclosure covers every edit that re-includes a
+  folder with `!`: an exact line plus a broad rule, a carve-out whose leaf is a folder, and the explicit
+  "include everything" menu items. Don't "fix" it by narrowing `!P` or by dropping the disclosure.
+- **There is no "include the whole excluded folder" option on a file inside an excluded folder.** An
+  earlier include variant (`scope: "folder"`) did that. It was rejected and removed from the UI *and* the
+  backend: if the user meant the folder they would click the folder, and keeping a path to it would make
+  a file click a two-way choice again. A file inside an excluded folder gets only the minimal carve-out
+  chain from the highest still-excluded node (F3 — re-appending the full chain for a second file drops
+  the first carve-out).
+- **Clicking twice returns the list to where it started — for lines the tree itself wrote.** If the first
+  click appended rules, the second deletes exactly those and their comment: the identical list. If the
+  first click deleted lines, the second re-adds its rules at the end, so a deleted *hand-written* line
+  can't come back to its old position or regain a comment it never had; there the guarantee is the same
+  included set (the harness classes it `SameSet`/`SameRules`). The documented case is an exact line plus
+  a broad rule: the dead exact line is gone for good. A `P` / `!P` pair appears only where the `!P` isn't
+  what includes the folder (a partly included folder after "include everything", or scaffolding).
+- **`# Tree:` comments, written and removed by the tree.** Every edit that adds rules puts a one-line
+  `# Tree: excluded|included <path> — note` above them, so a carve-out chain reads as one labelled group.
+  restic never sees them (`build_exclude_args`/`build_rules` skip `#` lines), so they can't change what is
+  backed up, and the CLI export (parsed rules) doesn't carry them. A click deletes a comment only with
+  the rules it introduced: directly above the first deleted line and naming the same P (`comment_names`,
+  matched against the known path — there is deliberately no general parser). A comment the user wrote is
+  never deleted. A comment left above scaffolding that a click on a *different* path orphaned stays
+  — harmless, and cleaning it up would need that parser. Exclude lists keep comments end to end
+  (save, load, Simple/Expert switch, preset chips); the Expert→Simple switch no longer de-duplicates,
+  because order and repeats (`X`, `!X`, `X`) are meaningful.
+- **A tree edit is refused if it changes anything but the clicked item** (`find_collateral`). The only
+  nodes allowed to flip are P, nodes inside P and the folders on the way down to P. The engine compares
+  verdicts before and after over a bounded walk (750 ms, 2M entries) and refuses with the item named
+  rather than applying. A scan that runs out of budget lets the edit through, verified on what it saw
+  (a refusal on a huge tree would make the click unusable). Exempt on purpose: the `exclude` *pattern*
+  kind (a pattern exists to match many items) and edits that add or remove sources. The cost — three
+  extra engine builds and a walk per click — is accepted: a click that silently rewrote another item's
+  fate is the failure this feature must never have.
+- **Carve-out scaffolding is deleted under a gate.** Undoing the last carve-out out of a folder
+  also deletes the scaffolding that reopened it (`!A`, `A/*`), otherwise an empty `A/` stays backed up
+  (F4). Two rules do that and must stay together: `orphan_scaffolding` judges each `!A`/`A/*` pair on its
+  own (an older `!` *above* the pair doesn't keep it in use, because the pair's `A/*` overrides it;
+  restic applies the last matching rule), and `remove_orphan_scaffolding` deletes the pairs only if
+  every folder they reopened is excluded again without them. The first alone would delete scaffolding
+  that is the only thing keeping a folder's contents out; with the old "any re-include keeps it in use"
+  reading, scaffolding stayed behind and the undo wasn't the identity (7 of 71 round trips in the
+  restic run that found it). Never relax one without revisiting the other.
+- **The plan editor is `Files | Settings`, with the actions in a footer.** Four tabs were disliked and one
+  long page is painful, so Settings is one scrolling pane with a quiet jump list (names only, scroll-spy,
+  dots for "set away from default" and "last save failed here"). Save / Cancel / Delete moved from the
+  header to a persistent footer under both tabs, which also carries the failed-save message. The header
+  has no buttons. Don't restore a sticky action header or per-tab summaries.
+
 ## Linux GPU Compatibility
 
 `src-tauri/src/gpu_compat.rs` works around a known WebKitGTK/NVIDIA/Wayland crash (`Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.`, reproduced by users on Fedora + NVIDIA + Wayland) by setting the same env vars Tauri's own [Linux Graphics Issues](https://v2.tauri.app/develop/debug/linux-graphics/) docs recommend, applied via `gpu_compat::apply()` as the first statement of `run()` (`lib.rs`) — before `tauri::Builder::default()`, so it precedes any GTK/WebKit initialization.

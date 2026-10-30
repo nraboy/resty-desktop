@@ -231,11 +231,16 @@ is extended:
 3. **No collateral:** nodes outside P's subtree and the path to P keep their restic result from *before* the
    edit (needs a "before" restic run — the current test only checks after).
 4. **Sequences:** random runs of 2–6 clicks per case, including the same item twice. Click then click again
-   returns the **identical rule list** (text, comments included), except the documented case "exact line
-   and broad rule both excluded P", where it returns an equivalent list without the dead exact line.
-   The generator must also cover: "include everything inside it" then click (back to the start), `!P`
-   added twice, and a click on a folder whose `!P` is carve-out scaffolding (appends the exact rule; the
-   next click deletes it; the list is identical to the start).
+   returns the **identical rule list** (text, comments included) for lines the tree itself added: the
+   second click deletes exactly what the first appended, comment and all. For a *deleted hand-written
+   line* only an **equivalent included set** is guaranteed — its position (and any comment it never had)
+   cannot be restored; the documented case is "exact line and broad rule both excluded P", where the
+   second click returns an equivalent list without the dead exact line.
+   The generator must also cover: "include everything inside it" then click (back to the start when the
+   folder had an exact rule; on a partly included folder the `!P` is not what includes it, so the click
+   appends the exact rule after it and the next click deletes that rule), `!P` added twice, and a click on
+   a folder whose `!P` is carve-out scaffolding (appends the exact rule; the next click deletes it; the
+   list is identical to the start).
 5. Broad rules, exclude-file lines and user comments are never modified by a tree click.
 6. Windows spellings (`PathStyle::Windows`) for exact-line matching and chains, extending the existing
    `windows_*` unit tests.
