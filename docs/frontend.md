@@ -172,7 +172,7 @@ headless Chrome. `mock.js` is injected into `index.html` and replaces the Tauri 
 hurt: very long names (some with no spaces), many/long tags, error + warning history rows, a read-only repo,
 a plan with 3 paths and webhooks. Two runners drive it: `pages.html` loads every route at 10 widths
 (1024-1600, including the 1151/1152 and 1279/1280 breakpoint edges) and `modals.html` opens ~24 modals
-(including against the 110-char unbroken repo name) at 1024 and 1366 with a 640px-tall window. The plan editor is covered on both tabs (`/backup-plans/plan-1` and `/new`, each with a `?tab=settings` variant; the mock plan has a 120-character name, which the name input truncates with an ellipsis rather than clipping). Per check it
+(including against the 110-char unbroken repo name) at 1024 and 1366 with a 640px-tall window. The plan editor is covered on both tabs (`/backup-plans/plan-1` and `/new`, each with a `?tab=settings` variant; `plan-1` has a long 73-character name, which the name input truncates with an ellipsis rather than clipping). Per check it
 fails on: horizontal scroll (reports the overflowing elements), an interactive control clipped by the
 viewport or an `overflow` ancestor, short text wrapping onto two lines (<=45 chars on pages, <=40 in modals), content clipped by an `overflow:hidden` box (no scrollbar, no ellipsis — the silent failure of the rounded
 tables), a shrinkable `max-w-0` column squeezed under 90px (every name would render as "…"), a crashed page

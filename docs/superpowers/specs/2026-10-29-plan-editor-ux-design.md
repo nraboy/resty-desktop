@@ -101,7 +101,7 @@ saving again clears them (same acknowledge behaviour as today).
 
 **Accessibility.** Jump list is a `<nav aria-label>` of buttons with `aria-current` on the active one; the
 tab strip keeps its tablist semantics with two tabs. Layout tests (`tests/layout/`, which already load
-`/backup-plans/plan-1` and `/backup-plans/new` with a 120-character plan name) must pass: no horizontal
+`/backup-plans/plan-1`, whose plan name is 73 characters long, and `/backup-plans/new`) must pass: no horizontal
 scroll, footer buttons never clipped at the 1024×640 minimum window.
 
 ## 2. Tree clicks
