@@ -8,11 +8,14 @@
 //! Everything generated is a plain restic pattern (ordered `--exclude` lines, `!` re-includes,
 //! source paths), appended after the existing ones so it takes precedence. That is what keeps
 //! the GUI and the restic CLI in step: [`export_rules`] renders the same rules as the files and
-//! command line a user would run by hand. The rules an include adds come with a one-line
+//! command line a user would run by hand. The rules a click adds come with a one-line
 //! `# Tree: ` comment above them saying what they are for. The only lines an edit deletes are
-//! ones that exist for the clicked item alone: including an item excluded by its own exact line
-//! deletes that line (and the tree comment above it) instead of stacking a `!` on top; broader
-//! rules are never touched.
+//! ones that exist for the clicked item alone, so that a second click undoes the first instead of
+//! stacking rules: including an item excluded by its own exact line deletes that line; excluding
+//! an item a lone `!` re-include brings back deletes that `!` line, and with the last carve-out
+//! out of a folder the scaffolding that opened the folder for it. The tree comment directly above
+//! a deleted line goes with it. Broader rules, exclude files and the user's own comments are
+//! never touched.
 //!
 //! The patterns that carve one item out of an excluded folder follow the gitignore-style chain
 //! restic needs (verified against restic 0.19.1; see docs/backup-plan-tree.md):
@@ -20,7 +23,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use self::lines::{exact_lines, exact_rule, remove_with_comments, tree_comment, Verb};
+use self::lines::{
+    exact_lines, exact_rule, is_scaffolding, orphan_scaffolding, reinclude_lines, remove_with_comments, tree_comment, Verb,
+};
 use super::plan_rules::{strip_source, Engine, PathStyle, Pattern, PlanRules, Probe, Reason};
 use super::plan_tree::{build_rules, BuiltRules, RuleOrigin, TreeRulesInput};
 
@@ -40,8 +45,9 @@ pub fn escape_glob(s: &str) -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditAction {
-    /// `exclude` (with a pattern), `include` (a click on an excluded item) or
-    /// `includeEverything` (`!path`: the item and everything inside it that other rules exclude).
+    /// `exclude` (with a pattern), `excludeItem` (a click on an included item: exactly it),
+    /// `include` (a click on an excluded item) or `includeEverything` (`!path`: the item and
+    /// everything inside it that other rules exclude).
     pub kind: String,
     pub path: String,
     /// For `exclude`: the pattern to add (the dialog's choice, possibly edited by hand).
@@ -147,6 +153,7 @@ pub(crate) fn apply_edit(
     work.list_sources = input.list_sources.iter().map(|s| style.clean(s.trim())).collect();
     let outcome = match action.kind.as_str() {
         "exclude" => do_exclude(work, &path, action.pattern.as_deref().unwrap_or(""), probe, read, getenv)?,
+        "excludeItem" => do_exclude_item(work, &path, probe, read, getenv)?,
         "include" => do_include(work, &path, probe, read, getenv)?,
         "includeEverything" => do_include_everything(work, &path, probe, read, getenv)?,
         other => return Err(format!("Unknown edit: {other}")),
@@ -186,47 +193,164 @@ fn do_exclude(
     Pattern::parse_styled(pattern, work.style).map_err(|_| format!("`{pattern}` isn't a valid pattern."))?;
 
     let (e0, _) = build_engine(&work, read, getenv)?;
-    let before = e0.classify(path, probe);
     let is_source = work.sources.iter().any(|s| s == path);
-    if !before.included {
-        let above_source = e0.sources().iter().any(|s| matches!(strip_source(s, path), Some(r) if !r.is_empty()));
-        return Err(if above_source {
-            "This folder isn't backed up itself; exclude the folders inside it instead.".to_string()
-        } else {
-            "It's already excluded.".to_string()
-        });
+    if !e0.classify(path, probe).included {
+        return Err(not_included(&e0, path));
     }
 
     let mut out = EditOutcome::default();
+    let note = format!("with pattern {pattern}");
     // Excluding a source folder by its exact path means "stop backing it up": remove the source
     // (a pattern can't exclude a source itself).
     if is_source && (pattern == path || pattern == work.style.escape_glob(path)) {
         work.sources.retain(|s| s != path);
         out.removed_sources.push(path.to_string());
     } else {
-        work.excludes.push(pattern.to_string());
-        out.added_rules.push(pattern.to_string());
+        append_with_comment(&mut work, &mut out, Verb::Excluded, path, Some(&note), vec![pattern.to_string()]);
     }
 
     let (e1, b1) = build_engine(&work, read, getenv)?;
     let mut after = e1.classify(path, probe);
     if after.included && !out.removed_sources.is_empty() {
         // Still covered by another source (a parent folder): add the pattern as well.
-        work.excludes.push(pattern.to_string());
-        out.added_rules.push(pattern.to_string());
+        append_with_comment(&mut work, &mut out, Verb::Excluded, path, Some(&note), vec![pattern.to_string()]);
         let (e2, _) = build_engine(&work, read, getenv)?;
         after = e2.classify(path, probe);
     }
     if after.included {
-        return Err(if is_source {
-            "This folder is a backup source itself, so patterns don't apply to it — remove it from the sources instead.".to_string()
-        } else if work.list_sources.iter().any(|s| s == path) {
-            "This comes from a path-list file, so patterns can't exclude it — remove or change that line in the file.".to_string()
-        } else {
-            format!("`{pattern}` doesn't exclude it: {}", explain(&b1.origins, &after.reason))
-        });
+        return Err(not_excluded(&work, path, pattern, is_source, &b1.origins, &after.reason));
     }
     Ok(finish(work, out))
+}
+
+/// Why an item that isn't included can't be excluded.
+fn not_included(engine: &Engine, path: &str) -> String {
+    let above_source = engine.sources().iter().any(|s| matches!(strip_source(s, path), Some(r) if !r.is_empty()));
+    if above_source {
+        "This folder isn't backed up itself; exclude the folders inside it instead.".to_string()
+    } else {
+        "It's already excluded.".to_string()
+    }
+}
+
+/// Why `pattern` left `path` included. `was_source`: `path` was one of the plan's sources.
+fn not_excluded(
+    work: &TreeRulesInput,
+    path: &str,
+    pattern: &str,
+    was_source: bool,
+    origins: &[RuleOrigin],
+    reason: &Option<Reason>,
+) -> String {
+    if was_source {
+        "This folder is a backup source itself, so patterns don't apply to it — remove it from the sources instead.".to_string()
+    } else if work.list_sources.iter().any(|s| s == path) {
+        "This comes from a path-list file, so patterns can't exclude it — remove or change that line in the file.".to_string()
+    } else {
+        format!("`{pattern}` doesn't exclude it: {}", explain(origins, reason))
+    }
+}
+
+/// Is `path` excluded from the plan `work`?
+fn is_excluded(work: &TreeRulesInput, path: &str, probe: &dyn Probe, read: ReadFile, getenv: GetEnv) -> Result<bool, String> {
+    Ok(!build_engine(work, read, getenv)?.0.classify(path, probe).included)
+}
+
+/// Excludes an included item (a click on it), undoing the rules that brought it in where it can:
+///
+/// 1. Included through a lone `!path` re-include (a tree include, the "everything inside it"
+///    option, or a hand-written one): those lines are deleted, newest first, until it is
+///    excluded — and if that was the last carve-out out of a folder, the scaffolding that opened
+///    the folder for it goes too (see [`remove_orphan_scaffolding`]). A `!path` that is itself
+///    scaffolding for a carve-out further down is never deleted (that would strand the carve-out
+///    as dead lines). If deleting them all still leaves it included, they weren't what brought
+///    it in: they stay, and step 2 applies.
+/// 2. Otherwise its exact rule is appended.
+///
+/// A source is removed from the sources instead, as an exclude by its exact path does.
+fn do_exclude_item(
+    mut work: TreeRulesInput,
+    path: &str,
+    probe: &dyn Probe,
+    read: ReadFile,
+    getenv: GetEnv,
+) -> Result<EditOutcome, String> {
+    let style = work.style;
+    let rule = exact_rule(style, path);
+    if work.sources.iter().any(|s| s == path) {
+        return do_exclude(work, path, &rule, probe, read, getenv);
+    }
+    let (e0, _) = build_engine(&work, read, getenv)?;
+    if !e0.classify(path, probe).included {
+        return Err(not_included(&e0, path));
+    }
+
+    let mut out = EditOutcome::default();
+    let before = work.excludes.clone();
+    let lone: Vec<usize> = reinclude_lines(style, &before, path)
+        .into_iter()
+        .filter(|&i| !is_scaffolding(style, &before, i))
+        .collect();
+    // Newest first: deleting one never moves the lines above it (the tree comment it may take
+    // along sits directly above it and is never a `!path` line).
+    for &i in lone.iter().rev() {
+        out.removed_rules.push(work.excludes[i].trim().to_string());
+        remove_with_comments(&mut work.excludes, &[i], path);
+        if is_excluded(&work, path, probe, read, getenv)? {
+            remove_orphan_scaffolding(&mut work, &mut out, path, probe, read, getenv)?;
+            return Ok(finish(work, out));
+        }
+    }
+    work.excludes = before;
+    out.removed_rules.clear();
+
+    append_with_comment(&mut work, &mut out, Verb::Excluded, path, None, vec![rule.clone()]);
+    let (e1, b1) = build_engine(&work, read, getenv)?;
+    let after = e1.classify(path, probe);
+    if after.included {
+        return Err(not_excluded(&work, path, &rule, false, &b1.origins, &after.reason));
+    }
+    Ok(finish(work, out))
+}
+
+/// Once the last carve-out out of a folder is undone, the scaffolding that opened the folder for
+/// it (the `!A`, `A/*` pairs no re-include after them still needs; [`orphan_scaffolding`]) would
+/// leave the folder backed up empty (F4). It is deleted, with the tree comment above it, when
+/// every folder it opened is excluded again without it, as it was before the carve-out. If one
+/// isn't (nothing else excludes it any more), those lines are what keeps its contents out: they
+/// stay.
+fn remove_orphan_scaffolding(
+    work: &mut TreeRulesInput,
+    out: &mut EditOutcome,
+    path: &str,
+    probe: &dyn Probe,
+    read: ReadFile,
+    getenv: GetEnv,
+) -> Result<(), String> {
+    let style = work.style;
+    let orphans = orphan_scaffolding(style, &work.excludes, path);
+    if orphans.is_empty() {
+        return Ok(());
+    }
+    let mut without = work.clone();
+    remove_with_comments(&mut without.excludes, &orphans, path);
+    let (engine, _) = build_engine(&without, read, getenv)?;
+    // The folders it opened: the ancestors of `path` whose `!A` is among the orphans.
+    let mut level = path.to_string();
+    loop {
+        let parent = style.parent(&level);
+        if parent == level {
+            break;
+        }
+        level = parent;
+        let reopen = format!("!{}", exact_rule(style, &level));
+        if orphans.iter().any(|&i| work.excludes[i].trim() == reopen) && engine.classify(&level, probe).included {
+            return Ok(());
+        }
+    }
+    out.removed_rules.extend(orphans.iter().map(|&i| work.excludes[i].trim().to_string()));
+    *work = without;
+    Ok(())
 }
 
 /// Is `path` included, contents and all? `classify` exempts a source root (and a folder leading to
@@ -267,8 +391,8 @@ fn is_folder(style: PathStyle, path: &str) -> bool {
 }
 
 /// Appends `rules` to the plan's patterns, with the tree comment for `path` directly above them.
-fn append_with_comment(work: &mut TreeRulesInput, out: &mut EditOutcome, verb: Verb, path: &str, note: &str, rules: Vec<String>) {
-    work.excludes.push(tree_comment(verb, path, Some(note)));
+fn append_with_comment(work: &mut TreeRulesInput, out: &mut EditOutcome, verb: Verb, path: &str, note: Option<&str>, rules: Vec<String>) {
+    work.excludes.push(tree_comment(verb, path, note));
     work.excludes.extend(rules.iter().cloned());
     out.added_rules.extend(rules);
 }
@@ -328,7 +452,7 @@ fn do_include(
         // exact lines stay (the chain's `!path` comes after them).
         Some(x) => {
             let note = format!("out of the excluded {x}: reopen it, exclude what is inside, bring this back");
-            append_with_comment(&mut work, &mut out, Verb::Included, path, &note, carve_out_chain(style, x, path));
+            append_with_comment(&mut work, &mut out, Verb::Included, path, Some(&note), carve_out_chain(style, x, path));
         }
         // Excluded at itself.
         None => {
@@ -346,7 +470,7 @@ fn do_include(
                     "a broader rule excludes it; this re-includes only this item"
                 };
                 let rule = format!("!{}", exact_rule(style, path));
-                append_with_comment(&mut work, &mut out, Verb::Included, path, note, vec![rule]);
+                append_with_comment(&mut work, &mut out, Verb::Included, path, Some(note), vec![rule]);
             }
         }
     }
@@ -376,7 +500,7 @@ fn do_include_everything(
         &mut out,
         Verb::Included,
         path,
-        "and everything inside it that other rules exclude",
+        Some("and everything inside it that other rules exclude"),
         vec![rule],
     );
     verify_included(&work, path, probe, read, getenv)?;
@@ -544,9 +668,7 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     }
 }
 
-// Rule-list bookkeeping for tree edits; the undo helpers (scaffolding, `!` lines) aren't called
-// from the edit paths yet.
-#[cfg_attr(not(test), allow(dead_code))]
+// Rule-list bookkeeping for tree edits: exact lines, `!` re-includes, tree comments, scaffolding.
 mod lines;
 
 #[cfg(test)]

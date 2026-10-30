@@ -145,10 +145,12 @@ fn adjacent_pairs(lines: &[String], a: &str) -> Vec<usize> {
 }
 
 /// The scaffolding left behind once `path`'s own leaf rule is gone from `lines`: walking up from
-/// `path`, a level `A` is returned (the indices of its `!A`, `A/*` pair) when no remaining line
-/// re-includes something strictly under `A/`. Lines already chosen for removal in this call do
-/// not count as remaining, so a chain of single-use levels is returned whole; a level some other
-/// carve-out still uses, or one with no such pair, ends the walk. Indices ascend.
+/// `path`, each `!A`, `A/*` pair of a level `A` is returned (both indices) when no remaining line
+/// *after* it re-includes something strictly under `A/` — a re-include above the pair is
+/// overridden by its `A/*` anyway, so it doesn't need `A` reopened (as in [`is_scaffolding`]).
+/// Lines already chosen for removal in this call do not count as remaining, so a chain of
+/// single-use levels is returned whole; a level whose pairs other carve-outs all still use, or
+/// one with no such pair, ends the walk. Indices ascend.
 pub(crate) fn orphan_scaffolding(style: PathStyle, lines: &[String], path: &str) -> Vec<usize> {
     let mut orphans: Vec<usize> = Vec::new();
     let mut level = style.clean(path);
@@ -160,12 +162,19 @@ pub(crate) fn orphan_scaffolding(style: PathStyle, lines: &[String], path: &str)
         level = parent;
         let a = style.escape_glob(&level);
         let under = under_prefix(&a);
-        let still_used = lines.iter().enumerate().any(|(i, l)| !orphans.contains(&i) && negates_under(l, &under));
-        let pairs = adjacent_pairs(lines, &a);
-        if still_used || pairs.is_empty() {
+        let used_after = |glob_line: usize| {
+            lines.iter().enumerate().skip(glob_line + 1).any(|(i, l)| !orphans.contains(&i) && negates_under(l, &under))
+        };
+        let unused: Vec<usize> = adjacent_pairs(lines, &a)
+            .chunks(2)
+            .filter(|pair| !used_after(pair[1]))
+            .flatten()
+            .copied()
+            .collect();
+        if unused.is_empty() {
             break;
         }
-        orphans.extend(pairs);
+        orphans.extend(unused);
     }
     orphans.sort_unstable();
     orphans
@@ -297,6 +306,23 @@ mod tests {
         // A sibling carve-out under `/s/X` keeps that level.
         let lines = v(&["/s/X", "!/s/X", "/s/X/*", "!/s/X/c", "/s/X/c/*", "!/s/X/b"]);
         assert_eq!(orphan_scaffolding(PathStyle::Unix, &lines, "/s/X/c/d"), [3, 4]);
+    }
+
+    #[test]
+    fn only_a_re_include_after_a_pair_keeps_it_in_use() {
+        // A re-include above the pair is overridden by its `X/*` anyway: it doesn't need `X` open.
+        let lines = v(&["!/s/X/a", "/s/X", "!/s/X", "/s/X/*"]);
+        assert_eq!(orphan_scaffolding(PathStyle::Unix, &lines, "/s/X/a"), [2, 3]);
+
+        // Two pairs for one level: the older one serves a carve-out below it and stays; the newer
+        // one serves nothing left and goes.
+        let lines = v(&["!/s/X", "/s/X/*", "!/s/X/b", "/s/X", "!/s/X", "/s/X/*"]);
+        assert_eq!(orphan_scaffolding(PathStyle::Unix, &lines, "/s/X/a"), [4, 5]);
+
+        // The walk goes on above a level whose newer pair went: the level above is judged the same
+        // way (here `!/s/X` at 2 still comes after the `/s` pair, so that pair stays).
+        let lines = v(&["!/s", "/s/*", "!/s/X", "/s/X/*", "!/s/X/b", "/s/X", "!/s/X", "/s/X/*"]);
+        assert_eq!(orphan_scaffolding(PathStyle::Unix, &lines, "/s/X/a"), [6, 7]);
     }
 
     #[test]

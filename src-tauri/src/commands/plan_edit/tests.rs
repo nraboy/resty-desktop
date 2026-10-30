@@ -44,8 +44,6 @@ fn include_everything(path: &str) -> EditAction {
     EditAction { kind: "includeEverything".into(), path: path.into(), pattern: None }
 }
 
-// The `excludeItem` edit (a left click on an included item) isn't handled by the engine yet.
-#[allow(dead_code)]
 fn exclude_item(path: &str) -> EditAction {
     EditAction { kind: "excludeItem".into(), path: path.into(), pattern: None }
 }
@@ -61,8 +59,8 @@ fn edit(i: &TreeRulesInput, a: &EditAction) -> Result<EditOutcome, String> {
 
 /// What every tree edit promises about its rule list: the added and removed rules are real
 /// patterns, never comments; rules it adds go at the end with the tree comment naming `p`
-/// directly above the first of them; an edit that only deletes lines leaves no tree comment for
-/// `p` behind.
+/// directly above the first of them (`included` when they start with a `!`, `excluded`
+/// otherwise); an edit that only deletes lines leaves no tree comment for `p` behind.
 fn assert_tree_comment(o: &EditOutcome, p: &str) {
     assert!(o.added_rules.iter().chain(&o.removed_rules).all(|r| !r.trim_start().starts_with('#')), "{o:?}");
     let names_p = |l: &String| comment_names(l, Verb::Included, p) || comment_names(l, Verb::Excluded, p);
@@ -72,7 +70,8 @@ fn assert_tree_comment(o: &EditOutcome, p: &str) {
     }
     let start = o.excludes.len() - o.added_rules.len();
     assert_eq!(o.excludes[start..], o.added_rules[..], "the added rules end the list");
-    assert!(start > 0 && comment_names(&o.excludes[start - 1], Verb::Included, p), "no tree comment for {p} above {:?}", o.excludes);
+    let verb = if o.added_rules[0].starts_with('!') { Verb::Included } else { Verb::Excluded };
+    assert!(start > 0 && comment_names(&o.excludes[start - 1], verb, p), "no {verb:?} tree comment for {p} above {:?}", o.excludes);
 }
 
 /// One include edit on a plan with source `/s` and `before` as its patterns: the patterns after
@@ -86,13 +85,28 @@ fn include_row(before: &[&str], action: EditAction, after: &[&str]) -> (TreeRule
     (i, o)
 }
 
+/// The plan `i` once `o` is applied to it: the next click starts from this.
+fn applied(i: &TreeRulesInput, o: &EditOutcome) -> TreeRulesInput {
+    TreeRulesInput { sources: o.sources.clone(), excludes: o.excludes.clone(), ..i.clone() }
+}
+
+/// Is `path` included in the plan `i`?
+fn included(i: &TreeRulesInput, path: &str) -> bool {
+    let (e, _) = build_engine(i, &no_read, &no_env).unwrap();
+    e.classify(path, &MockProbe::default()).included
+}
+
 /// Is `path` included after applying `outcome` to `i`?
 fn included_after(i: &TreeRulesInput, o: &EditOutcome, path: &str) -> bool {
-    let mut j = i.clone();
-    j.sources = o.sources.clone();
-    j.excludes = o.excludes.clone();
-    let (e, _) = build_engine(&j, &no_read, &no_env).unwrap();
-    e.classify(path, &MockProbe::default()).included
+    included(&applied(i, o), path)
+}
+
+/// `i` after each of `actions` in turn, every one of which must succeed.
+fn edits(i: &TreeRulesInput, actions: &[EditAction]) -> TreeRulesInput {
+    actions.iter().fold(i.clone(), |cur, a| {
+        let o = edit(&cur, a).unwrap_or_else(|e| panic!("{} {} on {:?}: {e}", a.kind, a.path, cur.excludes));
+        applied(&cur, &o)
+    })
 }
 
 // ── escaping and the chain ──────────────────────────────────────────────────
@@ -121,7 +135,8 @@ fn excluding_a_folder_by_its_exact_path_adds_one_pattern() {
     let i = input(&["/s"], &[]);
     let o = edit(&i, &exclude("/s/a", "/s/a")).unwrap();
     assert_eq!(o.added_rules, ["/s/a"]);
-    assert_eq!(o.excludes, ["/s/a"]);
+    assert_eq!(o.excludes, ["# Tree: excluded /s/a — with pattern /s/a", "/s/a"]);
+    assert_tree_comment(&o, "/s/a");
     assert!(!included_after(&i, &o, "/s/a/x"));
     assert!(included_after(&i, &o, "/s/b"));
 }
@@ -130,6 +145,9 @@ fn excluding_a_folder_by_its_exact_path_adds_one_pattern() {
 fn excluding_by_name_hits_every_folder_of_that_name() {
     let i = input(&["/s"], &[]);
     let o = edit(&i, &exclude("/s/a/node_modules", "node_modules")).unwrap();
+    // The comment names the clicked item and the pattern chosen for it.
+    assert_eq!(o.excludes, ["# Tree: excluded /s/a/node_modules — with pattern node_modules", "node_modules"]);
+    assert_tree_comment(&o, "/s/a/node_modules");
     assert!(!included_after(&i, &o, "/s/a/node_modules"));
     assert!(!included_after(&i, &o, "/s/c/deep/node_modules/y.js"));
     assert!(included_after(&i, &o, "/s/c/deep/code.py"));
@@ -139,7 +157,7 @@ fn excluding_by_name_hits_every_folder_of_that_name() {
 fn the_new_rule_goes_last_so_it_beats_earlier_reincludes() {
     let i = input(&["/s"], &["/s/*", "!/s/a"]);
     let o = edit(&i, &exclude("/s/a/keep.txt", "/s/a/keep.txt")).unwrap();
-    assert_eq!(o.excludes, ["/s/*", "!/s/a", "/s/a/keep.txt"]);
+    assert_eq!(o.excludes, ["/s/*", "!/s/a", "# Tree: excluded /s/a/keep.txt — with pattern /s/a/keep.txt", "/s/a/keep.txt"]);
     assert!(!included_after(&i, &o, "/s/a/keep.txt"));
     assert!(included_after(&i, &o, "/s/a"));
 }
@@ -159,6 +177,7 @@ fn a_source_also_covered_by_a_parent_source_gets_the_pattern_too() {
     let o = edit(&i, &exclude("/s/a", "/s/a")).unwrap();
     assert_eq!(o.removed_sources, ["/s/a"]);
     assert_eq!(o.added_rules, ["/s/a"]);
+    assert_tree_comment(&o, "/s/a");
     assert!(!included_after(&i, &o, "/s/a/x"));
 }
 
@@ -417,6 +436,233 @@ fn a_marker_file_exclusion_cannot_be_overridden_by_patterns() {
     assert!(err.contains(".nobackup"), "{err}");
 }
 
+// ── exclude an item (a click on an included one) ────────────────────────────
+
+const NM: &str = "/s/a/node_modules";
+const INDEX: &str = "/s/a/node_modules/lib/index.js";
+const OTHER: &str = "/s/a/node_modules/lib/other.js";
+
+/// The plan with source `/s` and the pattern `node_modules`, with `paths` carved out of
+/// /s/a/node_modules by include clicks, in that order.
+fn carved(paths: &[&str]) -> TreeRulesInput {
+    edits(&input(&["/s"], &["node_modules"]), &paths.iter().map(|p| include(p)).collect::<Vec<_>>())
+}
+
+/// One excludeItem click on `i`: the patterns after it (comments aside) are `after`, the clicked
+/// path is excluded, and the comments are in place.
+fn exclude_row_on(i: &TreeRulesInput, path: &str, after: &[&str]) -> EditOutcome {
+    let o = edit(i, &exclude_item(path)).unwrap_or_else(|e| panic!("excludeItem {path} on {:?}: {e}", i.excludes));
+    assert_eq!(patterns(&o.excludes), after, "excludeItem {path} on {:?}", i.excludes);
+    assert!(!included_after(i, &o, path), "excludeItem {path} on {:?}: {:?}", i.excludes, o.excludes);
+    assert_tree_comment(&o, path);
+    o
+}
+
+/// [`exclude_row_on`] a plan with source `/s` and `before` as its patterns.
+fn exclude_row(before: &[&str], path: &str, after: &[&str]) -> (TreeRulesInput, EditOutcome) {
+    let i = input(&["/s"], before);
+    let o = exclude_row_on(&i, path, after);
+    (i, o)
+}
+
+#[test]
+fn excluding_an_included_item_appends_its_exact_rule() {
+    let (i, o) = exclude_row(&["*.log"], "/s/a/c-1.png", &["*.log", "/s/a/c-1.png"]);
+    assert_eq!(o.excludes, ["*.log", "# Tree: excluded /s/a/c-1.png", "/s/a/c-1.png"]);
+    assert_eq!(o.added_rules, ["/s/a/c-1.png"]);
+    assert!(o.removed_rules.is_empty() && o.brought_back.is_none());
+    assert!(included_after(&i, &o, "/s/a/c-2.png"));
+
+    // A name with glob characters is written escaped, so it excludes only itself.
+    let (i, o) = exclude_row(&[], "/s/we[ird]*", &["/s/we\\[ird\\]\\*"]);
+    assert!(included_after(&i, &o, "/s/wei"));
+}
+
+#[test]
+fn excluding_an_item_a_lone_re_include_brings_back_deletes_that_re_include() {
+    // The tree's own re-include goes, and its comment with it.
+    let (_, o) = exclude_row(&["*.tmp", "# Tree: included /s/t.tmp — why", "!/s/t.tmp"], "/s/t.tmp", &["*.tmp"]);
+    assert_eq!(o.excludes, ["*.tmp"]);
+    assert_eq!(o.removed_rules, ["!/s/t.tmp"]);
+    assert!(o.added_rules.is_empty());
+
+    // A legacy exact-line-and-re-include pair loses the re-include.
+    exclude_row(&["/s/a/f.txt", "!/s/a/f.txt"], "/s/a/f.txt", &["/s/a/f.txt"]);
+
+    // Every copy goes, newest first, until it is excluded…
+    let (_, o) = exclude_row(&["*.tmp", "!/s/t.tmp", "!/s/t.tmp"], "/s/t.tmp", &["*.tmp"]);
+    assert_eq!(o.removed_rules, ["!/s/t.tmp", "!/s/t.tmp"]);
+    // …and no further: here deleting the newest one is enough.
+    exclude_row(&["*.tmp", "!/s/t.tmp", "/s/t.tmp", "!/s/t.tmp"], "/s/t.tmp", &["*.tmp", "!/s/t.tmp", "/s/t.tmp"]);
+
+    // A comment the user wrote is never taken.
+    let (_, o) = exclude_row(&["# my note", "*.tmp", "!/s/t.tmp"], "/s/t.tmp", &["*.tmp"]);
+    assert_eq!(o.excludes, ["# my note", "*.tmp"]);
+}
+
+#[test]
+fn excluding_the_only_carved_out_item_undoes_the_carve_out_and_its_scaffolding() {
+    let o = exclude_row_on(&carved(&[INDEX]), INDEX, &["node_modules"]);
+    // No tree comment is left (it sat above the scaffolding), and no empty node_modules either (F4).
+    assert_eq!(o.excludes, ["node_modules"]);
+    assert_eq!(
+        o.removed_rules,
+        [
+            "!/s/a/node_modules/lib/index.js",
+            "!/s/a/node_modules",
+            "/s/a/node_modules/*",
+            "!/s/a/node_modules/lib",
+            "/s/a/node_modules/lib/*",
+        ]
+    );
+}
+
+#[test]
+fn scaffolding_another_carve_out_still_uses_stays() {
+    let i = carved(&[INDEX, OTHER]);
+    let o = edit(&i, &exclude_item(INDEX)).unwrap();
+    assert_eq!(
+        patterns(&o.excludes),
+        [
+            "node_modules",
+            "!/s/a/node_modules",
+            "/s/a/node_modules/*",
+            "!/s/a/node_modules/lib",
+            "/s/a/node_modules/lib/*",
+            "!/s/a/node_modules/lib/other.js",
+        ]
+    );
+    assert_eq!(o.removed_rules, ["!/s/a/node_modules/lib/index.js"]);
+    assert!(o.added_rules.is_empty());
+    assert!(!included_after(&i, &o, INDEX));
+    assert!(included_after(&i, &o, OTHER));
+
+    // Undoing the other one as well takes the scaffolding with it. The comment written for
+    // index.js sits above that scaffolding and names index.js, not other.js, so it is left behind
+    // (harmless: a comment changes nothing).
+    let o = edit(&applied(&i, &o), &exclude_item(OTHER)).unwrap();
+    assert_eq!(patterns(&o.excludes), ["node_modules"]);
+    assert!(o.excludes[1].starts_with("# Tree: included /s/a/node_modules/lib/index.js"), "{:?}", o.excludes);
+}
+
+#[test]
+fn undoing_carve_outs_newest_first_returns_the_plan_exactly() {
+    let one = carved(&[INDEX]);
+    let after_other = edits(&carved(&[INDEX, OTHER]), &[exclude_item(OTHER)]);
+    assert_eq!(after_other.excludes, one.excludes);
+    let after_both = edits(&after_other, &[exclude_item(INDEX)]);
+    assert_eq!(after_both.excludes, ["node_modules"]);
+}
+
+#[test]
+fn excluding_a_partly_carved_folder_appends_its_exact_rule_and_keeps_the_scaffolding() {
+    // node_modules is included only through the carve-out's `!/s/a/node_modules`, which is
+    // scaffolding (index.js hangs off it), so that line is never deleted by a click on the folder.
+    let i = carved(&[INDEX]);
+    let mut after = patterns(&i.excludes);
+    after.push(NM);
+    let o = exclude_row_on(&i, NM, &after);
+    assert!(o.removed_rules.is_empty());
+    assert!(!included_after(&i, &o, INDEX));
+
+    // Including it again deletes that line: back to exactly the carve-out.
+    let back = edit(&applied(&i, &o), &include(NM)).unwrap();
+    assert_eq!(back.excludes, i.excludes);
+}
+
+#[test]
+fn a_re_include_that_is_not_what_includes_the_item_stays_and_its_exact_rule_is_appended() {
+    // `!/s/d` brought back x.txt, but /s/d itself was included anyway: deleting it would leave /s/d
+    // included, so it stays and the folder's exact rule is appended after it.
+    let i = edits(&input(&["/s"], &["/s/d/x.txt"]), &[include_everything("/s/d")]);
+    let o = exclude_row_on(&i, "/s/d", &["/s/d/x.txt", "!/s/d", "/s/d"]);
+    assert_eq!(o.excludes[1..3], i.excludes[1..3], "the re-include keeps its own comment");
+    assert!(o.removed_rules.is_empty());
+    assert_eq!(o.added_rules, ["/s/d"]);
+
+    // The same for a re-include nothing excludes in the first place.
+    exclude_row(&["!/s/t.tmp"], "/s/t.tmp", &["!/s/t.tmp", "/s/t.tmp"]);
+}
+
+#[test]
+fn scaffolding_stays_when_the_folder_it_opened_would_not_be_excluded_without_it() {
+    // Nothing else excludes /s/X: `!/s/X`, `/s/X/*` is what keeps the rest of X out, so undoing
+    // a's carve-out leaves it.
+    let (i, o) = exclude_row(&["!/s/X", "/s/X/*", "!/s/X/a"], "/s/X/a", &["!/s/X", "/s/X/*"]);
+    assert!(!included_after(&i, &o, "/s/X/b"));
+    assert_eq!(o.removed_rules, ["!/s/X/a"]);
+
+    // Here only a's own line would exclude it without the scaffolding, and /s/X/b would come back.
+    let (i, o) = exclude_row(&["/s/X/a", "!/s/X", "/s/X/*", "!/s/X/a"], "/s/X/a", &["/s/X/a", "!/s/X", "/s/X/*"]);
+    assert!(!included_after(&i, &o, "/s/X/b"));
+}
+
+#[test]
+fn excluding_an_item_the_tree_just_included_returns_the_plan_to_how_it_was() {
+    let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // The rows of the include table whose click only appended rules.
+    let rows: Vec<(Vec<String>, EditAction)> = vec![
+        (lines(&["*.tmp"]), include("/s/t.tmp")),
+        (lines(&["node_modules"]), include(NM)),
+        (lines(&["node_modules"]), include(INDEX)),
+        (carved(&[INDEX]).excludes, include(OTHER)),
+        (carved(&[INDEX, OTHER]).excludes, include("/s/a/node_modules/other/z.js")),
+        (lines(&["/s/X", "/s/X/a.txt"]), include("/s/X/a.txt")),
+        (lines(&["/s/d/x.txt", "/s/d"]), include_everything("/s/d")),
+    ];
+    for (before, action) in rows {
+        let i = input(&["/s"], &before.iter().map(String::as_str).collect::<Vec<_>>());
+        let there = edit(&i, &action).unwrap();
+        assert!(!there.added_rules.is_empty() && there.removed_rules.is_empty(), "{} {}", action.kind, action.path);
+        let back = edit(&applied(&i, &there), &exclude_item(&action.path)).unwrap();
+        assert_eq!(back.excludes, before, "{} {} then excludeItem", action.kind, action.path);
+        assert_eq!(back.sources, i.sources);
+        let (mut added, mut removed) = (there.added_rules.clone(), back.removed_rules.clone());
+        added.sort();
+        removed.sort();
+        assert_eq!(removed, added, "the undo deletes exactly what the click added");
+    }
+
+    // Re-includes written before the carve-out (a dead hand-written one; an older carve-out out of
+    // the folder before the folder itself was excluded) don't use its scaffolding, so it goes too.
+    let older = edits(&carved(&[INDEX, OTHER]), &[exclude_item(NM)]);
+    for (start, p) in [(input(&["/s"], &["!/s/X/a", "/s/X"]), "/s/X/a"), (older, INDEX)] {
+        let there = edit(&start, &include(p)).unwrap();
+        assert!(there.removed_rules.is_empty(), "{:?}", there);
+        let back = edit(&applied(&start, &there), &exclude_item(p)).unwrap();
+        assert_eq!(back.excludes, start.excludes, "include {p} then excludeItem");
+    }
+
+    // Including f.txt here also deleted a line that did nothing (`*.txt` excludes it anyway), and
+    // the undo can't know that line was there: it comes back to the same included set, not to
+    // the same list.
+    let i = input(&["/s"], &["*.txt", "/s/a/f.txt"]);
+    let there = edit(&i, &include("/s/a/f.txt")).unwrap();
+    let back = edit(&applied(&i, &there), &exclude_item("/s/a/f.txt")).unwrap();
+    assert_eq!(back.excludes, ["*.txt"]);
+    for p in ["/s/a/f.txt", "/s/a/g.txt", "/s/a", "/s/b.png"] {
+        assert_eq!(included_after(&i, &back, p), included(&i, p), "{p}");
+    }
+}
+
+#[test]
+fn excluding_a_source_removes_it_and_excluded_things_are_refused() {
+    let i = input(&["/s", "/t"], &["*.tmp"]);
+    let o = edit(&i, &exclude_item("/t")).unwrap();
+    assert_eq!(o.sources, ["/s"]);
+    assert_eq!(o.removed_sources, ["/t"]);
+    assert!(o.added_rules.is_empty() && o.removed_rules.is_empty());
+    assert_eq!(o.excludes, ["*.tmp"]);
+
+    assert_eq!(edit(&i, &exclude_item("/s/x.tmp")).unwrap_err(), "It's already excluded.");
+    assert!(edit(&i, &exclude_item("/")).unwrap_err().contains("isn't backed up itself"));
+
+    // A source from a path-list file can't be excluded by a pattern.
+    let mut i = input(&["/s"], &[]);
+    i.list_sources = vec!["/l/notes.txt".into()];
+    assert!(edit(&i, &exclude_item("/l/notes.txt")).unwrap_err().contains("path-list file"));
+}
+
 // ── export ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -489,6 +735,7 @@ fn windows_excludes_a_folder_with_a_bracket_using_a_character_class() {
     let path = "C:/s/we[ird]";
     let o = edit(&i, &exclude(path, &PathStyle::Windows.escape_glob(path))).unwrap();
     assert_eq!(o.added_rules, ["C:/s/we[[]ird]"]);
+    assert_eq!(o.excludes, ["# Tree: excluded C:/s/we[ird] — with pattern C:/s/we[[]ird]", "C:/s/we[[]ird]"]);
     assert!(!included_after(&i, &o, "C:/s/we[ird]/inner"));
     assert!(included_after(&i, &o, "C:/s/weird"));
 }
@@ -510,6 +757,31 @@ fn windows_including_inside_an_excluded_folder_carves_it_out() {
     assert!(included_after(&i, &o, "C:/Users/me/app/node_modules/lib/index.js"));
     assert!(!included_after(&i, &o, "C:/Users/me/app/node_modules/lib/other.js"));
     assert_tree_comment(&o, "C:/Users/me/app/node_modules/lib/index.js");
+
+    // Excluding it again undoes the carve-out, scaffolding and comment included.
+    let back = edit(&applied(&i, &o), &exclude_item("C:\\Users\\me\\app\\node_modules\\lib\\index.js")).unwrap();
+    assert_eq!(back.excludes, ["node_modules"]);
+    assert_eq!(back.sources, ["C:\\Users\\me\\app"]);
+}
+
+#[test]
+fn windows_excludes_an_item_by_its_exact_rule_in_the_escaped_spelling() {
+    let i = win_input(&["C:\\s"], &[]);
+    let o = edit(&i, &exclude_item("C:\\s\\we[ird]\\f.txt")).unwrap();
+    assert_eq!(o.excludes, ["# Tree: excluded C:/s/we[ird]/f.txt", "C:/s/we[[]ird]/f.txt"]);
+    assert_eq!(o.added_rules, ["C:/s/we[[]ird]/f.txt"]);
+    assert_tree_comment(&o, "C:/s/we[ird]/f.txt");
+    assert!(!included_after(&i, &o, "C:/s/we[ird]/f.txt"));
+    // The look-alike an unescaped `we[ird]` would match stays included.
+    assert!(included_after(&i, &o, "C:/s/wei/f.txt"));
+
+    // A re-include in that spelling is deleted instead, whichever way the clicked path is spelled.
+    let i = win_input(&["C:\\s"], &["*.txt"]);
+    let there = edit(&i, &include("C:/s/we[ird]/f.txt")).unwrap();
+    let back = edit(&applied(&i, &there), &exclude_item("C:\\s\\we[ird]\\f.txt")).unwrap();
+    assert_eq!(back.excludes, ["*.txt"]);
+    assert_eq!(back.removed_rules, ["!C:/s/we[[]ird]/f.txt"]);
+    assert_tree_comment(&back, "C:/s/we[ird]/f.txt");
 }
 
 #[test]
