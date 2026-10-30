@@ -1,24 +1,58 @@
 // The backup-plan editor's form, as pure functions: the state shape, loading a saved plan into
-// it, validating it (naming the tab an error belongs to, so the page can jump there), building
-// the plan to save, and the short summaries shown on the tabs. The page and its tab components
-// only render this state; nothing here touches React or the backend, so the rules that decide
-// what gets saved are unit-tested (planForm.test.ts).
+// it, validating it (naming the place an error belongs to — the header, the Files tab or a
+// Settings section — so the page can jump there), building the plan to save, where the URL
+// points (tab and section), and which Settings sections are set away from their defaults. The
+// page and its components only render this state; nothing here touches React or the backend, so
+// the rules that decide what gets saved are unit-tested (planForm.test.ts).
 
 import type { BackupPlan, ExcludeFile, PlanWebhook } from "./types";
 import type { TreeRulesInput } from "./planTree";
 import { EMPTY_RETENTION_FIELDS, parsePackSize, parseRetention, retentionToFields, type RetentionFields } from "./utils";
 
-export type PlanTab = "files" | "retention" | "advanced" | "tags";
-export const PLAN_TABS: PlanTab[] = ["files", "retention", "advanced", "tags"];
+export type PlanTab = "files" | "settings";
+export const PLAN_TABS: PlanTab[] = ["files", "settings"];
 export const PLAN_TAB_LABELS: Record<PlanTab, string> = {
   files: "Files",
-  retention: "Retention",
-  advanced: "Advanced",
-  tags: "Tags",
+  settings: "Settings",
 };
 
 export function isPlanTab(v: string | null | undefined): v is PlanTab {
   return !!v && (PLAN_TABS as string[]).includes(v);
+}
+
+/** The Settings tab's sections, top to bottom: one scrolling pane with a jump list beside it. */
+export type SettingsSection = "retention" | "tags" | "bandwidth" | "restic" | "webhooks";
+export const SETTINGS_SECTIONS: SettingsSection[] = ["retention", "tags", "bandwidth", "restic", "webhooks"];
+export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
+  retention: "Retention",
+  tags: "Tags",
+  bandwidth: "Bandwidth",
+  restic: "Restic options",
+  webhooks: "Webhooks",
+};
+
+export function isSettingsSection(v: string | null | undefined): v is SettingsSection {
+  return !!v && (SETTINGS_SECTIONS as string[]).includes(v);
+}
+
+/** Tabs the editor used to have, and the Settings section each became — so a saved or shared
+ * `?tab=retention|advanced|tags` link still opens the right place. */
+const OLD_TABS: Record<string, SettingsSection> = {
+  retention: "retention",
+  tags: "tags",
+  advanced: "bandwidth",
+};
+
+/** Where the URL's `?tab=` and `&section=` point. Anything unknown falls back rather than
+ * failing: an unknown tab opens Files, an unknown section opens Settings at the top, and a
+ * section only means something on the Settings tab. */
+export function planLocation(
+  tab: string | null,
+  section: string | null,
+): { tab: PlanTab; section: SettingsSection | null } {
+  if (tab === "settings") return { tab, section: isSettingsSection(section) ? section : null };
+  if (tab && Object.prototype.hasOwnProperty.call(OLD_TABS, tab)) return { tab: "settings", section: OLD_TABS[tab] };
+  return { tab: "files", section: null };
 }
 
 export type ExcludeMode = "simple" | "expert";
@@ -175,10 +209,16 @@ export function treeRulesFromForm(f: PlanFormState): TreeRulesInput {
 }
 
 /** A reason the form can't be saved, and where to fix it: `header` is the title/repository
- * area above the tabs. */
+ * area above the tabs, `files` the Files tab, anything else a Settings section. */
 export interface FormIssue {
-  where: PlanTab | "header";
+  where: "header" | "files" | SettingsSection;
   message: string;
+}
+
+/** The tab a problem is on (the header is above both). */
+export function issueTab(where: FormIssue["where"]): PlanTab | null {
+  if (where === "header") return null;
+  return where === "files" ? "files" : "settings";
 }
 
 /** The first problem with the form, in the order the editor has always checked them. */
@@ -198,10 +238,10 @@ export function validatePlanForm(f: PlanFormState): FormIssue | null {
   // arrived from outside the UI (a hand-edited import bundle).
   const badUrl = f.webhooks.find((w) => !/^https?:\/\//.test(w.url.trim()));
   if (badUrl) {
-    return { where: "advanced", message: `Webhook "${badUrl.url}" must start with http:// or https://.` };
+    return { where: "webhooks", message: `Webhook "${badUrl.url}" must start with http:// or https://.` };
   }
   const pack = parsePackSize(f.packSize);
-  if ("error" in pack) return { where: "advanced", message: pack.error };
+  if ("error" in pack) return { where: "restic", message: pack.error };
   // 0 means "unset" throughout the app (restic rejects a forget with no effective policy), so a
   // 0/negative/decimal/non-numeric count is an error here rather than a silently dead rule.
   const retention = parseRetention(f.retention);
@@ -234,30 +274,25 @@ export function buildPlan(f: PlanFormState, id: string): BackupPlan {
   };
 }
 
-// ── tab summaries ───────────────────────────────────────────────────────────
+// ── non-default markers ─────────────────────────────────────────────────────
 
-/** "Off", or e.g. "Keep 7 daily, 4 weekly" — shown on the Retention tab. */
-export function retentionSummary(f: PlanFormState): string {
-  const parts: string[] = [];
-  const add = (v: string, label: string) => {
-    if (v.trim() !== "") parts.push(`${v.trim()} ${label}`);
-  };
-  add(f.retention.keepLast, "last");
-  add(f.retention.keepDaily, "daily");
-  add(f.retention.keepWeekly, "weekly");
-  add(f.retention.keepMonthly, "monthly");
-  add(f.retention.keepYearly, "yearly");
-  return parts.length ? `Keep ${parts.join(", ")}` : "Off";
+/** Is a Settings section set away from its default? (A blue dot beside it in the jump list.) */
+export function sectionIsCustom(f: PlanFormState, s: SettingsSection): boolean {
+  switch (s) {
+    case "retention":
+      return hasRetention(f);
+    case "tags":
+      return effectiveTags(f).length > 0;
+    case "bandwidth":
+      return f.limitUpload.trim() !== "" || f.limitDownload.trim() !== "";
+    case "restic":
+      return f.packSize.trim() !== "" || f.excludeCloudFiles || f.useFsSnapshot;
+    case "webhooks":
+      return f.webhooks.length > 0;
+  }
 }
 
-/** Is anything on the Advanced tab set away from its default? (A dot on the tab.) */
-export function advancedIsCustom(f: PlanFormState): boolean {
-  return (
-    f.packSize.trim() !== "" ||
-    f.limitUpload.trim() !== "" ||
-    f.limitDownload.trim() !== "" ||
-    f.webhooks.length > 0 ||
-    f.excludeCloudFiles ||
-    f.useFsSnapshot
-  );
+/** Is any Settings section set away from its default? (A blue dot on the Settings tab.) */
+export function settingsIsCustom(f: PlanFormState): boolean {
+  return SETTINGS_SECTIONS.some((s) => sectionIsCustom(f, s));
 }

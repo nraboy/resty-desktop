@@ -1,8 +1,10 @@
 import Button from "../Button";
 import Input from "../Input";
+import TruncatedText from "../TruncatedText";
 import { CARD, type FormProps } from "./types";
 
-export default function TagsTab({ form, update }: FormProps) {
+/** The Settings tab's Tags section (its title is the section heading). */
+export default function TagsSection({ form, update }: FormProps) {
   const { tags, tagInput } = form;
   const addTag = () => {
     const t = tagInput.trim();
@@ -10,7 +12,6 @@ export default function TagsTab({ form, update }: FormProps) {
   };
   return (
     <div className={CARD}>
-      <h2 className="text-sm font-medium text-gray-300 mb-3">Tags (optional)</h2>
       <div className="flex gap-2 mb-2">
         <Input
           placeholder="Add tag…"
@@ -26,12 +27,13 @@ export default function TagsTab({ form, update }: FormProps) {
           {tags.map((t) => (
             <span
               key={t}
-              className="inline-flex items-center gap-1 text-xs bg-blue-900/40 text-blue-300 border border-blue-700/50 px-2 py-0.5 rounded-full"
+              className="inline-flex max-w-full items-center gap-1 text-xs bg-blue-900/40 text-blue-300 border border-blue-700/50 px-2 py-0.5 rounded-full"
             >
-              {t}
+              <TruncatedText as="span" className="truncate" text={t} />
               <button
                 onClick={() => update((p) => ({ tags: p.tags.filter((x) => x !== t) }))}
-                className="text-blue-400 hover:text-gray-50 transition-colors"
+                className="flex-shrink-0 text-blue-400 hover:text-gray-50 transition-colors"
+                aria-label={`Remove tag ${t}`}
               >
                 ×
               </button>

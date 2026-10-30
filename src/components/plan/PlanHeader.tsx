@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router-dom";
 import type { Repository } from "../../lib/types";
-import Button from "../Button";
 import { ChevronDownIcon, PencilIcon } from "../icons";
 
 interface Props {
@@ -12,49 +11,33 @@ interface Props {
   repos: Repository[];
   repoId: string;
   onRepo: (id: string) => void;
-  isNew: boolean;
-  saving: boolean;
-  onSave: () => void;
-  onCancel: () => void;
-  onDelete: () => void;
 }
 
 /**
- * The plan's title (an editable h1), its repository, and the Save / Cancel / Delete actions.
- * Sticky, so the actions are within reach on every tab and an error on a tab that is scrolled
- * out of view can't strand the user.
+ * The plan's title (an editable h1) and its repository, above the tabs. The actions live in the
+ * footer (PlanFooter); the page keeps both in view and scrolls only what's between them.
  */
-export default function PlanHeader({
-  name,
-  onName,
-  nameInvalid,
-  repoInvalid,
-  repos,
-  repoId,
-  onRepo,
-  isNew,
-  saving,
-  onSave,
-  onCancel,
-  onDelete,
-}: Props) {
+export default function PlanHeader({ name, onName, nameInvalid, repoInvalid, repos, repoId, onRepo }: Props) {
   const navigate = useNavigate();
   const selected = repos.find((r) => r.id === repoId);
   return (
-    <div className="sticky top-0 z-20 bg-gray-950 px-6 pt-5 pb-3 border-b border-gray-800/70">
+    <div className="px-6 pt-5 pb-3 flex-shrink-0">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <h1 className="group relative max-w-xl">
+            {/* A long name ends in an ellipsis rather than being cut off silently; the hover
+                title has it whole. */}
             <input
               id="plan-name"
               aria-label="Plan name"
               aria-invalid={nameInvalid}
               value={name}
+              title={name || undefined}
               onChange={(e) => onName(e.target.value)}
               placeholder="Untitled plan"
               spellCheck={false}
               autoComplete="off"
-              className={`w-full bg-transparent text-xl font-semibold text-gray-100 placeholder-gray-500 pr-7 py-0.5 border-b focus:outline-none focus:border-blue-500 ${
+              className={`w-full truncate bg-transparent text-xl font-semibold text-gray-100 placeholder-gray-500 pr-7 py-0.5 border-b focus:outline-none focus:border-blue-500 ${
                 nameInvalid ? "border-red-500" : "border-transparent hover:border-gray-700"
               }`}
             />
@@ -115,20 +98,6 @@ export default function PlanHeader({
               select a different repository or clear the read-only flag on Repositories.
             </p>
           )}
-        </div>
-
-        <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
-          {!isNew && (
-            <Button variant="danger" onClick={onDelete} disabled={saving}>
-              Delete
-            </Button>
-          )}
-          <Button variant="secondary" onClick={onCancel} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={onSave} loading={saving}>
-            {isNew ? "Create Plan" : "Save Changes"}
-          </Button>
         </div>
       </div>
     </div>

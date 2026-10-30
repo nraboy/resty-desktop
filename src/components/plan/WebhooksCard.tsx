@@ -208,8 +208,8 @@ export default function WebhooksCard({ form, update }: FormProps) {
   return (
     <>
       <div className={CARD}>
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="text-sm font-medium text-gray-300">Webhooks (optional)</h2>
+        {/* The section heading above the card is its title. */}
+        <div className="flex items-center justify-end mb-1">
           <Button variant="secondary" size="sm" onClick={openAddWebhookModal}>+ Add Webhook</Button>
         </div>
 

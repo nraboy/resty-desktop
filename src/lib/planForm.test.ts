@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
-  advancedIsCustom,
+  PLAN_TABS,
+  PLAN_TAB_LABELS,
+  SETTINGS_SECTIONS,
+  SETTINGS_SECTION_LABELS,
   buildPlan,
   effectiveTags,
   emptyForm,
@@ -10,8 +13,12 @@ import {
   hasRetention,
   isCommentLine,
   isPlanTab,
-  retentionSummary,
+  isSettingsSection,
+  issueTab,
+  planLocation,
   savedExcludes,
+  sectionIsCustom,
+  settingsIsCustom,
   treeRulesFromForm,
   validatePlanForm,
   withExcludeAdded,
@@ -82,20 +89,20 @@ describe("validatePlanForm", () => {
     expect(validatePlanForm(valid({ paths: ["/x"], filesFrom: ["/l.txt"], tags: ["t"] }))).toBeNull();
   });
 
-  it("rejects a webhook that isn't http(s), and a bad pack size, on the Advanced tab", () => {
+  it("rejects a webhook that isn't http(s) in Webhooks, and a bad pack size in Restic options", () => {
     const hook = (url: string) => ({ id: "w", url, provider: "generic" as const, stages: { started: false, completed: true, failed: true } });
     expect(validatePlanForm(valid({ webhooks: [hook("ftp://x")] }))).toEqual({
-      where: "advanced",
+      where: "webhooks",
       message: 'Webhook "ftp://x" must start with http:// or https://.',
     });
     expect(validatePlanForm(valid({ webhooks: [hook(" https://ok ")] }))).toBeNull();
     const pack = validatePlanForm(valid({ packSize: "3" }));
-    expect(pack?.where).toBe("advanced");
+    expect(pack?.where).toBe("restic");
     expect(pack?.message).toContain("between");
     expect(validatePlanForm(valid({ packSize: "64" }))).toBeNull();
   });
 
-  it("rejects retention counts below 1 or non-numeric on the Retention tab", () => {
+  it("rejects retention counts below 1 or non-numeric in the Retention section", () => {
     for (const bad of ["0", "-2", "abc", "1.5", "1e2"]) {
       expect(validatePlanForm(valid({ retention: keep({ keepDaily: bad }) }))).toEqual({
         where: "retention",
@@ -107,8 +114,8 @@ describe("validatePlanForm", () => {
     expect(validatePlanForm(valid({ retention: keep({ keepDaily: "  " }) }))).toBeNull();
   });
 
-  it("reports the first problem when several tabs have one", () => {
-    expect(validatePlanForm(valid({ packSize: "1", retention: keep({ keepDaily: "0" }) }))?.where).toBe("advanced");
+  it("reports the first problem when several sections have one", () => {
+    expect(validatePlanForm(valid({ packSize: "1", retention: keep({ keepDaily: "0" }) }))?.where).toBe("restic");
   });
 });
 
@@ -281,29 +288,143 @@ describe("treeRulesFromForm", () => {
   });
 });
 
-describe("tab summaries", () => {
-  it("summarises retention", () => {
-    expect(retentionSummary(valid())).toBe("Off");
-    expect(retentionSummary(valid({ retention: keep({ keepDaily: "7", keepWeekly: "4" }) }))).toBe("Keep 7 daily, 4 weekly");
-    expect(retentionSummary(valid({ retention: keep({ keepLast: " 3 ", keepYearly: "1" }) }))).toBe("Keep 3 last, 1 yearly");
+describe("tabs and Settings sections", () => {
+  it("has two tabs and five Settings sections, in order, with their labels", () => {
+    expect(PLAN_TABS).toEqual(["files", "settings"]);
+    expect(PLAN_TAB_LABELS).toEqual({ files: "Files", settings: "Settings" });
+    expect(SETTINGS_SECTIONS).toEqual(["retention", "tags", "bandwidth", "restic", "webhooks"]);
+    expect(SETTINGS_SECTIONS.map((s) => SETTINGS_SECTION_LABELS[s])).toEqual([
+      "Retention",
+      "Tags",
+      "Bandwidth",
+      "Restic options",
+      "Webhooks",
+    ]);
   });
 
-  it("flags anything non-default on the Advanced tab", () => {
-    expect(advancedIsCustom(valid())).toBe(false);
-    expect(advancedIsCustom(valid({ packSize: "32" }))).toBe(true);
-    expect(advancedIsCustom(valid({ limitUpload: "1" }))).toBe(true);
-    expect(advancedIsCustom(valid({ limitDownload: "1" }))).toBe(true);
-    expect(advancedIsCustom(valid({ excludeCloudFiles: true }))).toBe(true);
-    expect(advancedIsCustom(valid({ useFsSnapshot: true }))).toBe(true);
-    expect(advancedIsCustom(valid({ webhooks: [{ id: "w", url: "https://x", provider: "generic", stages: { started: false, completed: true, failed: true } }] }))).toBe(true);
-    // Retention and tags have their own tabs.
-    expect(advancedIsCustom(valid({ retention: keep({ keepDaily: "7" }), tags: ["t"] }))).toBe(false);
-  });
-
-  it("recognises tab ids from the URL", () => {
+  it("recognises tab and section ids from the URL", () => {
     expect(isPlanTab("files")).toBe(true);
-    expect(isPlanTab("tags")).toBe(true);
+    expect(isPlanTab("settings")).toBe(true);
+    // The old tabs are Settings sections now.
+    expect(isPlanTab("tags")).toBe(false);
+    expect(isPlanTab("advanced")).toBe(false);
     expect(isPlanTab("nope")).toBe(false);
     expect(isPlanTab(null)).toBe(false);
+    for (const s of SETTINGS_SECTIONS) expect(isSettingsSection(s)).toBe(true);
+    expect(isSettingsSection("advanced")).toBe(false);
+    expect(isSettingsSection("files")).toBe(false);
+    expect(isSettingsSection("")).toBe(false);
+    expect(isSettingsSection(null)).toBe(false);
+  });
+});
+
+describe("planLocation", () => {
+  it("opens a Settings section named in the URL", () => {
+    expect(planLocation("settings", "webhooks")).toEqual({ tab: "settings", section: "webhooks" });
+    expect(planLocation("settings", "retention")).toEqual({ tab: "settings", section: "retention" });
+    expect(planLocation("settings", null)).toEqual({ tab: "settings", section: null });
+    expect(planLocation("files", null)).toEqual({ tab: "files", section: null });
+  });
+
+  it("opens Settings at the matching section for the old tab links", () => {
+    expect(planLocation("retention", null)).toEqual({ tab: "settings", section: "retention" });
+    expect(planLocation("tags", null)).toEqual({ tab: "settings", section: "tags" });
+    expect(planLocation("advanced", null)).toEqual({ tab: "settings", section: "bandwidth" });
+  });
+
+  it("tolerates malformed links: an unknown section, a section without a tab, an unknown tab", () => {
+    expect(planLocation("settings", "nope")).toEqual({ tab: "settings", section: null });
+    expect(planLocation(null, "tags")).toEqual({ tab: "files", section: null });
+    expect(planLocation("files", "tags")).toEqual({ tab: "files", section: null });
+    expect(planLocation("zzz", null)).toEqual({ tab: "files", section: null });
+    expect(planLocation("", "")).toEqual({ tab: "files", section: null });
+    expect(planLocation(null, null)).toEqual({ tab: "files", section: null });
+    // Not fooled by names every object has.
+    expect(planLocation("constructor", null)).toEqual({ tab: "files", section: null });
+    expect(planLocation("settings", "toString")).toEqual({ tab: "settings", section: null });
+  });
+});
+
+describe("issueTab", () => {
+  it("names the tab a problem is on: Files, Settings for any section, none for the header", () => {
+    expect(issueTab("files")).toBe("files");
+    for (const s of SETTINGS_SECTIONS) expect(issueTab(s)).toBe("settings");
+    expect(issueTab("header")).toBeNull();
+  });
+
+  it("agrees with every place validatePlanForm reports", () => {
+    const hook = { id: "w", url: "ftp://x", provider: "generic" as const, stages: { started: false, completed: true, failed: true } };
+    const cases: [Partial<PlanFormState>, ReturnType<typeof issueTab>][] = [
+      [{ name: "" }, null],
+      [{ paths: [] }, "files"],
+      [{ filesFrom: ["/l.txt"] }, "settings"],
+      [{ webhooks: [hook] }, "settings"],
+      [{ packSize: "1" }, "settings"],
+      [{ retention: keep({ keepDaily: "0" }) }, "settings"],
+    ];
+    for (const [over, tab] of cases) {
+      const problem = validatePlanForm(valid(over));
+      expect(problem).not.toBeNull();
+      expect(issueTab(problem!.where)).toBe(tab);
+    }
+  });
+});
+
+describe("sectionIsCustom", () => {
+  const hook = { id: "w", url: "https://x", provider: "generic" as const, stages: { started: false, completed: true, failed: true } };
+
+  it("is false for every section of a fresh form", () => {
+    for (const s of SETTINGS_SECTIONS) expect(sectionIsCustom(valid(), s)).toBe(false);
+    expect(settingsIsCustom(valid())).toBe(false);
+  });
+
+  it("Retention: any field set", () => {
+    expect(sectionIsCustom(valid({ retention: keep({ keepDaily: "7" }) }), "retention")).toBe(true);
+    expect(sectionIsCustom(valid({ retention: keep({ keepYearly: "1" }) }), "retention")).toBe(true);
+    // Blank (whitespace) fields are unset.
+    expect(sectionIsCustom(valid({ retention: keep({ keepDaily: "  " }) }), "retention")).toBe(false);
+  });
+
+  it("Tags: at least one tag, a typed-but-not-added one included (it is saved)", () => {
+    expect(sectionIsCustom(valid({ tags: ["t"] }), "tags")).toBe(true);
+    expect(sectionIsCustom(valid({ tagInput: " t " }), "tags")).toBe(true);
+    expect(sectionIsCustom(valid({ tagInput: "   " }), "tags")).toBe(false);
+  });
+
+  it("Bandwidth: an upload or download limit set", () => {
+    expect(sectionIsCustom(valid({ limitUpload: "1" }), "bandwidth")).toBe(true);
+    expect(sectionIsCustom(valid({ limitDownload: "1" }), "bandwidth")).toBe(true);
+    expect(sectionIsCustom(valid({ limitUpload: " " }), "bandwidth")).toBe(false);
+  });
+
+  it("Restic options: a pack size or a Windows-only flag", () => {
+    expect(sectionIsCustom(valid({ packSize: "32" }), "restic")).toBe(true);
+    expect(sectionIsCustom(valid({ excludeCloudFiles: true }), "restic")).toBe(true);
+    expect(sectionIsCustom(valid({ useFsSnapshot: true }), "restic")).toBe(true);
+    expect(sectionIsCustom(valid({ packSize: " " }), "restic")).toBe(false);
+  });
+
+  it("Webhooks: at least one", () => {
+    expect(sectionIsCustom(valid({ webhooks: [hook] }), "webhooks")).toBe(true);
+  });
+
+  it("each setting dots only its own section", () => {
+    const one: [Partial<PlanFormState>, string][] = [
+      [{ retention: keep({ keepDaily: "7" }) }, "retention"],
+      [{ tags: ["t"] }, "tags"],
+      [{ limitUpload: "1" }, "bandwidth"],
+      [{ packSize: "32" }, "restic"],
+      [{ webhooks: [hook] }, "webhooks"],
+    ];
+    for (const [over, section] of one) {
+      const f = valid(over);
+      expect(SETTINGS_SECTIONS.filter((s) => sectionIsCustom(f, s))).toEqual([section]);
+      expect(settingsIsCustom(f)).toBe(true);
+    }
+  });
+
+  it("is not moved by the Files tab's settings", () => {
+    const f = valid({ excludeItems: ["*.tmp"], excludeIfPresent: [".nobackup"], excludeCaches: true, filesFrom: ["/l.txt"] });
+    expect(settingsIsCustom(f)).toBe(false);
   });
 });
