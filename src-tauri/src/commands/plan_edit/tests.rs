@@ -1657,6 +1657,12 @@ fn restic_confirms_click_sequences() {
             let out = match apply_edit(&plan, &action, &probe, &read, &no_env) {
                 Ok(o) => o,
                 Err(e) => {
+                    // The click that undoes a click on the same item must always be possible (a
+                    // name pattern aside: a click on the item is not what undoes it).
+                    let undoes = prev.as_ref().filter(|c| inverse && held_to_its_target(&c.action));
+                    if let Some(first) = undoes {
+                        panic!("{ctx}: the inverse of {} was refused: {e}\nrules: {:?}", first.action.kind, plan.excludes);
+                    }
                     refused_as_impossible(&e, &ctx, &plan);
                     refused += 1;
                     prev = None;
