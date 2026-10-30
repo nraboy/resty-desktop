@@ -4,14 +4,17 @@ import {
   buildPlan,
   effectiveTags,
   emptyForm,
-  expertPatterns,
+  excludesAfterModeSwitch,
+  expertLines,
   formFromPlan,
   hasRetention,
+  isCommentLine,
   isPlanTab,
   retentionSummary,
   savedExcludes,
   treeRulesFromForm,
   validatePlanForm,
+  withExcludeAdded,
   type PlanFormState,
 } from "./planForm";
 import type { BackupPlan } from "./types";
@@ -148,13 +151,21 @@ describe("buildPlan", () => {
     expect(buildPlan(f, "i")).toMatchObject({ paths: ["/a"], filesFrom: ["/l.txt"] });
   });
 
-  it("saves expert text as trimmed patterns without comments or blanks, in order", () => {
+  it("saves expert text trimmed, in order, keeping comments and dropping blank lines", () => {
     const f = valid({ excludeMode: "expert", excludeText: "  node_modules \n# note\n\n!keep\n*.log" });
-    expect(buildPlan(f, "i").excludes).toEqual(["node_modules", "!keep", "*.log"]);
-    expect(savedExcludes(f)).toEqual(["node_modules", "!keep", "*.log"]);
-    expect(expertPatterns("a\n#b\n  \n c ")).toEqual(["a", "c"]);
-    // Simple mode saves the list as is, duplicates and order included (order is meaning).
-    expect(savedExcludes(valid({ excludeItems: ["!x", "y", "!x"] }))).toEqual(["!x", "y", "!x"]);
+    expect(buildPlan(f, "i").excludes).toEqual(["node_modules", "# note", "!keep", "*.log"]);
+    expect(savedExcludes(f)).toEqual(["node_modules", "# note", "!keep", "*.log"]);
+  });
+
+  it("saves the simple list as is: comments, repeats and order included (order is meaning)", () => {
+    expect(savedExcludes(valid({ excludeItems: ["# why", "!x", "y", "!x"] }))).toEqual(["# why", "!x", "y", "!x"]);
+  });
+
+  it("keeps comments and repeated rules through load and save", () => {
+    const excludes = ["# Tree: excluded /a", "/a", "# Tree: included /a/keep", "!/a/keep", "/a", "# my note"];
+    expect(buildPlan(formFromPlan(plan({ excludes }), true), "p1").excludes).toEqual(excludes);
+    const expert = { ...formFromPlan(plan({ excludes }), true), excludeMode: "expert" as const };
+    expect(buildPlan(expert, "p1").excludes).toEqual(excludes);
   });
 
   it("includes a typed-but-not-added tag, once", () => {
@@ -207,6 +218,50 @@ describe("formFromPlan", () => {
     expect(f.retention.keepDaily).toBe("7");
     expect(f.packSize).toBe("32");
     expect(f.limitDownload).toBe("");
+  });
+});
+
+describe("expertLines and isCommentLine", () => {
+  it("expertLines trims, drops blank lines and keeps comments", () => {
+    expect(expertLines("a\n#b\n  \n c ")).toEqual(["a", "#b", "c"]);
+    expect(expertLines("")).toEqual([]);
+    expect(expertLines("x\n!x\nx")).toEqual(["x", "!x", "x"]);
+  });
+
+  it("isCommentLine is true for a line whose trimmed text starts with #", () => {
+    expect(isCommentLine("  # x")).toBe(true);
+    expect(isCommentLine("#")).toBe(true);
+    expect(isCommentLine("*.log")).toBe(false);
+    expect(isCommentLine("!#keep")).toBe(false);
+    expect(isCommentLine("")).toBe(false);
+  });
+});
+
+describe("excludesAfterModeSwitch", () => {
+  it("fills the expert text from the list, comments included", () => {
+    const f = valid({ excludeItems: ["# why", "x", "!x"] });
+    expect(excludesAfterModeSwitch(f, "expert")).toEqual({ excludeMode: "expert", excludeText: "# why\nx\n!x" });
+  });
+
+  it("leaving expert keeps every line in order: comments and repeats, no de-duplication", () => {
+    const f = valid({ excludeMode: "expert", excludeText: " x \n# why\n\n!x\nx\n# why" });
+    expect(excludesAfterModeSwitch(f, "simple")).toEqual({
+      excludeMode: "simple",
+      excludeItems: ["x", "# why", "!x", "x", "# why"],
+    });
+  });
+});
+
+describe("withExcludeAdded", () => {
+  it("appends a trimmed pattern, and ignores a blank one or a repeated pattern", () => {
+    expect(withExcludeAdded(["a"], " b ")).toEqual(["a", "b"]);
+    expect(withExcludeAdded(["a"], "   ")).toBeNull();
+    expect(withExcludeAdded(["a"], "a")).toBeNull();
+  });
+
+  it("accepts a comment, and a comment already in the list again", () => {
+    expect(withExcludeAdded(["a"], "# note")).toEqual(["a", "# note"]);
+    expect(withExcludeAdded(["# note"], " # note ")).toEqual(["# note", "# note"]);
   });
 });
 

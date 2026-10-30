@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ExcludeMode } from "../../lib/planForm";
+import { excludesAfterModeSwitch, isCommentLine, withExcludeAdded, type ExcludeMode } from "../../lib/planForm";
 import Button from "../Button";
 import { CheckIcon } from "../icons";
 import Input from "../Input";
 import SegmentedToggle from "../SegmentedToggle";
+import TruncatedText from "../TruncatedText";
 import { CARD, type FormProps } from "./types";
 
 const EXCLUDE_SUGGESTIONS = [
@@ -55,26 +56,15 @@ export default function ExcludeCard({ form, update }: FormProps) {
   const { excludeItems, excludeMode, excludeText, excludeFiles } = form;
 
   const addExclude = () => {
-    const v = excludeInput.trim();
-    if (v && !excludeItems.includes(v)) {
-      update((p) => ({ excludeItems: [...p.excludeItems, v] }));
+    const next = withExcludeAdded(excludeItems, excludeInput);
+    if (next) {
+      update({ excludeItems: next });
       setExcludeInput("");
     }
   };
 
   const switchMode = (mode: ExcludeMode) => {
-    if (mode === excludeMode) return;
-    if (mode === "expert") {
-      update({ excludeText: excludeItems.join("\n"), excludeMode: mode });
-    } else {
-      // Leaving expert: fold the textarea back into the list so `excludeItems` is the single
-      // source of truth whenever expert isn't active.
-      const parsed = excludeText
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l && !l.startsWith("#"));
-      update({ excludeItems: [...new Set(parsed)], excludeMode: mode });
-    }
+    if (mode !== excludeMode) update(excludesAfterModeSwitch(form, mode));
   };
 
   const toggleSuggestion = (patterns: string[]) => {
@@ -82,7 +72,9 @@ export default function ExcludeCard({ form, update }: FormProps) {
     if (allPresent) {
       update((prev) => ({ excludeItems: prev.excludeItems.filter((p) => !patterns.includes(p)) }));
     } else {
-      update((prev) => ({ excludeItems: [...new Set([...prev.excludeItems, ...patterns])] }));
+      // Append only what's missing: a Set over the whole list would collapse repeated rules,
+      // and a later `!x` after an earlier `x` is meaning.
+      update((prev) => ({ excludeItems: [...prev.excludeItems, ...patterns.filter((p) => !prev.excludeItems.includes(p))] }));
     }
   };
 
@@ -144,7 +136,7 @@ export default function ExcludeCard({ form, update }: FormProps) {
 
           <div className="flex gap-2 mb-2">
             <Input
-              placeholder="e.g. *.log or node_modules/"
+              placeholder="e.g. *.log, node_modules/ or # a note"
               value={excludeInput}
               onChange={(e) => setExcludeInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addExclude())}
@@ -164,7 +156,11 @@ export default function ExcludeCard({ form, update }: FormProps) {
                   key={`${i}:${p}`}
                   className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
                 >
-                  <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                  {isCommentLine(p) ? (
+                    <TruncatedText as="span" text={p} className="text-xs italic text-gray-500 truncate" />
+                  ) : (
+                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
+                  )}
                   <button
                     onClick={() => update((prev) => ({ excludeItems: prev.excludeItems.filter((_, j) => j !== i) }))}
                     className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
@@ -186,7 +182,8 @@ export default function ExcludeCard({ form, update }: FormProps) {
         <>
           <p className="text-xs text-gray-500 mb-3">
             One pattern per line — same syntax as .gitignore. Lines starting with{" "}
-            <code className="text-gray-400">#</code> are comments.
+            <code className="text-gray-400">#</code> are comments: they are kept, never change what
+            is backed up, and show in the Simple list too.
           </p>
           <textarea
             value={excludeText}

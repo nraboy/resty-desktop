@@ -110,17 +110,43 @@ export function effectiveTags(f: PlanFormState): string[] {
   return pending && !f.tags.includes(pending) ? [...f.tags, pending] : f.tags;
 }
 
-/** The expert-mode textarea as the patterns it saves: trimmed, blanks and `#` comments dropped. */
-export function expertPatterns(text: string): string[] {
+/** Whether an exclude line is a `#` comment (restic and the backend ignore it; the editor keeps it). */
+export function isCommentLine(line: string): boolean {
+  return line.trim().startsWith("#");
+}
+
+/** The expert-mode textarea as the lines it saves: trimmed, blank lines dropped, comments and
+ * repeats kept, in order (`X`, `!X`, `X` means something). */
+export function expertLines(text: string): string[] {
   return text
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
+    .filter((l) => l !== "");
 }
 
-/** The exclude patterns that will be saved, in order. */
+/** The exclude lines that will be saved, in order. */
 export function savedExcludes(f: PlanFormState): string[] {
-  return f.excludeMode === "expert" ? expertPatterns(f.excludeText) : f.excludeItems;
+  return f.excludeMode === "expert" ? expertLines(f.excludeText) : f.excludeItems;
+}
+
+/** What changes when the exclude editor switches view: the list becomes the text, and the text
+ * folds back into the list line for line, so `excludeItems` is the source of truth whenever
+ * Expert isn't active. Nothing is de-duplicated or dropped but blank lines. */
+export function excludesAfterModeSwitch(
+  f: Pick<PlanFormState, "excludeItems" | "excludeText">,
+  mode: ExcludeMode,
+): Pick<PlanFormState, "excludeMode"> & Partial<Pick<PlanFormState, "excludeItems" | "excludeText">> {
+  return mode === "expert"
+    ? { excludeMode: mode, excludeText: f.excludeItems.join("\n") }
+    : { excludeMode: mode, excludeItems: expertLines(f.excludeText) };
+}
+
+/** The list with `input` appended, or null when there's nothing to add: a blank entry, or a
+ * pattern already listed. A comment may repeat — two notes can say the same thing. */
+export function withExcludeAdded(items: string[], input: string): string[] | null {
+  const v = input.trim();
+  if (!v || (!isCommentLine(v) && items.includes(v))) return null;
+  return [...items, v];
 }
 
 const toNum = (s: string): number | undefined => {
