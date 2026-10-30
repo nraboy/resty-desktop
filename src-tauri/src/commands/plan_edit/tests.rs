@@ -1278,9 +1278,163 @@ fn grow(rng: &mut rand::rngs::StdRng, dir: &std::path::Path, depth: usize, all: 
     }
 }
 
-/// Applies random include/exclude clicks to random plans on random trees and checks, with the
-/// real restic, that (a) restic agrees the clicked item ended up as asked and (b) the engine
-/// agrees with restic about every node. Needs `restic` on PATH:
+/// The number of cases and the seed of a differential run: `RESTY_DIFF_CASES` (default 80) and
+/// `RESTY_DIFF_SEED` (default 3).
+fn diff_cases_and_seed() -> (u64, u64) {
+    let var = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    (var("RESTY_DIFF_CASES", 80), var("RESTY_DIFF_SEED", 3))
+}
+
+/// A fresh restic repository under `base`, for dry runs.
+fn restic_repo(base: &std::path::Path) -> std::path::PathBuf {
+    let repo = base.join("repo");
+    let init = std::process::Command::new("restic").args(["init", "--repo"]).arg(&repo).env("RESTIC_PASSWORD", "pw").output().unwrap();
+    assert!(init.status.success(), "restic init: {}", String::from_utf8_lossy(&init.stderr));
+    repo
+}
+
+/// The patterns of a plan someone already wrote by hand over `nodes`: a few names, exact paths,
+/// "everything inside", re-includes and an extension.
+fn random_patterns(rng: &mut rand::rngs::StdRng, nodes: &[String]) -> Vec<String> {
+    use rand::Rng;
+    let mut excludes: Vec<String> = Vec::new();
+    for _ in 0..rng.gen_range(1..5) {
+        let n = &nodes[rng.gen_range(0..nodes.len())];
+        let name = n.rsplit('/').next().unwrap();
+        excludes.push(match rng.gen_range(0..5) {
+            0 => esc(name),
+            1 => esc(n),
+            2 => format!("{}/*", esc(n)),
+            3 => format!("!{}", esc(n)),
+            _ => "*.log".to_string(),
+        });
+    }
+    excludes
+}
+
+/// What restic includes when it is run the way the GUI runs it for `plan`: its patterns as
+/// `--exclude` flags (comments dropped, exactly as at backup time) over its sources.
+fn restic_plan(repo: &std::path::Path, plan: &TreeRulesInput, cwd: &std::path::Path) -> HashSet<String> {
+    let args = crate::commands::snapshot::build_exclude_args(&plan.excludes, &[], false);
+    restic_included(repo, &plan.sources, &args, cwd)
+}
+
+/// The engine's verdict on every node of `plan` matches restic's (`reported`).
+fn assert_engine_agrees(plan: &TreeRulesInput, nodes: &[String], reported: &HashSet<String>, ctx: &str) {
+    let read = |p: &str| std::fs::read_to_string(p);
+    let (engine, _) = build_engine(plan, &read, &no_env).unwrap();
+    for n in nodes {
+        assert_eq!(
+            engine.classify(n, &FsProbe::default()).included,
+            reported.contains(n),
+            "{ctx}: engine vs restic on {n}\nrules: {:?}",
+            plan.excludes
+        );
+    }
+}
+
+/// The click the UI makes on `target`. On an included item: a left click excludes it, or a quarter
+/// of the time the menu's "Exclude by pattern…" with its exact path or its name. On an excluded
+/// one: a left click includes it, or a quarter of the time the menu's "include everything inside
+/// it".
+fn ui_click(rng: &mut rand::rngs::StdRng, target: &str, included: bool) -> EditAction {
+    use rand::Rng;
+    let from_the_menu = rng.gen_range(0..4) == 0;
+    match (included, from_the_menu) {
+        (false, false) => include(target),
+        (false, true) => include_everything(target),
+        (true, false) => exclude_item(target),
+        (true, true) => {
+            let name = target.rsplit('/').next().unwrap();
+            exclude(target, &if rng.gen_range(0..2) == 0 { esc(target) } else { esc(name) })
+        }
+    }
+}
+
+/// Does `action` promise to change nothing but its target, what is inside it and the folders on
+/// the way down to it? Every click does. A pattern does only when it is the target's exact path,
+/// since a name pattern exists to match more.
+fn held_to_its_target(action: &EditAction) -> bool {
+    action.kind != "exclude" || action.pattern.as_deref() == Some(esc(&action.path).as_str())
+}
+
+/// The nodes restic judges differently in `before` and `after` that are not `target`, inside it,
+/// or a folder on the way down to it.
+fn collateral_nodes<'a>(nodes: &'a [String], target: &str, before: &HashSet<String>, after: &HashSet<String>) -> Vec<&'a str> {
+    nodes
+        .iter()
+        .filter(|n| strip_source(n, target).is_none() && strip_source(target, n).is_none())
+        .filter(|n| before.contains(*n) != after.contains(*n))
+        .map(String::as_str)
+        .collect()
+}
+
+/// The lines a click on `p` may delete: its exact rule, `!p`, and the `!A` / `A/*` scaffolding of
+/// each folder `A` on the way down to it. (A tree comment naming `p` may go too, when it sits
+/// directly above one of them.)
+fn own_lines(p: &str) -> Vec<String> {
+    let style = PathStyle::NATIVE;
+    let rule = exact_rule(style, p);
+    let mut own = vec![format!("!{rule}"), rule];
+    let mut level = p.to_string();
+    loop {
+        let parent = style.parent(&level);
+        if parent == level {
+            return own;
+        }
+        level = parent;
+        let a = exact_rule(style, &level);
+        own.push(format!("{}/*", a.trim_end_matches('/')));
+        own.push(format!("!{a}"));
+    }
+}
+
+/// Asserts that a click on `p` turned `before` into `o.excludes` only by deleting `p`'s own lines
+/// ([`own_lines`], and a tree comment naming `p` directly above a deleted one) and appending
+/// `o.added_rules` under one tree comment naming `p`: every other line is still there, in order,
+/// unchanged. Returns which lines of `before` were deleted.
+fn assert_only_own_lines_deleted(before: &[String], o: &EditOutcome, p: &str, ctx: &str) -> Vec<bool> {
+    let after = &o.excludes;
+    let names_p = |l: &str| comment_names(l, Verb::Included, p) || comment_names(l, Verb::Excluded, p);
+    let kept = if o.added_rules.is_empty() {
+        &after[..]
+    } else {
+        let start = after.len().checked_sub(o.added_rules.len() + 1).unwrap_or_else(|| panic!("{ctx}: {after:?}"));
+        assert_eq!(after[start + 1..], o.added_rules[..], "{ctx}: the added rules end the list");
+        assert!(names_p(&after[start]), "{ctx}: no tree comment for {p} above the added rules: {after:?}");
+        &after[..start]
+    };
+    let mut deleted = vec![false; before.len()];
+    let mut j = 0;
+    for (i, line) in before.iter().enumerate() {
+        if kept.get(j) == Some(line) {
+            j += 1;
+        } else {
+            deleted[i] = true;
+        }
+    }
+    assert_eq!(j, kept.len(), "{ctx}: lines were rewritten or moved\nbefore {before:?}\nafter  {after:?}");
+    let own = own_lines(p);
+    for (i, line) in before.iter().enumerate().filter(|&(i, _)| deleted[i]) {
+        let t = line.trim();
+        let allowed = own.iter().any(|r| r == t) || (names_p(t) && deleted.get(i + 1) == Some(&true));
+        assert!(allowed, "{ctx}: deleted {line:?}, which isn't {p}'s own\nbefore {before:?}\nafter  {after:?}");
+    }
+    deleted
+}
+
+/// A tree edit was refused. Refusing because it would change something else is never right for a
+/// click the UI offers (the engine must find an edit that doesn't), so that is a failure; any other
+/// refusal says the click is impossible (a marker, a rule the plan can't override, …).
+fn refused_as_impossible(err: &str, ctx: &str, plan: &TreeRulesInput) {
+    assert!(!err.contains("would also change"), "{ctx}: refused as collateral, which is an engine bug: {err}\nrules: {:?}", plan.excludes);
+}
+
+/// Applies random clicks to random plans on random trees and checks, with the real restic, that
+/// (a) restic agrees the clicked item ended up as asked, (b) the engine agrees with restic about
+/// every node and (c) nothing else changed: every node that is not the item, inside it or on the
+/// way down to it has the same restic verdict as before (not checked for a name pattern, which is
+/// meant to match more). The clicks are the UI's: see [`ui_click`]. Needs `restic` on PATH:
 /// `cargo test restic_confirms -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -1291,42 +1445,29 @@ fn restic_confirms_every_edit_the_engine_offers() {
         return;
     }
     let base = scratch("edits");
-    let repo = base.join("repo");
-    assert!(std::process::Command::new("restic").args(["init", "--repo"]).arg(&repo).env("RESTIC_PASSWORD", "pw").output().unwrap().status.success());
-
-    let cases: u64 = std::env::var("RESTY_DIFF_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(80);
-    let seed: u64 = std::env::var("RESTY_DIFF_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let repo = restic_repo(&base);
+    let (cases, seed) = diff_cases_and_seed();
+    let judge = crate::commands::test_support::restic_judges_sources();
+    let probe = FsProbe::default();
+    let read = |p: &str| std::fs::read_to_string(p);
     let (mut applied, mut refused, mut nodes_checked) = (0, 0, 0usize);
-    let mut by_kind: HashMap<&str, usize> = HashMap::new();
+    let mut by_kind: HashMap<String, usize> = HashMap::new();
     for case in 0..cases {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed * 1000 + case);
         let root = base.join(format!("t{case}"));
         std::fs::create_dir_all(&root).unwrap();
         let root = plain_canonical(&root);
-        let mut nodes = Vec::new();
-        grow(&mut rng, &root, 0, &mut nodes);
-        if nodes.is_empty() {
+        let mut paths = Vec::new();
+        grow(&mut rng, &root, 0, &mut paths);
+        if paths.is_empty() {
             continue;
         }
+        let nodes: Vec<String> = paths.iter().map(|p| canon(p.to_str().unwrap())).collect();
         let rs = canon(root.to_str().unwrap());
 
         // An existing plan: a few random patterns (names, exact paths, contents-of, a re-include).
-        let mut excludes: Vec<String> = Vec::new();
-        for _ in 0..rng.gen_range(1..5) {
-            let n = canon(nodes[rng.gen_range(0..nodes.len())].to_str().unwrap());
-            let name = n.rsplit('/').next().unwrap().to_string();
-            excludes.push(match rng.gen_range(0..5) {
-                0 => esc(&name),
-                1 => esc(&n),
-                2 => format!("{}/*", esc(&n)),
-                3 => format!("!{}", esc(&n)),
-                _ => "*.log".to_string(),
-            });
-        }
-        let judge = crate::commands::test_support::restic_judges_sources();
+        let excludes = random_patterns(&mut rng, &nodes);
         let plan = TreeRulesInput { sources: vec![rs.clone()], excludes: excludes.clone(), judge_sources: judge, ..Default::default() };
-        let probe = FsProbe::default();
-        let read = |p: &str| std::fs::read_to_string(p);
         let (before, _) = match build_engine(&plan, &read, &no_env) {
             Ok(x) => x,
             Err(_) => continue,
@@ -1334,62 +1475,222 @@ fn restic_confirms_every_edit_the_engine_offers() {
 
         // Mostly click things that are excluded (the interesting direction: re-including, often
         // from deep inside an excluded folder); sometimes click anything.
-        let excluded_nodes: Vec<&std::path::PathBuf> =
-            nodes.iter().filter(|p| !before.classify(p.to_str().unwrap(), &probe).included).collect();
+        let excluded_nodes: Vec<&String> = nodes.iter().filter(|p| !before.classify(p, &probe).included).collect();
         let target = if !excluded_nodes.is_empty() && rng.gen_range(0..10) < 7 {
-            canon(excluded_nodes[rng.gen_range(0..excluded_nodes.len())].to_str().unwrap())
+            excluded_nodes[rng.gen_range(0..excluded_nodes.len())].clone()
         } else {
-            canon(nodes[rng.gen_range(0..nodes.len())].to_str().unwrap())
+            nodes[rng.gen_range(0..nodes.len())].clone()
         };
         let target_included = before.classify(&target, &probe).included;
-        let name = target.rsplit('/').next().unwrap().to_string();
-        let action = if target_included {
-            let pattern = if rng.gen_range(0..2) == 0 { esc(&target) } else { esc(&name) };
-            exclude(&target, &pattern)
-        } else {
-            include(&target)
-        };
-        let kind = if target_included { "exclude" } else { "include" };
+        let action = ui_click(&mut rng, &target, target_included);
+        let ctx = format!("case {case} (seed {seed}): {} {target} {:?}", action.kind, action.pattern);
 
         let out = match apply_edit(&plan, &action, &probe, &read, &no_env) {
             Ok(o) => o,
-            Err(_) => {
+            Err(e) => {
+                refused_as_impossible(&e, &ctx, &plan);
                 refused += 1;
                 continue;
             }
         };
         applied += 1;
-        *by_kind.entry(kind).or_default() += 1;
+        *by_kind.entry(action.kind.clone()).or_default() += 1;
 
-        // What the GUI would run: the new patterns as --exclude flags over the new sources.
-        let args: Vec<String> = out.excludes.iter().flat_map(|p| ["--exclude".to_string(), p.clone()]).collect();
-        let reported = restic_included(&repo, &out.sources, &args, &base);
+        // What the GUI would run, before and after: the patterns as --exclude flags over the sources.
+        let reported_before = restic_plan(&repo, &plan, &base);
+        let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..plan.clone() };
+        let reported = restic_plan(&repo, &after_plan, &base);
         let want = !target_included; // include flips it in, exclude flips it out
         assert_eq!(
             reported.contains(&target),
             want,
-            "case {case} (seed {seed}): {kind} {target}\nbefore: {excludes:?}\nafter:  {:?}\nsources {:?}",
+            "{ctx}\nbefore: {excludes:?}\nafter:  {:?}\nsources {:?}",
             out.excludes,
             out.sources
         );
 
-        // And the engine still agrees with restic about every node.
-        let after_plan = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), judge_sources: judge, ..Default::default() };
-        let (after, _) = build_engine(&after_plan, &read, &no_env).unwrap();
-        for node in nodes.iter().filter(|p| p.exists()) {
-            let p = canon(node.to_str().unwrap());
-            let p = p.as_str();
-            assert_eq!(
-                after.classify(p, &probe).included,
-                reported.contains(p),
-                "case {case} (seed {seed}): engine vs restic on {p}\nrules: {:?}",
-                out.excludes
-            );
-            nodes_checked += 1;
+        // The engine still agrees with restic about every node…
+        assert_engine_agrees(&after_plan, &nodes, &reported, &ctx);
+        nodes_checked += nodes.len();
+
+        // …and nothing but the item, what is inside it and the way down to it changed.
+        if held_to_its_target(&action) {
+            let hit = collateral_nodes(&nodes, &target, &reported_before, &reported);
+            assert!(hit.is_empty(), "{ctx}: also changed {hit:?}\nbefore: {excludes:?}\nafter:  {:?}", out.excludes);
         }
     }
     eprintln!("restic confirmed {applied} edits ({by_kind:?}; {refused} refused as impossible), {nodes_checked} nodes agree");
     assert!(applied > 0);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// One click of a sequence, kept to check the next click on the same item against it.
+struct Click {
+    target: String,
+    action: EditAction,
+    /// The plan's patterns before the click, and which of them it deleted.
+    before: Vec<String>,
+    deleted: Vec<bool>,
+    outcome: EditOutcome,
+    /// What restic included before the click.
+    reported_before: HashSet<String>,
+}
+
+/// How a click and the inverse click on the same item came back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RoundTrip {
+    /// The exact rule list the first click started from, comments included.
+    Identical,
+    /// The same patterns (the first click deleted lines from the end, the second wrote them back,
+    /// under its own comment).
+    SameRules,
+    /// The same included set (the first click deleted lines the second can't put back in place).
+    SameSet,
+    /// Neither applies (see [`check_round_trip`]); the item is in the state the second click asked
+    /// for, which every click is checked for.
+    StateOnly,
+}
+
+/// Checks a click (`first`) followed by the inverse click on the same item (`second`, which left
+/// restic including `reported`):
+/// - the first click only appended rules: the second deletes exactly them, so the rule list is the
+///   one the first started from, comments included;
+/// - it deleted lines from the end of the list, no two of them alike, and the second only
+///   appended: the same patterns (two copies of one line would come back as one);
+/// - an include that deleted lines anywhere else (or deleted a dead exact line and added `!P`): the
+///   same included set, when no `!` line comes after a deleted one (a hand-written line in the middle
+///   can't be put back in place, and moving an exclude past a `!` would change what that `!` does);
+/// - an excludeItem that deleted lines the include can't write back (a re-include that is not the
+///   last line, or `!P` where the include deletes P's exact line instead): only the state.
+fn check_round_trip(first: &Click, second: &EditOutcome, reported: &HashSet<String>, ctx: &str) -> RoundTrip {
+    let (l0, o1) = (&first.before, &first.outcome);
+    let l2 = &second.excludes;
+    let what = || format!("{ctx}: {} then the inverse\nstart:  {l0:?}\nfirst:  {:?}\nsecond: {l2:?}", first.action.kind, o1.excludes);
+    if !held_to_its_target(&first.action) {
+        return RoundTrip::StateOnly; // a name pattern is not what a click on the item undoes
+    }
+    if o1.removed_rules.is_empty() {
+        assert_eq!(l2, l0, "{}", what());
+        return RoundTrip::Identical;
+    }
+    let mut once = o1.removed_rules.clone();
+    once.sort();
+    once.dedup();
+    let from_the_end = o1.added_rules.is_empty() && l0.starts_with(&o1.excludes);
+    if from_the_end && second.removed_rules.is_empty() && once.len() == o1.removed_rules.len() {
+        assert_eq!(patterns(l2), patterns(l0), "{}", what());
+        return RoundTrip::SameRules;
+    }
+    if first.action.kind == "include" {
+        let first_deleted = first.deleted.iter().position(|&d| d).unwrap();
+        if !l0[first_deleted..].iter().any(|l| l.trim_start().starts_with('!')) {
+            let (start, end) = (&first.reported_before, reported);
+            assert_eq!(start, end, "{}\nincluded only at the start: {:?}\nonly at the end: {:?}", what(), start.difference(end).collect::<Vec<_>>(), end.difference(start).collect::<Vec<_>>());
+            return RoundTrip::SameSet;
+        }
+    }
+    RoundTrip::StateOnly
+}
+
+/// Runs of 2–6 clicks per case on random plans over random trees, each click starting from the plan
+/// the one before it left, and checked with the real restic after every click: the item ended up
+/// as asked, the engine agrees with restic about every node, nothing else changed (as in
+/// [`restic_confirms_every_edit_the_engine_offers`]), and the click deleted only the item's own lines
+/// (every other line is still there, in order). Half the time the next click is the inverse click
+/// on the same item (a left click on it again), and the pair must come back to where it started
+/// ([`check_round_trip`]). Some plans start with a comment of the user's. Needs `restic` on PATH:
+/// `cargo test restic_confirms -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn restic_confirms_click_sequences() {
+    use rand::{Rng, SeedableRng};
+    if !restic_available() {
+        eprintln!("restic not found on PATH; skipping");
+        return;
+    }
+    let base = scratch("sequences");
+    let repo = restic_repo(&base);
+    let (cases, seed) = diff_cases_and_seed();
+    let judge = crate::commands::test_support::restic_judges_sources();
+    let probe = FsProbe::default();
+    let read = |p: &str| std::fs::read_to_string(p);
+    let (mut applied, mut refused, mut nodes_checked) = (0, 0, 0usize);
+    let mut by_kind: HashMap<String, usize> = HashMap::new();
+    let mut round_trips: HashMap<RoundTrip, usize> = HashMap::new();
+    for case in 0..cases {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(500_000 + seed * 1000 + case);
+        let root = base.join(format!("t{case}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = plain_canonical(&root);
+        let mut paths = Vec::new();
+        grow(&mut rng, &root, 0, &mut paths);
+        if paths.is_empty() {
+            continue;
+        }
+        let nodes: Vec<String> = paths.iter().map(|p| canon(p.to_str().unwrap())).collect();
+
+        let mut excludes = random_patterns(&mut rng, &nodes);
+        if rng.gen_range(0..3) == 0 {
+            let at = rng.gen_range(0..=excludes.len());
+            excludes.insert(at, "# my own note".to_string());
+        }
+        let mut plan = TreeRulesInput { sources: vec![canon(root.to_str().unwrap())], excludes, judge_sources: judge, ..Default::default() };
+        if build_engine(&plan, &read, &no_env).is_err() {
+            continue;
+        }
+        let mut reported = restic_plan(&repo, &plan, &base);
+        assert_engine_agrees(&plan, &nodes, &reported, &format!("case {case} (seed {seed}) at the start"));
+
+        let mut prev: Option<Click> = None;
+        for step in 0..rng.gen_range(2..=6) {
+            let (engine, _) = build_engine(&plan, &read, &no_env).unwrap();
+            let again = prev.as_ref().map(|c| c.target.clone()).filter(|_| rng.gen_range(0..2) == 0);
+            let inverse = again.is_some();
+            let target = again.unwrap_or_else(|| nodes[rng.gen_range(0..nodes.len())].clone());
+            let included = engine.classify(&target, &probe).included;
+            let action = match (inverse, included) {
+                (true, true) => exclude_item(&target),
+                (true, false) => include(&target),
+                (false, _) => ui_click(&mut rng, &target, included),
+            };
+            let ctx = format!("case {case} step {step} (seed {seed}): {} {target} {:?}", action.kind, action.pattern);
+            let out = match apply_edit(&plan, &action, &probe, &read, &no_env) {
+                Ok(o) => o,
+                Err(e) => {
+                    refused_as_impossible(&e, &ctx, &plan);
+                    refused += 1;
+                    prev = None;
+                    continue;
+                }
+            };
+            applied += 1;
+            *by_kind.entry(action.kind.clone()).or_default() += 1;
+
+            let next = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..plan.clone() };
+            let after = restic_plan(&repo, &next, &base);
+            let ctx = format!("{ctx}\nbefore: {:?}\nafter:  {:?}", plan.excludes, out.excludes);
+            assert_eq!(after.contains(&target), !included, "{ctx}: the item isn't as asked");
+            assert_engine_agrees(&next, &nodes, &after, &ctx);
+            nodes_checked += nodes.len();
+            if held_to_its_target(&action) {
+                let hit = collateral_nodes(&nodes, &target, &reported, &after);
+                assert!(hit.is_empty(), "{ctx}: also changed {hit:?}");
+            }
+            let deleted = assert_only_own_lines_deleted(&plan.excludes, &out, &target, &ctx);
+            if let Some(first) = prev.as_ref().filter(|_| inverse) {
+                *round_trips.entry(check_round_trip(first, &out, &after, &ctx)).or_default() += 1;
+            }
+            prev = Some(Click { target, action, before: plan.excludes.clone(), deleted, outcome: out, reported_before: reported });
+            plan = next;
+            reported = after;
+        }
+    }
+    eprintln!(
+        "restic confirmed {applied} clicks in {cases} sequences ({by_kind:?}; {refused} refused as impossible), \
+         {} round trips {round_trips:?}, {nodes_checked} nodes agree",
+        round_trips.values().sum::<usize>()
+    );
+    assert!(applied > 0 && !round_trips.is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
 
