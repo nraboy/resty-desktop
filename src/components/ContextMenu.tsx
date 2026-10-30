@@ -44,8 +44,8 @@ export default function ContextMenu({ x, y, items, onClose }: Props) {
 
   useEffect(() => {
     const onMouseDown = () => onClose();
-    // Escape (and Tab, below) close the menu and give focus back to where it came from. Choosing
-    // an item deliberately does not: its action may open a dialog that must keep the focus it takes.
+    // Escape (and Tab and choosing an item, below) close the menu and give focus back to where it
+    // came from.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         onClose();
@@ -104,7 +104,10 @@ export default function ContextMenu({ x, y, items, onClose }: Props) {
             role="menuitem"
             tabIndex={-1}
             disabled={item.disabled}
-            onClick={() => { onClose(); item.onClick?.(); }}
+            // Focus goes back to the opener *before* the action runs, so a dialog the action opens
+            // (Modal remembers what had focus) hands it back there on close, not to the page.
+            // An opener that is gone (or the body) simply doesn't take it.
+            onClick={() => { onClose(); opener.current?.focus(); item.onClick?.(); }}
             // The focus ring is inset so it stays inside the menu's rounded border; keyboard focus
             // gets the hover look too. focus-visible (not focus) keeps a right-click-opened menu
             // looking exactly as it did before.

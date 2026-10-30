@@ -45,7 +45,7 @@ src/
     AppendOnlyField.tsx   # "Append-only server" checkbox + info tooltip, for `rest:http(s)` paths only — see docs/frontend.md
     BackupWarningsList.tsx # Shared detail view for a backup that completed with warnings (restic exit 3): missing sources first, unreadable files, retention-skipped note, macOS FDA hint — see docs/frontend.md
     Button.tsx            # primary/secondary/danger/ghost variants
-    ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen; keyboard-operable (focus, arrows/Home/End, Enter/Space, Escape/Tab) — see docs/frontend.md
+    ContextMenu.tsx       # Portal-rendered right-click menu; auto-nudges onto screen; keyboard-operable (focus, arrows/Home/End, Enter/Space, Escape/Tab; closing or choosing an item gives focus back to the opener) — see docs/frontend.md
     EmptyState.tsx        # Empty list placeholder
     icons.tsx             # Canonical glyph icons — single source for every icon used in more than one place; same meaning = same drawing
     ImportExportCard.tsx  # Settings card: export/import bundle + Backrest config.json — see docs/data.md
