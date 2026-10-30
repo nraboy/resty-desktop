@@ -1144,20 +1144,21 @@ fn brought_back_also_counts_for_a_carve_out_that_ends_in_a_folder() {
 fn count_brought_back_counts_a_rejected_folder_once_and_stops_at_its_cap() {
     let t = Tree::new("brought-back-count", &["sub/junk.tmp/a.tmp", "sub/junk.tmp/b.tmp", "sub/1.tmp", "sub/2.tmp", "sub/ok.txt"]);
     let others = engine_of(&real_input(&[&t.root], &lines_of(&["*.tmp"])));
+    let after = engine_of(&real_input(&[&t.root], &["*.tmp".to_string(), format!("!{}", t.rule("sub"))]));
     let probe = MockProbe::default();
     let roomy = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1000 };
-    let all = count_brought_back(&others, &probe, &t.at("sub"), roomy);
+    let all = count_brought_back(&others, &after, &probe, &t.at("sub"), roomy);
     assert_eq!((all.count, all.capped), (3, false), "junk.tmp (once), 1.tmp and 2.tmp: {all:?}");
     assert!(all.sample.len() <= all.count as usize && !all.sample.is_empty());
 
     let tight = ScanLimits { max_entries: 2, ..roomy };
-    let some = count_brought_back(&others, &probe, &t.at("sub"), tight);
+    let some = count_brought_back(&others, &after, &probe, &t.at("sub"), tight);
     assert!(some.capped, "{some:?}");
     assert!(some.count < 3, "a capped count is a lower bound: {some:?}");
 
     // Without rules there is nothing to bring back.
     let none = engine_of(&real_input(&[&t.root], &[]));
-    assert_eq!(count_brought_back(&none, &probe, &t.at("sub"), roomy).count, 0);
+    assert_eq!(count_brought_back(&none, &none, &probe, &t.at("sub"), roomy).count, 0);
 }
 
 #[test]
@@ -1171,14 +1172,17 @@ fn brought_back_leaves_out_what_a_marker_file_hides() {
     let probe = FsProbe::default();
     let roomy = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1000 };
 
+    let reinclude = format!("!{}", t.rule("sub"));
     let others = engine_of(&marked(lines_of(&["*.tmp"])));
+    let after = engine_of(&marked(vec!["*.tmp".to_string(), reinclude.clone()]));
     assert!(others.judge_node(&t.at("sub/cache/x.txt"), &probe).is_some(), "the marker does hide x.txt");
-    let found = count_brought_back(&others, &probe, &t.at("sub"), roomy);
+    let found = count_brought_back(&others, &after, &probe, &t.at("sub"), roomy);
     assert_eq!((found.count, found.capped), (1, false), "only e.tmp is a pattern's doing: {found:?}");
 
     // Only markers hide anything: nothing for a `!` to bring back.
     let only_marker = engine_of(&marked(vec![]));
-    assert_eq!(count_brought_back(&only_marker, &probe, &t.at("sub"), roomy).count, 0);
+    let only_marker_after = engine_of(&marked(vec![reinclude]));
+    assert_eq!(count_brought_back(&only_marker, &only_marker_after, &probe, &t.at("sub"), roomy).count, 0);
 
     // And through the edit itself.
     let i = marked(lines_of(&["*.tmp", "sub"]));
@@ -1187,6 +1191,42 @@ fn brought_back_leaves_out_what_a_marker_file_hides() {
     assert_eq!(o.brought_back, Some(BroughtBack { count: 1, capped: false }));
     let i = marked(lines_of(&["sub"]));
     assert_eq!(apply_edit(&i, &action, &probe, &no_read, &no_env).unwrap().brought_back, None);
+}
+
+#[test]
+fn brought_back_leaves_out_what_an_exclude_file_still_hides() {
+    // The `!` on `sub` goes after the plan's own patterns but before every exclude file's lines,
+    // and case-insensitive rules are a list of their own: what those hide inside `sub` stays out.
+    let t = Tree::new("brought-back-file", &["sub/c.txt", "sub/e.tmp", "sub/d.log"]);
+    let sub = t.at("sub");
+    let run = |excludes: &[&str], file: &str, ignore_case: bool| {
+        let i = TreeRulesInput {
+            exclude_files: vec![crate::commands::cache::ExcludeFile { path: "/rules.txt".into(), ignore_case }],
+            ..real_input(&[&t.root], &lines_of(excludes))
+        };
+        let read = |p: &str| if p == "/rules.txt" { Ok(file.to_string()) } else { Err(std::io::Error::other("missing")) };
+        let o = apply_edit(&i, &include(&sub), &MockProbe::default(), &read, &no_env).unwrap();
+        assert_eq!(o.added_rules.last().map(String::as_str), Some(format!("!{}", t.rule("sub")).as_str()), "{o:?}");
+        o.brought_back
+    };
+    // Only an exclude file hides anything inside `sub`: nothing comes back with it.
+    assert_eq!(run(&["sub"], "*.tmp\n", false), None);
+    assert_eq!(run(&["sub"], "*.tmp\n", true), None);
+    // The plan's own `*.log` is overridden by the `!` and counted; the file's `*.tmp` is not.
+    assert_eq!(run(&["*.log", "sub"], "*.tmp\n", false), Some(BroughtBack { count: 1, capped: false }));
+}
+
+#[test]
+fn brought_back_leaves_out_a_pattern_match_a_marker_file_also_hides() {
+    // y.tmp matches the plan's `*.tmp`, which the `!` overrides, but the marker beside it still
+    // hides it; e.tmp, which only `*.tmp` hides, does come back.
+    let t = Tree::new("brought-back-both", &["sub/e.tmp", "sub/cache/.nobackup", "sub/cache/y.tmp"]);
+    let i = TreeRulesInput {
+        exclude_if_present: vec![".nobackup".to_string()],
+        ..real_input(&[&t.root], &lines_of(&["*.tmp", "sub"]))
+    };
+    let o = apply_edit(&i, &include(&t.at("sub")), &FsProbe::default(), &no_read, &no_env).unwrap();
+    assert_eq!(o.brought_back, Some(BroughtBack { count: 1, capped: false }));
 }
 
 // ── against the real restic ─────────────────────────────────────────────────

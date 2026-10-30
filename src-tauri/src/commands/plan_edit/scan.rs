@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::commands::plan_rules::{strip_source, Engine, Probe, Reason};
+use crate::commands::plan_rules::{strip_source, Engine, Probe};
 use crate::commands::plan_tree::{MatchPreview, ScanLimits};
 
 /// What one click may spend on the scans above.
@@ -89,13 +89,22 @@ pub(crate) fn find_collateral(
     None
 }
 
-/// How many items inside `folder` a pattern of `others` would leave out: a `!` on `folder`
-/// re-includes those too (restic lets a `!` win over every earlier rule about anything below it).
-/// A folder a pattern rejects counts once and is not entered. Items a marker file hides
-/// (`--exclude-if-present`, `--exclude-caches`) are not counted: markers are checked apart from the
-/// patterns, so a `!` leaves them out. The count stops at [`BROUGHT_BACK_CAP`] or `limits`
-/// (`capped`: there are at least that many).
-pub(crate) fn count_brought_back(others: &Engine, probe: &dyn Probe, folder: &str, limits: ScanLimits) -> MatchPreview {
+/// How many items inside `folder` the `!` on it brought back: items `others` (the plan's rules
+/// without the ones that excluded `folder` itself) leaves out and `after` (the plan with the `!`)
+/// backs up. A `!` wins over every earlier rule about anything below it, but not over what it
+/// can't reach: exclude-file lines (applied after the plan's own patterns), case-insensitive
+/// rules (a list of their own) and marker files (`--exclude-if-present`, `--exclude-caches`,
+/// checked apart from the patterns). What those still hide is not counted: each item is judged by
+/// `after`, which sees all of them. A folder `others` rejects counts once at most and is not
+/// entered. The count stops at [`BROUGHT_BACK_CAP`] or `limits` (`capped`: there are
+/// at least that many).
+pub(crate) fn count_brought_back(
+    others: &Engine,
+    after: &Engine,
+    probe: &dyn Probe,
+    folder: &str,
+    limits: ScanLimits,
+) -> MatchPreview {
     let mut out = MatchPreview { count: 0, sample: vec![], capped: false };
     if !others.has_rules() {
         return out;
@@ -114,12 +123,8 @@ pub(crate) fn count_brought_back(others: &Engine, probe: &dyn Probe, folder: &st
             }
             let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
             let path = style.join(&current, &name);
-            match others.judge_node(&path, probe) {
-                None => {}
-                // A marker file beside it hides it whatever the patterns say: a `!` can't bring
-                // it back, so it isn't counted (and nothing below it is reachable either).
-                Some(Reason::Marker { .. } | Reason::OutsideSources) => continue,
-                Some(Reason::Pattern { .. }) => {
+            if others.judge_node(&path, probe).is_some() {
+                if after.classify(&path, probe).included {
                     out.count += 1;
                     if out.sample.len() < BROUGHT_BACK_SAMPLE {
                         out.sample.push(path);
@@ -128,8 +133,8 @@ pub(crate) fn count_brought_back(others: &Engine, probe: &dyn Probe, folder: &st
                         out.capped = true;
                         return out;
                     }
-                    continue; // left out with everything below it
                 }
+                continue; // back with everything below it, or still out with it
             }
             if ent.file_type().is_ok_and(|t| t.is_dir()) {
                 queue.push_back(path);

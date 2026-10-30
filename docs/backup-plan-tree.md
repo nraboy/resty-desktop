@@ -366,8 +366,10 @@ exists to match many items) and edits that add or remove sources.
 **Brought-back count** (`scan.rs::count_brought_back`). By F1 a `!` on a *folder* also brings back items
 inside it that other rules exclude. That is accepted, and disclosed: when the last added rule is the `!`
 on a folder, the plan without the lines that matched the folder itself is walked (cap 5000, same budget)
-and `broughtBack { count, capped }` goes into the Undo line. Items hidden by a marker file don't count
-(advisory number; an item both pattern-matched and inside a marker-hidden folder is still counted).
+and `broughtBack { count, capped }` goes into the Undo line. An item counts only when that plan leaves
+it out **and** the plan after the edit includes it: what an exclude-file line (applied after the plan's
+own patterns), a case-insensitive rule or a marker file still hides is not brought back by the `!`, so
+it isn't counted, even when a plan pattern matches it too.
 
 **Every edit is verified by the engine** (`plan_edit.rs::apply_edit`) after being applied to a copy of the
 plan: the clicked item must really end up as asked, otherwise the click is refused with a reason — an

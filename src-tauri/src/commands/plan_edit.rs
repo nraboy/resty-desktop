@@ -203,13 +203,12 @@ fn refuse_collateral(
 }
 
 /// What a `!` on a folder brought back: the items inside it that the plan's other rules exclude
-/// (a `!` wins over every earlier rule about anything below it). Only an edit whose last new rule
-/// is the `!` on `path`, and only when `path` is a folder, brings anything back. The items are
-/// judged by the plan's rules as they were before the edit, leaving out the ones that matched
-/// `path` itself (they excluded the folder; they don't hide things inside it). `None` when nothing
-/// came back.
-///
-/// The sources don't matter to the count, so `before` stands in for the plan after the edit.
+/// and the plan after the edit includes (a `!` wins over every earlier rule about anything below
+/// it, but not over an exclude file's lines, a case-insensitive rule or a marker file). Only an
+/// edit whose last new rule is the `!` on `path`, and only when `path` is a folder, brings anything
+/// back. "Other rules" are the plan's rules as they were before the edit, leaving out the ones that
+/// matched `path` itself (they excluded the folder; they don't hide things inside it). `None` when
+/// nothing came back.
 fn brought_back(
     before: &TreeRulesInput,
     out: &EditOutcome,
@@ -231,7 +230,9 @@ fn brought_back(
         t.is_empty() || t.starts_with('#') || !pattern_matches_styled(t, path, style).unwrap_or(false)
     });
     let (engine, _) = build_engine(&others, read, getenv)?;
-    let found = count_brought_back(&engine, probe, path, limits);
+    let after = TreeRulesInput { sources: out.sources.clone(), excludes: out.excludes.clone(), ..before.clone() };
+    let (after, _) = build_engine(&after, read, getenv)?;
+    let found = count_brought_back(&engine, &after, probe, path, limits);
     Ok((found.count > 0).then_some(BroughtBack { count: found.count, capped: found.capped }))
 }
 
