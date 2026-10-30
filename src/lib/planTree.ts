@@ -411,6 +411,65 @@ export function boxClick(isSource: boolean, verdict: NodeVerdict | undefined): B
   return verdict.reason?.kind === "outsideSources" ? "addSource" : "dialog";
 }
 
+/** What a left-click on a row's box does. */
+export type LeftClick = "removeSource" | "addSource" | "exclude" | "include";
+
+/** The single action a click on a row performs: a source toggles off; an item outside every source
+ * becomes one; anything else inside a source flips — an included item is excluded, an excluded
+ * one included. Which rules that takes is the backend's call (`tree_plan_edit`). */
+export function leftClick(isSource: boolean, verdict: NodeVerdict | undefined): LeftClick {
+  if (isSource) return "removeSource";
+  if (!verdict || verdict.included) return "exclude";
+  return verdict.reason?.kind === "outsideSources" ? "addSource" : "include";
+}
+
+/** Everything the right-click menu can do: the left-click's action, plus the two that need a
+ * deliberate choice (a pattern to write, or everything inside a folder). */
+export type MenuAction = LeftClick | "excludeByPattern" | "includeEverything";
+
+export interface MenuEntry {
+  action: MenuAction;
+  label: string;
+}
+
+/**
+ * The right-click menu for a row. The first entry is always the left-click's action, so a
+ * right-click is never dead and never at odds with the click. `exactRule` says the plan's own
+ * pattern list holds a line that is exactly this path (`hasExactRule`).
+ */
+export function menuEntries(a: {
+  isSource: boolean;
+  verdict: NodeVerdict | undefined;
+  state: DisplayState;
+  kind: SourceKind;
+  exactRule: boolean;
+}): MenuEntry[] {
+  const first = leftClick(a.isSource, a.verdict);
+  const what = a.kind === "dir" ? "folder" : "file";
+  switch (first) {
+    case "removeSource":
+      return [{ action: first, label: `Stop backing up this ${what}` }];
+    case "addSource":
+      return [{ action: first, label: `Back up this ${what}` }];
+    case "include": {
+      const out: MenuEntry[] = [{ action: "include", label: "Include" }];
+      // The plain click would only delete the exact line; this keeps it and re-includes with `!P`.
+      if (a.kind === "dir" && a.exactRule) {
+        out.push({ action: "includeEverything", label: "Include, plus everything inside it that other rules exclude" });
+      }
+      return out;
+    }
+    case "exclude": {
+      const out: MenuEntry[] = [
+        { action: "exclude", label: "Exclude" },
+        { action: "excludeByPattern", label: "Exclude by pattern…" },
+      ];
+      if (a.state === "partial") out.push({ action: "includeEverything", label: "Include everything inside it" });
+      return out;
+    }
+  }
+}
+
 /** Every ancestor folder of `path`, from its root down (excluding `path` itself). */
 export function ancestorsOf(path: string): string[] {
   const root = rootOf(path);

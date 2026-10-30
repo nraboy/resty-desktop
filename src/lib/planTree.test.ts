@@ -13,13 +13,17 @@ import {
   flattenRows,
   hiddenNoteText,
   hiddenSummary,
+  leftClick,
+  menuEntries,
   pinnedPaths,
   reasonLines,
   relativeTo,
   topLevelSources,
   visibleWindow,
+  type DisplayState,
   type NodeInfo,
   type NodeVerdict,
+  type SourceKind,
   type RuleOrigin,
   type ScanResult,
 } from "./planTree";
@@ -293,5 +297,109 @@ describe("boxClick", () => {
     expect(boxClick(false, verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" }))).toBe("dialog");
     expect(boxClick(false, verdict({ included: false, reason: { kind: "marker", spec: "x" } }))).toBe("dialog");
     expect(boxClick(false, undefined)).toBe("dialog");
+  });
+});
+
+describe("leftClick", () => {
+  const outside = verdict({ included: false, reason: { kind: "outsideSources" } });
+  const excludedInside = verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" });
+
+  it("removes a source in one click", () => {
+    expect(leftClick(true, verdict())).toBe("removeSource");
+    // Whatever the verdict says, a source row is a source row.
+    expect(leftClick(true, undefined)).toBe("removeSource");
+  });
+
+  it("adds an item outside every source, including a folder above one", () => {
+    expect(leftClick(false, outside)).toBe("addSource");
+    expect(leftClick(false, verdict({ included: false, containsSources: true, reason: { kind: "outsideSources" } }))).toBe("addSource");
+  });
+
+  it("includes an excluded item inside a source, whatever excluded it", () => {
+    expect(leftClick(false, excludedInside)).toBe("include");
+    expect(leftClick(false, verdict({ included: false, reason: { kind: "marker", spec: "x" } }))).toBe("include");
+    expect(leftClick(false, verdict({ included: false }))).toBe("include");
+  });
+
+  it("excludes an included item, and an item whose verdict has not arrived", () => {
+    expect(leftClick(false, verdict())).toBe("exclude");
+    expect(leftClick(false, undefined)).toBe("exclude");
+  });
+});
+
+describe("menuEntries", () => {
+  const outside = verdict({ included: false, reason: { kind: "outsideSources" } });
+  const excluded = verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" });
+  type Args = Parameters<typeof menuEntries>[0];
+  const entries = (over: Partial<Args> = {}) =>
+    menuEntries({ isSource: false, verdict: verdict(), state: "included", kind: "dir", exactRule: false, ...over });
+  const actions = (over: Partial<Args> = {}) => entries(over).map((e) => e.action);
+
+  it("offers Exclude and Exclude by pattern for an included item", () => {
+    expect(actions()).toEqual(["exclude", "excludeByPattern"]);
+    expect(actions({ kind: "file" })).toEqual(["exclude", "excludeByPattern"]);
+    expect(entries().map((e) => e.label)).toEqual(["Exclude", "Exclude by pattern…"]);
+  });
+
+  it("offers them while the verdict or the folder scan is still pending", () => {
+    expect(actions({ verdict: undefined, state: "pending" })).toEqual(["exclude", "excludeByPattern"]);
+    expect(actions({ state: "pending" })).toEqual(["exclude", "excludeByPattern"]);
+    expect(actions({ state: "unverified" })).toEqual(["exclude", "excludeByPattern"]);
+  });
+
+  it("adds Include everything inside it for a partly included folder", () => {
+    expect(actions({ state: "partial" })).toEqual(["exclude", "excludeByPattern", "includeEverything"]);
+    expect(entries({ state: "partial" })[2].label).toBe("Include everything inside it");
+    // A folder with nothing excluded inside is not offered it.
+    expect(actions({ state: "included" })).not.toContain("includeEverything");
+  });
+
+  it("offers just Include for an excluded file, even if its path has an exact rule", () => {
+    expect(actions({ verdict: excluded, state: "excluded", kind: "file" })).toEqual(["include"]);
+    expect(actions({ verdict: excluded, state: "excluded", kind: "file", exactRule: true })).toEqual(["include"]);
+    expect(entries({ verdict: excluded, state: "excluded", kind: "file" })[0].label).toBe("Include");
+  });
+
+  it("offers just Include for an excluded folder with no exact rule of its own", () => {
+    expect(actions({ verdict: excluded, state: "excluded" })).toEqual(["include"]);
+  });
+
+  it("adds the include-everything variant for an excluded folder with an exact rule", () => {
+    const e = entries({ verdict: excluded, state: "excluded", exactRule: true });
+    expect(e.map((x) => x.action)).toEqual(["include", "includeEverything"]);
+    expect(e[1].label).toBe("Include, plus everything inside it that other rules exclude");
+  });
+
+  it("offers the one source action for a source, and for an item outside every source", () => {
+    expect(entries({ isSource: true })).toEqual([{ action: "removeSource", label: "Stop backing up this folder" }]);
+    expect(entries({ isSource: true, kind: "file" })).toEqual([{ action: "removeSource", label: "Stop backing up this file" }]);
+    expect(entries({ verdict: outside, state: "excluded" })).toEqual([{ action: "addSource", label: "Back up this folder" }]);
+    expect(entries({ verdict: outside, state: "excluded", kind: "file" })).toEqual([
+      { action: "addSource", label: "Back up this file" },
+    ]);
+    // A folder above a source: not backed up itself, but adding it is still the single action.
+    const above = verdict({ included: false, containsSources: true, reason: { kind: "outsideSources" } });
+    expect(actions({ verdict: above, state: "contains" })).toEqual(["addSource"]);
+    // The source options ignore the exact-rule and partial hints.
+    expect(actions({ isSource: true, state: "partial", exactRule: true })).toEqual(["removeSource"]);
+  });
+
+  it("makes the first entry the left-click, so a right-click is never at odds with it", () => {
+    const verdicts = [undefined, verdict(), excluded, outside, verdict({ included: false, containsSources: true, reason: { kind: "outsideSources" } })];
+    const states: DisplayState[] = ["included", "partial", "excluded", "contains", "unverified", "pending"];
+    const kinds: SourceKind[] = ["dir", "file", "symlink", "other", "missing"];
+    for (const isSource of [true, false]) {
+      for (const v of verdicts) {
+        for (const state of states) {
+          for (const kind of kinds) {
+            for (const exactRule of [true, false]) {
+              const list = menuEntries({ isSource, verdict: v, state, kind, exactRule });
+              expect(list.length).toBeGreaterThan(0);
+              expect(list[0].action).toBe(leftClick(isSource, v));
+            }
+          }
+        }
+      }
+    }
   });
 });

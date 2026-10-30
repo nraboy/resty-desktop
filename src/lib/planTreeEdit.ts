@@ -10,15 +10,23 @@ export interface EditOutcome {
   sources: string[];
   excludes: string[];
   addedRules: string[];
+  /** Real patterns the edit deleted (an add-source edit can return these with no `addedRules`).
+   * Neither list ever holds the `# Tree: …` comment lines that `excludes` may. */
+  removedRules: string[];
   addedSources: string[];
   removedSources: string[];
+  /** Items inside a re-included folder that other rules had excluded and that came back with it.
+   * Absent or null when nothing did. */
+  broughtBack?: { count: number; capped: boolean } | null;
 }
 
+/** `exclude` adds `pattern`; `excludeItem` excludes exactly `path`; `include` re-includes `path`;
+ * `includeEverything` also brings back what other rules exclude inside it. */
 export interface EditAction {
-  kind: "exclude" | "include";
+  kind: "exclude" | "excludeItem" | "include" | "includeEverything";
   path: string;
   pattern?: string;
-  /** For `include` below an excluded folder: just the item (default) or the whole folder. */
+  /** @deprecated The backend ignores it; goes with its last callers (the include dialog). */
   scope?: "item" | "folder";
 }
 
@@ -44,6 +52,17 @@ export function escapeGlob(s: string, windows = false): string {
   // class `[[]` (`*` and `?` can't occur in a Windows file name).
   if (windows) return s.replace(/\[/g, "[[]");
   return s.replace(/[\\[\]*?]/g, (c) => `\\${c}`);
+}
+
+/** Does the plan's own pattern list hold a line that is exactly this path — what a click on the
+ * path would have written? A re-include (`!`) or a comment (`#`) line never counts. Mirrors the
+ * engine's notion of an exact rule (plan_edit.rs). */
+export function hasExactRule(excludes: string[], path: string, windows: boolean): boolean {
+  const exact = escapeGlob(path, windows);
+  return excludes.some((line) => {
+    const t = line.trim();
+    return t === exact && !t.startsWith("!") && !t.startsWith("#");
+  });
 }
 
 export interface ScopeOption {
@@ -112,5 +131,10 @@ export function summarizeEdit(o: EditOutcome): string {
   if (o.addedSources.length) parts.push(`added source ${o.addedSources.join(", ")}`);
   if (o.removedSources.length) parts.push(`removed source ${o.removedSources.join(", ")}`);
   if (o.addedRules.length) parts.push(`added ${o.addedRules.length === 1 ? "pattern" : `${o.addedRules.length} patterns`}`);
+  if (o.removedRules.length) parts.push(`removed ${o.removedRules.length === 1 ? "rule" : `${o.removedRules.length} rules`}`);
+  if (o.broughtBack && o.broughtBack.count > 0) {
+    const { count, capped } = o.broughtBack;
+    parts.push(`also brought back ${capped ? "at least " : ""}${count} ${count === 1 ? "item" : "items"} other rules exclude`);
+  }
   return parts.length ? parts.join("; ") : "no change";
 }

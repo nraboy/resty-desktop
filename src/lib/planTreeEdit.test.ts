@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { escapeGlob, scopeOptions, summarizeEdit } from "./planTreeEdit";
+import { escapeGlob, hasExactRule, scopeOptions, summarizeEdit, type EditOutcome } from "./planTreeEdit";
 
 describe("escapeGlob", () => {
   it("escapes exactly the glob metacharacters", () => {
@@ -48,12 +48,69 @@ describe("scopeOptions", () => {
 });
 
 describe("summarizeEdit", () => {
+  const base: EditOutcome = {
+    sources: [],
+    excludes: [],
+    addedRules: [],
+    removedRules: [],
+    addedSources: [],
+    removedSources: [],
+  };
+
   it("describes what changed", () => {
-    const base = { sources: [], excludes: [], addedRules: [], addedSources: [], removedSources: [] };
     expect(summarizeEdit(base)).toBe("no change");
     expect(summarizeEdit({ ...base, addedRules: ["x"] })).toBe("added pattern");
     expect(summarizeEdit({ ...base, addedRules: ["a", "b", "c"], removedSources: ["/t"] })).toBe("removed source /t; added 3 patterns");
     expect(summarizeEdit({ ...base, addedSources: ["/n"] })).toBe("added source /n");
+  });
+
+  it("describes removed rules, which an edit can return with no added ones", () => {
+    expect(summarizeEdit({ ...base, removedRules: ["x"] })).toBe("removed rule");
+    expect(summarizeEdit({ ...base, removedRules: ["x", "y"] })).toBe("removed 2 rules");
+    expect(summarizeEdit({ ...base, addedSources: ["/n"], removedRules: ["x"] })).toBe("added source /n; removed rule");
+    expect(summarizeEdit({ ...base, addedRules: ["!x"], removedRules: ["x"] })).toBe("added pattern; removed rule");
+  });
+
+  it("discloses the items a folder re-include brought back", () => {
+    const o = { ...base, addedRules: ["!x"], removedRules: ["x"] };
+    expect(summarizeEdit({ ...o, broughtBack: { count: 12, capped: false } })).toContain("also brought back 12 items other rules exclude");
+    expect(summarizeEdit({ ...o, broughtBack: { count: 12, capped: true } })).toContain("also brought back at least 12 items other rules exclude");
+    expect(summarizeEdit({ ...o, broughtBack: { count: 1, capped: false } })).toContain("also brought back 1 item other rules exclude");
+  });
+
+  it("says nothing about brought-back items when there are none", () => {
+    const o = { ...base, addedRules: ["!x"] };
+    expect(summarizeEdit({ ...o, broughtBack: null })).toBe("added pattern");
+    expect(summarizeEdit({ ...o, broughtBack: undefined })).toBe("added pattern");
+    expect(summarizeEdit({ ...o, broughtBack: { count: 0, capped: false } })).toBe("added pattern");
+  });
+});
+
+describe("hasExactRule", () => {
+  it("finds a line that is exactly the path's escaped spelling", () => {
+    expect(hasExactRule(["*.png", "/s/a/c-1.png"], "/s/a/c-1.png", false)).toBe(true);
+    expect(hasExactRule(["  /s/a/c-1.png  "], "/s/a/c-1.png", false)).toBe(true);
+    expect(hasExactRule(["/s/a/we\\[ird\\]"], "/s/a/we[ird]", false)).toBe(true);
+  });
+
+  it("does not count a broad rule, a prefix, or another path", () => {
+    expect(hasExactRule(["*.png"], "/s/a/c-1.png", false)).toBe(false);
+    expect(hasExactRule(["/s/a/c-1.png/*"], "/s/a/c-1.png", false)).toBe(false);
+    expect(hasExactRule(["/s/a/c-1.pn"], "/s/a/c-1.png", false)).toBe(false);
+    expect(hasExactRule([], "/s/a/c-1.png", false)).toBe(false);
+  });
+
+  it("never counts a re-include or a comment", () => {
+    expect(hasExactRule(["!/s/a/c-1.png"], "/s/a/c-1.png", false)).toBe(false);
+    expect(hasExactRule(["# /s/a/c-1.png"], "/s/a/c-1.png", false)).toBe(false);
+    expect(hasExactRule(["#/s/a/c-1.png"], "/s/a/c-1.png", false)).toBe(false);
+  });
+
+  it("escapes for the platform: on Windows a bracket is written as a class", () => {
+    expect(hasExactRule(["C:/s/we[[]ird]/f"], "C:/s/we[ird]/f", true)).toBe(true);
+    // The Unix spelling is a different pattern on Windows.
+    expect(hasExactRule(["C:/s/we\\[ird\\]/f"], "C:/s/we[ird]/f", true)).toBe(false);
+    expect(hasExactRule(["C:/s/we[[]ird]/f"], "C:/s/we[ird]/f", false)).toBe(false);
   });
 });
 
