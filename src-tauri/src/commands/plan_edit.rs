@@ -440,5 +440,9 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     }
 }
 
+// Rule-list bookkeeping for tree edits; not called from the edit paths yet.
+#[cfg_attr(not(test), allow(dead_code))]
+mod lines;
+
 #[cfg(test)]
 mod tests;
