@@ -1013,10 +1013,35 @@ fn a_capped_collateral_scan_gives_up_without_a_verdict() {
     let before = engine_of(&real_input(&[&t.root], &[]));
     let after = engine_of(&real_input(&[&t.root], &[t.rule("d.txt")]));
     let probe = MockProbe::default();
-    let tight = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1 };
+    // No entries allowed: the very first one trips the cap, whichever order the folder lists them in.
+    let tight = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 0 };
     assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), tight), None);
     let roomy = ScanLimits { max_entries: 100, ..tight };
     assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), roomy), Some(t.at("d.txt")));
+}
+
+#[test]
+fn the_collateral_budget_covers_a_long_list_of_sources_too() {
+    // A path-list file adds one source per line; looking at them is part of the scan.
+    let t = Tree::new("collateral-budget", &["a.txt", "b.txt"]);
+    let many: Vec<String> = (0..20_000).map(|n| format!("{}-lists/{n}", t.root)).collect();
+    let mut sources: Vec<&str> = many.iter().map(String::as_str).collect();
+    sources.push(&t.root);
+    let rules = [t.rule("b.txt")];
+    let (before, after) = (engine_of(&real_input(&sources, &[])), engine_of(&real_input(&sources, &rules)));
+    let probe = MockProbe::default();
+
+    let spent = ScanLimits { budget: std::time::Duration::ZERO, max_entries: u64::MAX };
+    let started = std::time::Instant::now();
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), spent), None, "an expired budget is no verdict");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "gave up only after {:?}", started.elapsed());
+
+    // Not simply blind to such plans: with a few sources and time to spare it finds b.txt.
+    let few = [t.at("x-lists/1"), t.at("x-lists/2"), t.root.clone()];
+    let few: Vec<&str> = few.iter().map(String::as_str).collect();
+    let (before, after) = (engine_of(&real_input(&few, &[])), engine_of(&real_input(&few, &rules)));
+    let roomy = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: u64::MAX };
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), roomy), Some(t.at("b.txt")));
 }
 
 #[test]
@@ -1133,6 +1158,35 @@ fn count_brought_back_counts_a_rejected_folder_once_and_stops_at_its_cap() {
     // Without rules there is nothing to bring back.
     let none = engine_of(&real_input(&[&t.root], &[]));
     assert_eq!(count_brought_back(&none, &probe, &t.at("sub"), roomy).count, 0);
+}
+
+#[test]
+fn brought_back_leaves_out_what_a_marker_file_hides() {
+    // `cache` holds a marker, so restic backs up nothing else from it, `!sub` or not.
+    let t = Tree::new("brought-back-marker", &["sub/c.txt", "sub/e.tmp", "sub/cache/.nobackup", "sub/cache/x.txt"]);
+    let marked = |excludes: Vec<String>| TreeRulesInput {
+        exclude_if_present: vec![".nobackup".to_string()],
+        ..real_input(&[&t.root], &excludes)
+    };
+    let probe = FsProbe::default();
+    let roomy = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1000 };
+
+    let others = engine_of(&marked(lines_of(&["*.tmp"])));
+    assert!(others.judge_node(&t.at("sub/cache/x.txt"), &probe).is_some(), "the marker does hide x.txt");
+    let found = count_brought_back(&others, &probe, &t.at("sub"), roomy);
+    assert_eq!((found.count, found.capped), (1, false), "only e.tmp is a pattern's doing: {found:?}");
+
+    // Only markers hide anything: nothing for a `!` to bring back.
+    let only_marker = engine_of(&marked(vec![]));
+    assert_eq!(count_brought_back(&only_marker, &probe, &t.at("sub"), roomy).count, 0);
+
+    // And through the edit itself.
+    let i = marked(lines_of(&["*.tmp", "sub"]));
+    let action = include(&t.at("sub"));
+    let o = apply_edit(&i, &action, &probe, &no_read, &no_env).unwrap();
+    assert_eq!(o.brought_back, Some(BroughtBack { count: 1, capped: false }));
+    let i = marked(lines_of(&["sub"]));
+    assert_eq!(apply_edit(&i, &action, &probe, &no_read, &no_env).unwrap().brought_back, None);
 }
 
 // ── against the real restic ─────────────────────────────────────────────────

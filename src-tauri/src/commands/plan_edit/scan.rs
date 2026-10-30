@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::commands::plan_rules::{strip_source, Engine, Probe};
+use crate::commands::plan_rules::{strip_source, Engine, Probe, Reason};
 use crate::commands::plan_tree::{MatchPreview, ScanLimits};
 
 /// What one click may spend on the scans above.
@@ -44,13 +44,16 @@ pub(crate) fn find_collateral(
     let in_target = |p: &str| strip_source(p, &target).is_some();
     let on_the_way = |p: &str| strip_source(&target, p).is_some();
 
-    let sources = after.sources();
+    // The clock starts before the sources are looked at: a plan can list thousands of them (a
+    // path-list file contributes one per line) and each check below walks the engine's source list.
+    let start = Instant::now();
     let mut queue: VecDeque<String> = VecDeque::new();
-    for src in sources {
-        // A source inside another is walked as part of it (the engine reaches it from there).
-        if sources.iter().any(|o| strip_source(src, o).is_some_and(|rel| !rel.is_empty())) {
-            continue;
+    for src in after.sources() {
+        if start.elapsed() >= limits.budget {
+            return None;
         }
+        // A source inside another is walked again as part of the parent: harmless, and cheaper than
+        // comparing every source with every other.
         let (b, a) = (before.classify(src, probe).included, after.classify(src, probe).included);
         if b != a && !in_target(src) && !on_the_way(src) {
             return Some(src.clone());
@@ -60,13 +63,12 @@ pub(crate) fn find_collateral(
         }
     }
 
-    let start = Instant::now();
     let mut scanned: u64 = 0;
     while let Some(current) = queue.pop_front() {
         let Ok(rd) = std::fs::read_dir(style.to_native(&current)) else { continue };
         for ent in rd.flatten() {
             scanned += 1;
-            if scanned > limits.max_entries || (scanned & 0xFF == 0 && start.elapsed() > limits.budget) {
+            if scanned > limits.max_entries || (scanned & 0xFF == 0 && start.elapsed() >= limits.budget) {
                 return None;
             }
             let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
@@ -87,9 +89,11 @@ pub(crate) fn find_collateral(
     None
 }
 
-/// How many items inside `folder` `others` would leave out: a `!` on `folder` re-includes those
-/// too (restic lets a `!` win over every earlier rule about anything below it). A folder `others`
-/// rejects counts once and is not entered. The count stops at [`BROUGHT_BACK_CAP`] or `limits`
+/// How many items inside `folder` a pattern of `others` would leave out: a `!` on `folder`
+/// re-includes those too (restic lets a `!` win over every earlier rule about anything below it).
+/// A folder a pattern rejects counts once and is not entered. Items a marker file hides
+/// (`--exclude-if-present`, `--exclude-caches`) are not counted: markers are checked apart from the
+/// patterns, so a `!` leaves them out. The count stops at [`BROUGHT_BACK_CAP`] or `limits`
 /// (`capped`: there are at least that many).
 pub(crate) fn count_brought_back(others: &Engine, probe: &dyn Probe, folder: &str, limits: ScanLimits) -> MatchPreview {
     let mut out = MatchPreview { count: 0, sample: vec![], capped: false };
@@ -104,22 +108,28 @@ pub(crate) fn count_brought_back(others: &Engine, probe: &dyn Probe, folder: &st
         let Ok(rd) = std::fs::read_dir(style.to_native(&current)) else { continue };
         for ent in rd.flatten() {
             scanned += 1;
-            if scanned > limits.max_entries || (scanned & 0xFF == 0 && start.elapsed() > limits.budget) {
+            if scanned > limits.max_entries || (scanned & 0xFF == 0 && start.elapsed() >= limits.budget) {
                 out.capped = true;
                 return out;
             }
             let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
             let path = style.join(&current, &name);
-            if others.judge_node(&path, probe).is_some() {
-                out.count += 1;
-                if out.sample.len() < BROUGHT_BACK_SAMPLE {
-                    out.sample.push(path);
+            match others.judge_node(&path, probe) {
+                None => {}
+                // A marker file beside it hides it whatever the patterns say: a `!` can't bring
+                // it back, so it isn't counted (and nothing below it is reachable either).
+                Some(Reason::Marker { .. } | Reason::OutsideSources) => continue,
+                Some(Reason::Pattern { .. }) => {
+                    out.count += 1;
+                    if out.sample.len() < BROUGHT_BACK_SAMPLE {
+                        out.sample.push(path);
+                    }
+                    if out.count >= BROUGHT_BACK_CAP {
+                        out.capped = true;
+                        return out;
+                    }
+                    continue; // left out with everything below it
                 }
-                if out.count >= BROUGHT_BACK_CAP {
-                    out.capped = true;
-                    return out;
-                }
-                continue; // left out with everything below it
             }
             if ent.file_type().is_ok_and(|t| t.is_dir()) {
                 queue.push_back(path);
