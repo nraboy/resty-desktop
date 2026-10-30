@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::lines::{comment_names, Verb};
+use super::scan::{count_brought_back, find_collateral, COLLATERAL_LIMITS};
 use super::*;
 use crate::commands::plan_rules::{FsProbe, Marker, PathStyle};
 
@@ -904,6 +905,234 @@ fn unix_quoting_still_single_quotes_a_path_with_a_backslash() {
     let i = input(&["/a/b\\c d"], &[]);
     let out = export_rules(&build_rules(&i, &no_read, &no_env).rules);
     assert_eq!(out.command, "restic backup '/a/b\\c d'");
+}
+
+// ── collateral and "brought back" (real folders) ────────────────────────────
+
+/// A real folder tree in a scratch dir, removed when dropped. `root` and `at()` are in the `/`
+/// spelling the engine uses.
+struct Tree {
+    root: String,
+}
+
+impl Tree {
+    /// `files` are relative paths (`/`-separated, parents created); one ending in `/` is an
+    /// empty folder.
+    fn new(label: &str, files: &[&str]) -> Tree {
+        let root = scratch(label);
+        for f in files {
+            let p = root.join(f);
+            if f.ends_with('/') {
+                std::fs::create_dir_all(&p).unwrap();
+            } else {
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, "x").unwrap();
+            }
+        }
+        Tree { root: canon(root.to_str().unwrap()) }
+    }
+
+    fn at(&self, rel: &str) -> String {
+        format!("{}/{rel}", self.root)
+    }
+
+    /// `at(rel)` as a pattern.
+    fn rule(&self, rel: &str) -> String {
+        esc(&self.at(rel))
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(PathStyle::NATIVE.to_native(&self.root));
+    }
+}
+
+/// A plan over real paths: the platform's own spelling, unlike `input`.
+fn real_input(sources: &[&str], excludes: &[String]) -> TreeRulesInput {
+    TreeRulesInput {
+        sources: sources.iter().map(|s| s.to_string()).collect(),
+        excludes: excludes.to_vec(),
+        ..Default::default()
+    }
+}
+
+fn engine_of(i: &TreeRulesInput) -> Engine {
+    build_engine(i, &no_read, &no_env).unwrap().0
+}
+
+fn lines_of(rules: &[&str]) -> Vec<String> {
+    rules.iter().map(|r| r.to_string()).collect()
+}
+
+#[test]
+fn collateral_finds_a_flipped_sibling() {
+    let t = Tree::new("collateral", &["a.txt", "b.txt"]);
+    let before = engine_of(&real_input(&[&t.root], &[]));
+    let after = engine_of(&real_input(&[&t.root], &[t.rule("b.txt")]));
+    let probe = MockProbe::default();
+    let find = |target: &str| find_collateral(&before, &after, &probe, target, COLLATERAL_LIMITS);
+    assert_eq!(find(&t.at("a.txt")), Some(t.at("b.txt")), "b.txt flipped and the click was on a.txt");
+    assert_eq!(find(&t.at("b.txt")), None, "the clicked item itself may flip");
+    assert_eq!(find(&t.root), None, "so may everything inside the clicked folder");
+}
+
+#[test]
+fn collateral_is_looked_for_in_every_source() {
+    let t = Tree::new("collateral-sources", &["one/a.txt", "two/b.txt", "two/deep/c.txt"]);
+    let sources = [t.at("one"), t.at("two")];
+    let srcs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let before = engine_of(&real_input(&srcs, &[]));
+    let after = engine_of(&real_input(&srcs, &[t.rule("two/deep/c.txt")]));
+    let probe = MockProbe::default();
+    assert_eq!(
+        find_collateral(&before, &after, &probe, &t.at("one/a.txt"), COLLATERAL_LIMITS),
+        Some(t.at("two/deep/c.txt"))
+    );
+    // A change in the click's own folder is the click's business, wherever that folder is.
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("two"), COLLATERAL_LIMITS), None);
+}
+
+#[test]
+fn collateral_allows_the_path_down_to_the_clicked_item() {
+    // Carving X/sub/c.txt out of the excluded X flips X and X/sub (the way down) and c.txt.
+    let t = Tree::new("collateral-path", &["X/sub/c.txt", "X/sub/d.txt", "X/b.txt", "other/e.png"]);
+    let before = engine_of(&real_input(&[&t.root], &[t.rule("X")]));
+    let chain = carve_out_chain(PathStyle::NATIVE, &t.at("X"), &t.at("X/sub/c.txt"));
+    let after = engine_of(&real_input(&[&t.root], &chain));
+    let probe = MockProbe::default();
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("X/sub/c.txt"), COLLATERAL_LIMITS), None);
+    // Aimed at a different file, the same rules are collateral: X/sub (found first, breadth
+    // first) and c.txt came back too. X itself is on the way down to b.txt, so it is allowed.
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("X/b.txt"), COLLATERAL_LIMITS), Some(t.at("X/sub")));
+}
+
+#[test]
+fn a_capped_collateral_scan_gives_up_without_a_verdict() {
+    let t = Tree::new("collateral-capped", &["a.txt", "b.txt", "c.txt", "d.txt"]);
+    let before = engine_of(&real_input(&[&t.root], &[]));
+    let after = engine_of(&real_input(&[&t.root], &[t.rule("d.txt")]));
+    let probe = MockProbe::default();
+    let tight = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1 };
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), tight), None);
+    let roomy = ScanLimits { max_entries: 100, ..tight };
+    assert_eq!(find_collateral(&before, &after, &probe, &t.at("a.txt"), roomy), Some(t.at("d.txt")));
+}
+
+#[test]
+fn a_collateral_hit_refuses_the_edit_with_the_path() {
+    let t = Tree::new("collateral-refused", &["a.txt", "b.txt"]);
+    let before = real_input(&[&t.root], &[]);
+    let probe = MockProbe::default();
+    // The rules an edit of a.txt would never write: they also drop b.txt.
+    let after = real_input(&[&t.root], &[t.rule("a.txt"), t.rule("b.txt")]);
+    let err = refuse_collateral(&before, &after, &t.at("a.txt"), &probe, &no_read, &no_env, COLLATERAL_LIMITS).unwrap_err();
+    assert_eq!(err, format!("This change would also change {}, so it wasn't made.", PathStyle::NATIVE.to_native(&t.at("b.txt"))));
+    let ok = real_input(&[&t.root], &[t.rule("a.txt")]);
+    assert_eq!(refuse_collateral(&before, &ok, &t.at("a.txt"), &probe, &no_read, &no_env, COLLATERAL_LIMITS), Ok(()));
+}
+
+#[test]
+fn normal_edits_have_no_collateral() {
+    let t = Tree::new("collateral-normal", &["X/a.txt", "X/b.txt", "X/sub/c.txt", "other/e.png"]);
+    let i = real_input(&[&t.root], &[t.rule("X")]);
+    let a = t.at("X/a.txt");
+    let c = t.at("X/sub/c.txt");
+
+    let o1 = edit(&i, &include(&a)).expect("including a.txt is not collateral");
+    assert!(included_after(&i, &o1, &a));
+    let i1 = applied(&i, &o1);
+
+    let o2 = edit(&i1, &include(&c)).expect("including c.txt is not collateral");
+    assert!(included_after(&i1, &o2, &c));
+    assert!(included_after(&i1, &o2, &a), "a.txt stays included: {:?}", o2.excludes);
+    let i2 = applied(&i1, &o2);
+    assert!(!included(&i2, &t.at("X/b.txt")), "b.txt was never asked for");
+    assert!(included(&i2, &t.at("other/e.png")));
+
+    // Excluding them again undoes the carve-outs the same way, newest first.
+    let o3 = edit(&i2, &exclude_item(&c)).expect("excluding c.txt is not collateral");
+    assert!(!included_after(&i2, &o3, &c));
+    assert!(included_after(&i2, &o3, &a));
+}
+
+#[test]
+fn an_exclude_pattern_may_change_many_items() {
+    // A pattern exists to match more than the clicked item, so it is not collateral.
+    let t = Tree::new("collateral-pattern", &["a.txt", "b.txt", "c.md"]);
+    let i = real_input(&[&t.root], &[]);
+    let o = edit(&i, &exclude(&t.at("a.txt"), "*.txt")).expect("a pattern is not held to the one item");
+    assert!(!included_after(&i, &o, &t.at("a.txt")));
+    assert!(!included_after(&i, &o, &t.at("b.txt")));
+    assert!(included_after(&i, &o, &t.at("c.md")));
+    assert_eq!(o.brought_back, None);
+}
+
+#[test]
+fn brought_back_counts_what_other_rules_hide() {
+    let t = Tree::new("brought-back", &["sub/c.txt", "sub/e.tmp", "keep.txt"]);
+    let sub = t.at("sub");
+    let run = |rules: &[String], action: EditAction| {
+        let i = real_input(&[&t.root], rules);
+        let o = edit(&i, &action).unwrap_or_else(|e| panic!("{} {} on {rules:?}: {e}", action.kind, action.path));
+        assert!(included_after(&i, &o, &action.path));
+        o.brought_back
+    };
+
+    // `sub` is excluded by a broad rule: `!sub` re-includes it and, with it, e.tmp, which
+    // `*.tmp` also excludes.
+    let broad = lines_of(&["*.tmp", "sub"]);
+    assert_eq!(run(&broad, include(&sub)), Some(BroughtBack { count: 1, capped: false }));
+
+    // Excluded by its own exact line: that line is deleted and nothing else changes, so nothing
+    // comes back (e.tmp is still excluded by `*.tmp`).
+    let exact = [t.rule("sub")];
+    assert_eq!(run(&exact, include(&sub)), None);
+    let exact_and_tmp = ["*.tmp".to_string(), t.rule("sub")];
+    assert_eq!(run(&exact_and_tmp, include(&sub)), None);
+
+    // Re-including a folder nothing else hides things in.
+    assert_eq!(run(&lines_of(&["sub"]), include(&sub)), None);
+
+    // "Include everything inside it" on a partly included folder.
+    let partial = [t.rule("sub/c.txt")];
+    assert_eq!(run(&partial, include_everything(&sub)), Some(BroughtBack { count: 1, capped: false }));
+
+    // A file has nothing inside it to bring back.
+    assert_eq!(run(&lines_of(&["*.tmp"]), include(&t.at("sub/e.tmp"))), None);
+}
+
+#[test]
+fn brought_back_also_counts_for_a_carve_out_that_ends_in_a_folder() {
+    let t = Tree::new("brought-back-chain", &["X/d/f.tmp", "X/d/g.txt", "X/other.txt"]);
+    let rules = ["*.tmp".to_string(), t.rule("X")];
+    let i = real_input(&[&t.root], &rules);
+    let o = edit(&i, &include(&t.at("X/d"))).unwrap();
+    assert_eq!(o.added_rules.last().map(String::as_str), Some(format!("!{}", t.rule("X/d")).as_str()));
+    assert_eq!(o.brought_back, Some(BroughtBack { count: 1, capped: false }));
+    // The same carve-out aimed at a file ends in no folder.
+    let o = edit(&i, &include(&t.at("X/d/g.txt"))).unwrap();
+    assert_eq!(o.brought_back, None);
+}
+
+#[test]
+fn count_brought_back_counts_a_rejected_folder_once_and_stops_at_its_cap() {
+    let t = Tree::new("brought-back-count", &["sub/junk.tmp/a.tmp", "sub/junk.tmp/b.tmp", "sub/1.tmp", "sub/2.tmp", "sub/ok.txt"]);
+    let others = engine_of(&real_input(&[&t.root], &lines_of(&["*.tmp"])));
+    let probe = MockProbe::default();
+    let roomy = ScanLimits { budget: std::time::Duration::from_secs(30), max_entries: 1000 };
+    let all = count_brought_back(&others, &probe, &t.at("sub"), roomy);
+    assert_eq!((all.count, all.capped), (3, false), "junk.tmp (once), 1.tmp and 2.tmp: {all:?}");
+    assert!(all.sample.len() <= all.count as usize && !all.sample.is_empty());
+
+    let tight = ScanLimits { max_entries: 2, ..roomy };
+    let some = count_brought_back(&others, &probe, &t.at("sub"), tight);
+    assert!(some.capped, "{some:?}");
+    assert!(some.count < 3, "a capped count is a lower bound: {some:?}");
+
+    // Without rules there is nothing to bring back.
+    let none = engine_of(&real_input(&[&t.root], &[]));
+    assert_eq!(count_brought_back(&none, &probe, &t.at("sub"), roomy).count, 0);
 }
 
 // ── against the real restic ─────────────────────────────────────────────────

@@ -17,6 +17,12 @@
 //! a deleted line goes with it. Broader rules, exclude files and the user's own comments are
 //! never touched.
 //!
+//! A click on one item may flip only that item, what is inside it and the folders on the way down
+//! to it. After computing an edit a bounded scan of the plan's sources (`scan.rs`) compares every
+//! item's verdict before and after, and an edit that changed anything else is refused with that
+//! item named; a scan that runs out of budget lets the edit through. The same module counts what a
+//! `!` on a folder brings back from other rules' exclusions (`EditOutcome::brought_back`).
+//!
 //! The patterns that carve one item out of an excluded folder follow the gitignore-style chain
 //! restic needs (verified against restic 0.19.1; see docs/backup-plan-tree.md):
 //! `!X`, `X/*`, `!X/child`, `X/child/*`, …, `!X/child/…/target`.
@@ -26,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use self::lines::{
     exact_lines, exact_rule, is_scaffolding, orphan_scaffolding, reinclude_lines, remove_with_comments, tree_comment, Verb,
 };
-use super::plan_rules::{strip_source, Engine, PathStyle, Pattern, PlanRules, Probe, Reason};
-use super::plan_tree::{build_rules, BuiltRules, RuleOrigin, TreeRulesInput};
+use self::scan::{count_brought_back, find_collateral, COLLATERAL_LIMITS};
+use super::plan_rules::{pattern_matches_styled, strip_source, Engine, PathStyle, Pattern, PlanRules, Probe, Reason};
+use super::plan_tree::{build_rules, BuiltRules, RuleOrigin, ScanLimits, TreeRulesInput};
 
 pub(crate) type ReadFile<'a> = &'a dyn Fn(&str) -> std::io::Result<String>;
 pub(crate) type GetEnv<'a> = &'a dyn Fn(&str) -> String;
@@ -151,14 +158,81 @@ pub(crate) fn apply_edit(
     // Sources from path-list files are the list file's, not the plan's: they take part in every
     // check (they are sources to the engine) but are never added, removed or rewritten here.
     work.list_sources = input.list_sources.iter().map(|s| style.clean(s.trim())).collect();
-    let outcome = match action.kind.as_str() {
+    let before = work.clone(); // the plan as the click found it
+    let mut outcome = match action.kind.as_str() {
         "exclude" => do_exclude(work, &path, action.pattern.as_deref().unwrap_or(""), probe, read, getenv)?,
         "excludeItem" => do_exclude_item(work, &path, probe, read, getenv)?,
         "include" => do_include(work, &path, probe, read, getenv)?,
         "includeEverything" => do_include_everything(work, &path, probe, read, getenv)?,
         other => return Err(format!("Unknown edit: {other}")),
     };
+    // A click on one item must not change anything but it, what is inside it and the folders on
+    // the way down to it. Not checked for an exclude pattern (it exists to match many items) or an
+    // edit that adds or removes sources (the sources themselves are what changes).
+    let moves_sources = !outcome.added_sources.is_empty() || !outcome.removed_sources.is_empty();
+    if action.kind != "exclude" && !moves_sources {
+        let after = TreeRulesInput { excludes: outcome.excludes.clone(), ..before.clone() };
+        refuse_collateral(&before, &after, &path, probe, read, getenv, COLLATERAL_LIMITS)?;
+    }
+    if matches!(action.kind.as_str(), "include" | "includeEverything") {
+        outcome.brought_back = brought_back(&before, &outcome, &path, probe, read, getenv, COLLATERAL_LIMITS)?;
+    }
     Ok(outcome)
+}
+
+/// Refuses an edit that changed anything but the clicked item: `after` is the plan once the edit
+/// is applied. The only things a click on `path` may flip are `path`, what is inside it and the
+/// folders on the way down to it; a bounded scan of the plan's sources (see [`find_collateral`])
+/// looks for any other that did. A scan that runs out of budget lets the edit through, verified on
+/// what it saw.
+fn refuse_collateral(
+    before: &TreeRulesInput,
+    after: &TreeRulesInput,
+    path: &str,
+    probe: &dyn Probe,
+    read: ReadFile,
+    getenv: GetEnv,
+    limits: ScanLimits,
+) -> Result<(), String> {
+    let (e0, _) = build_engine(before, read, getenv)?;
+    let (e1, _) = build_engine(after, read, getenv)?;
+    match find_collateral(&e0, &e1, probe, path, limits) {
+        Some(hit) => Err(format!("This change would also change {}, so it wasn't made.", before.style.to_native(&hit))),
+        None => Ok(()),
+    }
+}
+
+/// What a `!` on a folder brought back: the items inside it that the plan's other rules exclude
+/// (a `!` wins over every earlier rule about anything below it). Only an edit whose last new rule
+/// is the `!` on `path`, and only when `path` is a folder, brings anything back. The items are
+/// judged by the plan's rules as they were before the edit, leaving out the ones that matched
+/// `path` itself (they excluded the folder; they don't hide things inside it). `None` when nothing
+/// came back.
+///
+/// The sources don't matter to the count, so `before` stands in for the plan after the edit.
+fn brought_back(
+    before: &TreeRulesInput,
+    out: &EditOutcome,
+    path: &str,
+    probe: &dyn Probe,
+    read: ReadFile,
+    getenv: GetEnv,
+    limits: ScanLimits,
+) -> Result<Option<BroughtBack>, String> {
+    let style = before.style;
+    if out.added_rules.last().map(String::as_str) != Some(format!("!{}", exact_rule(style, path)).as_str())
+        || !is_folder(style, path)
+    {
+        return Ok(None);
+    }
+    let mut others = before.clone();
+    others.excludes.retain(|line| {
+        let t = line.trim();
+        t.is_empty() || t.starts_with('#') || !pattern_matches_styled(t, path, style).unwrap_or(false)
+    });
+    let (engine, _) = build_engine(&others, read, getenv)?;
+    let found = count_brought_back(&engine, probe, path, limits);
+    Ok((found.count > 0).then_some(BroughtBack { count: found.count, capped: found.capped }))
 }
 
 /// The outcome in the spelling the plan stores: sources in the OS's own form (`C:\Users\me` on
@@ -670,6 +744,8 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
 
 // Rule-list bookkeeping for tree edits: exact lines, `!` re-includes, tree comments, scaffolding.
 mod lines;
+// Bounded walks over the plan's files: the collateral check and the "brought back" count.
+mod scan;
 
 #[cfg(test)]
 mod tests;
