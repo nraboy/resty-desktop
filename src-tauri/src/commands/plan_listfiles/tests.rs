@@ -239,18 +239,18 @@ fn list_sources_are_sources_to_the_engine_but_never_the_edits_to_rewrite() {
     assert!(engine.classify(&r, &probe).reason.is_some()); // holds a source, not backed up itself
 
     // Including something outside adds a plan source; the list source stays out of the outcome.
-    let include = EditAction { kind: "include".into(), path: format!("{r}/other"), pattern: None, scope: None };
+    let include = EditAction { kind: "include".into(), path: format!("{r}/other"), pattern: None };
     let out = apply_edit(&input, &include, &probe, &read, &getenv).unwrap();
     assert_eq!(out.sources, [PathStyle::NATIVE.to_native(&format!("{r}/other"))]);
     assert!(out.removed_sources.is_empty());
 
     // Excluding the list source by its path can't be done from here, and the message says why.
-    let exclude = EditAction { kind: "exclude".into(), path: format!("{r}/docs"), pattern: Some(format!("{r}/docs")), scope: None };
+    let exclude = EditAction { kind: "exclude".into(), path: format!("{r}/docs"), pattern: Some(format!("{r}/docs")) };
     let err = apply_edit(&input, &exclude, &probe, &read, &getenv).unwrap_err();
     assert!(err.contains("path-list file"), "{err}");
 
     // But excluding something inside it works like anywhere else.
-    let inside = EditAction { kind: "exclude".into(), path: format!("{r}/docs/a.txt"), pattern: Some(format!("{r}/docs/a.txt")), scope: None };
+    let inside = EditAction { kind: "exclude".into(), path: format!("{r}/docs/a.txt"), pattern: Some(format!("{r}/docs/a.txt")) };
     let out = apply_edit(&input, &inside, &probe, &read, &getenv).unwrap();
     assert!(out.sources.is_empty());
     assert_eq!(out.added_rules.len(), 1);

@@ -8,7 +8,11 @@
 //! Everything generated is a plain restic pattern (ordered `--exclude` lines, `!` re-includes,
 //! source paths), appended after the existing ones so it takes precedence. That is what keeps
 //! the GUI and the restic CLI in step: [`export_rules`] renders the same rules as the files and
-//! command line a user would run by hand.
+//! command line a user would run by hand. The rules an include adds come with a one-line
+//! `# Tree: ` comment above them saying what they are for. The only lines an edit deletes are
+//! ones that exist for the clicked item alone: including an item excluded by its own exact line
+//! deletes that line (and the tree comment above it) instead of stacking a `!` on top; broader
+//! rules are never touched.
 //!
 //! The patterns that carve one item out of an excluded folder follow the gitignore-style chain
 //! restic needs (verified against restic 0.19.1; see docs/backup-plan-tree.md):
@@ -16,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use self::lines::{exact_lines, exact_rule, remove_with_comments, tree_comment, Verb};
 use super::plan_rules::{strip_source, Engine, PathStyle, Pattern, PlanRules, Probe, Reason};
 use super::plan_tree::{build_rules, BuiltRules, RuleOrigin, TreeRulesInput};
 
@@ -35,27 +40,36 @@ pub fn escape_glob(s: &str) -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditAction {
-    /// `exclude` or `include`.
+    /// `exclude` (with a pattern), `include` (a click on an excluded item) or
+    /// `includeEverything` (`!path`: the item and everything inside it that other rules exclude).
     pub kind: String,
     pub path: String,
     /// For `exclude`: the pattern to add (the dialog's choice, possibly edited by hand).
     #[serde(default)]
     pub pattern: Option<String>,
-    /// For `include` below an excluded folder: `item` (just this, the default) or `folder`
-    /// (the whole excluded folder comes back).
-    #[serde(default)]
-    pub scope: Option<String>,
 }
 
-/// The plan's sources and exclude patterns after the edit, and what changed.
+/// How many items inside a re-included folder other rules had excluded (they come back with it).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BroughtBack {
+    pub count: u64,
+    /// The count stopped at the scan's budget: there are at least `count`.
+    pub capped: bool,
+}
+
+/// The plan's sources and exclude patterns after the edit, and what changed. `added_rules` and
+/// `removed_rules` list real patterns only, never the tree comments that go with them.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EditOutcome {
     pub sources: Vec<String>,
     pub excludes: Vec<String>,
     pub added_rules: Vec<String>,
+    pub removed_rules: Vec<String>,
     pub added_sources: Vec<String>,
     pub removed_sources: Vec<String>,
+    pub brought_back: Option<BroughtBack>,
 }
 
 fn build_engine(
@@ -133,7 +147,8 @@ pub(crate) fn apply_edit(
     work.list_sources = input.list_sources.iter().map(|s| style.clean(s.trim())).collect();
     let outcome = match action.kind.as_str() {
         "exclude" => do_exclude(work, &path, action.pattern.as_deref().unwrap_or(""), probe, read, getenv)?,
-        "include" => do_include(work, &path, action.scope.as_deref() == Some("folder"), probe, read, getenv)?,
+        "include" => do_include(work, &path, probe, read, getenv)?,
+        "includeEverything" => do_include_everything(work, &path, probe, read, getenv)?,
         other => return Err(format!("Unknown edit: {other}")),
     };
     Ok(outcome)
@@ -214,14 +229,64 @@ fn do_exclude(
     Ok(finish(work, out))
 }
 
+/// Is `path` included, contents and all? `classify` exempts a source root (and a folder leading to
+/// another source) from the patterns, but a pattern matching its own path still hides everything
+/// inside it: `judge_node` sees that.
+fn fully_included(engine: &Engine, path: &str, probe: &dyn Probe) -> bool {
+    engine.classify(path, probe).included && engine.judge_node(path, probe).is_none()
+}
+
+/// The engine's word on an include edit before it is returned: `path` must now be included.
+fn verify_included(work: &TreeRulesInput, path: &str, probe: &dyn Probe, read: ReadFile, getenv: GetEnv) -> Result<(), String> {
+    let (engine, built) = build_engine(work, read, getenv)?;
+    let v = engine.classify(path, probe);
+    let own = engine.judge_node(path, probe);
+    if !v.included || own.is_some() {
+        let why = if !v.included { explain(&built.origins, &v.reason) } else { explain(&built.origins, &own) };
+        return Err(format!("It can't be included: {why}"));
+    }
+    Ok(())
+}
+
+/// Can the plan's own patterns change this verdict? Only a case-sensitive pattern typed into the
+/// plan can be deleted or followed by a re-include that wins; a marker, an exclude-file line
+/// (applied after the plan's patterns) or a case-insensitive rule can't be overridden from here.
+fn plan_can_override(origins: &[RuleOrigin], reason: &Option<Reason>) -> bool {
+    match reason {
+        Some(Reason::Pattern { rule_id }) => {
+            origins.iter().any(|o| o.id == *rule_id && o.file.is_none() && !o.ignore_case)
+        }
+        _ => false,
+    }
+}
+
+/// Is `path` a folder on disk, as restic would see it (a link to a folder is stored as a link,
+/// not entered)? Only used to word a comment, so anything unreadable counts as a file.
+fn is_folder(style: PathStyle, path: &str) -> bool {
+    std::fs::symlink_metadata(style.to_native(path)).is_ok_and(|m| m.is_dir())
+}
+
+/// Appends `rules` to the plan's patterns, with the tree comment for `path` directly above them.
+fn append_with_comment(work: &mut TreeRulesInput, out: &mut EditOutcome, verb: Verb, path: &str, note: &str, rules: Vec<String>) {
+    work.excludes.push(tree_comment(verb, path, Some(note)));
+    work.excludes.extend(rules.iter().cloned());
+    out.added_rules.extend(rules);
+}
+
+/// Includes an excluded item. Excluded by its own exact line(s): those are deleted, newest first,
+/// until it is included. Still excluded (a broader rule also matches it): `!path` re-includes just
+/// this item, and the deleted lines stay deleted (they did nothing). Inside an excluded folder: a
+/// carve-out from the highest still-excluded node down — never the whole chain from the folder
+/// again, whose `X/*` would re-exclude an earlier carve-out from it. Outside every source: it
+/// becomes a source.
 fn do_include(
     mut work: TreeRulesInput,
     path: &str,
-    whole_folder: bool,
     probe: &dyn Probe,
     read: ReadFile,
     getenv: GetEnv,
 ) -> Result<EditOutcome, String> {
+    let style = work.style;
     let (e0, _) = build_engine(&work, read, getenv)?;
     let v0 = e0.classify(path, probe);
     // A source root is exempt from the patterns itself, but they can still hide everything
@@ -252,30 +317,69 @@ fn do_include(
         return Ok(finish(work, out));
     }
 
-    // Something still rejects it (or its contents): re-include with patterns. Markers can't be
-    // overridden by patterns at all.
-    let reason = v1.reason.clone().or(own.clone());
-    if let Some(Reason::Marker { .. }) = reason {
+    // Something still rejects it (or its contents). Only the plan's own patterns can be changed
+    // from here: a marker, an exclude-file line or a case-insensitive rule is refused with why.
+    let reason = v1.reason.clone().or(own);
+    if !plan_can_override(&b1.origins, &reason) {
         return Err(format!("It can't be included: {}", explain(&b1.origins, &reason)));
     }
-    let x = v1.at.clone().unwrap_or_else(|| path.to_string());
-    let rules = if whole_folder || x == path {
-        vec![format!("!{}", work.style.escape_glob(&x))]
-    } else {
-        carve_out_chain(work.style, &x, path)
-    };
-    for r in &rules {
-        work.excludes.push(r.clone());
-        out.added_rules.push(r.clone());
+    match v1.at.as_deref().filter(|x| *x != path) {
+        // Inside the excluded folder `x`: carve it out, leaving the rest of `x` excluded. Its own
+        // exact lines stay (the chain's `!path` comes after them).
+        Some(x) => {
+            let note = format!("out of the excluded {x}: reopen it, exclude what is inside, bring this back");
+            append_with_comment(&mut work, &mut out, Verb::Included, path, &note, carve_out_chain(style, x, path));
+        }
+        // Excluded at itself.
+        None => {
+            let mut included = false;
+            while !included {
+                let Some(&i) = exact_lines(style, &work.excludes, path).last() else { break };
+                out.removed_rules.push(work.excludes[i].trim().to_string());
+                remove_with_comments(&mut work.excludes, &[i], path);
+                included = fully_included(&build_engine(&work, read, getenv)?.0, path, probe);
+            }
+            if !included {
+                let note = if is_folder(style, path) {
+                    "a broader rule excludes it; this re-includes only this item and everything inside it"
+                } else {
+                    "a broader rule excludes it; this re-includes only this item"
+                };
+                let rule = format!("!{}", exact_rule(style, path));
+                append_with_comment(&mut work, &mut out, Verb::Included, path, note, vec![rule]);
+            }
+        }
     }
+    verify_included(&work, path, probe, read, getenv)?;
+    Ok(finish(work, out))
+}
 
-    let (e2, b2) = build_engine(&work, read, getenv)?;
-    let v2 = e2.classify(path, probe);
-    let own2 = e2.judge_node(path, probe);
-    if !v2.included || own2.is_some() {
-        let why = if !v2.included { explain(&b2.origins, &v2.reason) } else { explain(&b2.origins, &own2) };
-        return Err(format!("It can't be included: {why}"));
+/// `!path`: the item and everything inside it that other rules exclude (restic lets a `!` win over
+/// every earlier rule about anything below it). Offered on a partly included folder too, so
+/// "already included" is no refusal here; its exact lines stay (the `!` comes after them).
+fn do_include_everything(
+    mut work: TreeRulesInput,
+    path: &str,
+    probe: &dyn Probe,
+    read: ReadFile,
+    getenv: GetEnv,
+) -> Result<EditOutcome, String> {
+    let style = work.style;
+    let (e0, _) = build_engine(&work, read, getenv)?;
+    if matches!(e0.classify(path, probe).reason, Some(Reason::OutsideSources)) {
+        return Err("It isn't inside a backup source.".to_string());
     }
+    let mut out = EditOutcome::default();
+    let rule = format!("!{}", exact_rule(style, path));
+    append_with_comment(
+        &mut work,
+        &mut out,
+        Verb::Included,
+        path,
+        "and everything inside it that other rules exclude",
+        vec![rule],
+    );
+    verify_included(&work, path, probe, read, getenv)?;
     Ok(finish(work, out))
 }
 
@@ -440,7 +544,8 @@ pub(crate) fn export_rules(rules: &PlanRules) -> ExportOut {
     }
 }
 
-// Rule-list bookkeeping for tree edits; not called from the edit paths yet.
+// Rule-list bookkeeping for tree edits; the undo helpers (scaffolding, `!` lines) aren't called
+// from the edit paths yet.
 #[cfg_attr(not(test), allow(dead_code))]
 mod lines;
 

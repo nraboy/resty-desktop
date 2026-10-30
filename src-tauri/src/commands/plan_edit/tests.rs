@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::lines::{comment_names, Verb};
 use super::*;
 use crate::commands::plan_rules::{FsProbe, Marker, PathStyle};
 
@@ -32,15 +33,57 @@ fn input(sources: &[&str], excludes: &[&str]) -> TreeRulesInput {
 }
 
 fn exclude(path: &str, pattern: &str) -> EditAction {
-    EditAction { kind: "exclude".into(), path: path.into(), pattern: Some(pattern.into()), scope: None }
+    EditAction { kind: "exclude".into(), path: path.into(), pattern: Some(pattern.into()) }
 }
 
-fn include(path: &str, scope: Option<&str>) -> EditAction {
-    EditAction { kind: "include".into(), path: path.into(), pattern: None, scope: scope.map(String::from) }
+fn include(path: &str) -> EditAction {
+    EditAction { kind: "include".into(), path: path.into(), pattern: None }
+}
+
+fn include_everything(path: &str) -> EditAction {
+    EditAction { kind: "includeEverything".into(), path: path.into(), pattern: None }
+}
+
+// The `excludeItem` edit (a left click on an included item) isn't handled by the engine yet.
+#[allow(dead_code)]
+fn exclude_item(path: &str) -> EditAction {
+    EditAction { kind: "excludeItem".into(), path: path.into(), pattern: None }
+}
+
+/// The real patterns of a rule list, comment lines dropped.
+fn patterns(lines: &[String]) -> Vec<&str> {
+    lines.iter().map(String::as_str).filter(|l| !l.trim_start().starts_with('#')).collect()
 }
 
 fn edit(i: &TreeRulesInput, a: &EditAction) -> Result<EditOutcome, String> {
     apply_edit(i, a, &MockProbe::default(), &no_read, &no_env)
+}
+
+/// What every tree edit promises about its rule list: the added and removed rules are real
+/// patterns, never comments; rules it adds go at the end with the tree comment naming `p`
+/// directly above the first of them; an edit that only deletes lines leaves no tree comment for
+/// `p` behind.
+fn assert_tree_comment(o: &EditOutcome, p: &str) {
+    assert!(o.added_rules.iter().chain(&o.removed_rules).all(|r| !r.trim_start().starts_with('#')), "{o:?}");
+    let names_p = |l: &String| comment_names(l, Verb::Included, p) || comment_names(l, Verb::Excluded, p);
+    if o.added_rules.is_empty() {
+        assert!(!o.excludes.iter().any(names_p), "a tree comment for {p} is left: {:?}", o.excludes);
+        return;
+    }
+    let start = o.excludes.len() - o.added_rules.len();
+    assert_eq!(o.excludes[start..], o.added_rules[..], "the added rules end the list");
+    assert!(start > 0 && comment_names(&o.excludes[start - 1], Verb::Included, p), "no tree comment for {p} above {:?}", o.excludes);
+}
+
+/// One include edit on a plan with source `/s` and `before` as its patterns: the patterns after
+/// it (comments aside) are `after`, the clicked path is included, and the comments are in place.
+fn include_row(before: &[&str], action: EditAction, after: &[&str]) -> (TreeRulesInput, EditOutcome) {
+    let i = input(&["/s"], before);
+    let o = edit(&i, &action).unwrap_or_else(|e| panic!("{} {} on {before:?}: {e}", action.kind, action.path));
+    assert_eq!(patterns(&o.excludes), after, "{} {} on {before:?}", action.kind, action.path);
+    assert!(included_after(&i, &o, &action.path), "{} {} on {before:?}: {:?}", action.kind, action.path, o.excludes);
+    assert_tree_comment(&o, &action.path);
+    (i, o)
 }
 
 /// Is `path` included after applying `outcome` to `i`?
@@ -156,53 +199,142 @@ fn paths_with_glob_characters_round_trip_through_an_escaped_pattern() {
 #[test]
 fn including_something_outside_every_source_adds_a_source_and_absorbs_nested_ones() {
     let i = input(&["/home/u/code/app", "/home/u/code/lib"], &[]);
-    let o = edit(&i, &include("/home/u/code", None)).unwrap();
+    let o = edit(&i, &include("/home/u/code")).unwrap();
     assert_eq!(o.added_sources, ["/home/u/code"]);
     assert_eq!(o.removed_sources, ["/home/u/code/app", "/home/u/code/lib"]);
     assert_eq!(o.sources, ["/home/u/code"]);
     assert!(included_after(&i, &o, "/home/u/code/app/x"));
+    // Adding a source adds no rules, so no comment either.
+    assert!(o.excludes.is_empty() && o.added_rules.is_empty() && o.removed_rules.is_empty());
 
-    let o = edit(&input(&["/s"], &[]), &include("/elsewhere/notes.txt", None)).unwrap();
+    let o = edit(&input(&["/s"], &[]), &include("/elsewhere/notes.txt")).unwrap();
     assert_eq!(o.sources, ["/s", "/elsewhere/notes.txt"]);
 }
 
 #[test]
+fn including_an_item_excluded_by_its_own_exact_line_deletes_that_line() {
+    let (_, o) = include_row(&["/s/a/c-1.png"], include("/s/a/c-1.png"), &[]);
+    assert_eq!(o.removed_rules, ["/s/a/c-1.png"]);
+    assert!(o.added_rules.is_empty() && o.brought_back.is_none());
+
+    // The tree comment that introduced the line goes with it.
+    let (_, o) = include_row(&["# Tree: excluded /s/a/c.png", "/s/a/c.png"], include("/s/a/c.png"), &[]);
+    assert!(o.excludes.is_empty(), "{:?}", o.excludes);
+
+    // Every copy of the line goes (newest first, until it is included); nothing else is touched.
+    let (_, o) = include_row(&["/s/a/c.png", "*.log", "/s/a/c.png"], include("/s/a/c.png"), &["*.log"]);
+    assert_eq!(o.removed_rules, ["/s/a/c.png", "/s/a/c.png"]);
+}
+
+#[test]
+fn including_a_folder_by_deleting_its_line_leaves_rules_about_its_contents() {
+    // F2: deleting the folder's exact line brings it back, but an earlier rule about a file inside
+    // it stays in force.
+    let (i, o) = include_row(&["/s/d/x.txt", "/s/d"], include("/s/d"), &["/s/d/x.txt"]);
+    assert!(!included_after(&i, &o, "/s/d/x.txt"));
+    assert!(included_after(&i, &o, "/s/d/y.txt"));
+}
+
+#[test]
+fn an_exact_line_and_a_broad_rule_delete_the_dead_line_and_re_include_only_the_item() {
+    // F5: deleting the exact line alone changes nothing (`*.txt` still excludes it), so it stays
+    // deleted and a `!` re-include of just this item is added.
+    let (i, o) = include_row(&["*.txt", "/s/a/f.txt"], include("/s/a/f.txt"), &["*.txt", "!/s/a/f.txt"]);
+    assert_eq!(o.removed_rules, ["/s/a/f.txt"]);
+    assert_eq!(o.added_rules, ["!/s/a/f.txt"]);
+    assert!(!included_after(&i, &o, "/s/a/g.txt"));
+}
+
+#[test]
+fn an_item_excluded_by_a_broad_rule_only_is_re_included_alone() {
+    let (i, o) = include_row(&["*.tmp"], include("/s/t.tmp"), &["*.tmp", "!/s/t.tmp"]);
+    assert!(o.removed_rules.is_empty());
+    assert!(!included_after(&i, &o, "/s/u.tmp"));
+}
+
+#[test]
 fn including_a_folder_excluded_by_name_re_includes_it_whole() {
-    let i = input(&["/s"], &["node_modules"]);
-    let o = edit(&i, &include("/s/a/node_modules", None)).unwrap();
+    let (i, o) = include_row(&["node_modules"], include("/s/a/node_modules"), &["node_modules", "!/s/a/node_modules"]);
     assert_eq!(o.added_rules, ["!/s/a/node_modules"]);
-    assert!(included_after(&i, &o, "/s/a/node_modules"));
     assert!(included_after(&i, &o, "/s/a/node_modules/x.js"));
     assert!(!included_after(&i, &o, "/s/c/deep/node_modules"));
 }
 
 #[test]
-fn including_one_item_inside_an_excluded_folder_carves_it_out() {
-    let i = input(&["/s"], &["node_modules"]);
-    let o = edit(&i, &include("/s/a/node_modules/lib/index.js", None)).unwrap();
-    assert_eq!(
-        o.added_rules,
-        [
-            "!/s/a/node_modules",
-            "/s/a/node_modules/*",
-            "!/s/a/node_modules/lib",
-            "/s/a/node_modules/lib/*",
-            "!/s/a/node_modules/lib/index.js"
-        ]
-    );
-    assert!(included_after(&i, &o, "/s/a/node_modules/lib/index.js"));
+fn carve_outs_from_one_excluded_folder_start_at_the_highest_excluded_node() {
+    let chain = [
+        "!/s/a/node_modules",
+        "/s/a/node_modules/*",
+        "!/s/a/node_modules/lib",
+        "/s/a/node_modules/lib/*",
+        "!/s/a/node_modules/lib/index.js",
+    ];
+    let mut after: Vec<&str> = vec!["node_modules"];
+    after.extend(chain);
+    let (i, o) = include_row(&["node_modules"], include("/s/a/node_modules/lib/index.js"), &after);
+    assert_eq!(o.added_rules, chain);
     // Everything else in there is still out, and so is every other node_modules.
     assert!(!included_after(&i, &o, "/s/a/node_modules/lib/other.js"));
     assert!(!included_after(&i, &o, "/s/a/node_modules/other"));
     assert!(!included_after(&i, &o, "/s/c/node_modules/lib/index.js"));
+
+    // A sibling of the first carve-out takes one rule (F3: re-adding the whole chain would drop
+    // index.js again).
+    let i = input(&["/s"], &o.excludes.iter().map(String::as_str).collect::<Vec<_>>());
+    let o = edit(&i, &include("/s/a/node_modules/lib/other.js")).unwrap();
+    after.push("!/s/a/node_modules/lib/other.js");
+    assert_eq!(patterns(&o.excludes), after);
+    assert_eq!(o.added_rules, ["!/s/a/node_modules/lib/other.js"]);
+    assert_tree_comment(&o, "/s/a/node_modules/lib/other.js");
+    assert!(included_after(&i, &o, "/s/a/node_modules/lib/other.js"));
+    assert!(included_after(&i, &o, "/s/a/node_modules/lib/index.js"));
+
+    // An item in another folder of the carved-out one: the chain starts at that folder.
+    let i = input(&["/s"], &o.excludes.iter().map(String::as_str).collect::<Vec<_>>());
+    let o = edit(&i, &include("/s/a/node_modules/other/z.js")).unwrap();
+    let more = ["!/s/a/node_modules/other", "/s/a/node_modules/other/*", "!/s/a/node_modules/other/z.js"];
+    after.extend(more);
+    assert_eq!(patterns(&o.excludes), after);
+    assert_eq!(o.added_rules, more);
+    assert_tree_comment(&o, "/s/a/node_modules/other/z.js");
+    for p in ["/s/a/node_modules/other/z.js", "/s/a/node_modules/lib/other.js", "/s/a/node_modules/lib/index.js"] {
+        assert!(included_after(&i, &o, p), "{p}");
+    }
+    assert!(!included_after(&i, &o, "/s/a/node_modules/other/y.js"));
+    assert!(!included_after(&i, &o, "/s/a/node_modules/third"));
 }
 
 #[test]
-fn the_whole_folder_choice_brings_back_the_excluded_folder() {
-    let i = input(&["/s"], &["node_modules"]);
-    let o = edit(&i, &include("/s/a/node_modules/lib/index.js", Some("folder"))).unwrap();
-    assert_eq!(o.added_rules, ["!/s/a/node_modules"]);
-    assert!(included_after(&i, &o, "/s/a/node_modules/anything"));
+fn an_item_inside_an_excluded_folder_keeps_its_own_exact_line_and_is_carved_out() {
+    let (i, o) = include_row(
+        &["/s/X", "/s/X/a.txt"],
+        include("/s/X/a.txt"),
+        &["/s/X", "/s/X/a.txt", "!/s/X", "/s/X/*", "!/s/X/a.txt"],
+    );
+    assert!(o.removed_rules.is_empty());
+    assert!(!included_after(&i, &o, "/s/X/b.txt"));
+}
+
+#[test]
+fn include_everything_adds_a_re_include_and_keeps_the_exact_lines() {
+    // F1: `!/s/d` brings back the folder and everything inside it, x.txt included.
+    let (i, o) = include_row(&["/s/d/x.txt", "/s/d"], include_everything("/s/d"), &["/s/d/x.txt", "/s/d", "!/s/d"]);
+    assert!(included_after(&i, &o, "/s/d/x.txt"));
+    assert!(o.removed_rules.is_empty());
+
+    // On a folder that is itself included (something inside it isn't): no "already included".
+    let (i, o) = include_row(&["/s/d/x.txt"], include_everything("/s/d"), &["/s/d/x.txt", "!/s/d"]);
+    assert!(included_after(&i, &o, "/s/d/x.txt"));
+}
+
+#[test]
+fn include_everything_is_refused_outside_every_source_and_where_rules_cannot_reach() {
+    let err = edit(&input(&["/s"], &[]), &include_everything("/elsewhere")).unwrap_err();
+    assert_eq!(err, "It isn't inside a backup source.");
+
+    // `!/s/X/d` can't help while /s/X itself is excluded: nothing is returned the engine denies.
+    let err = edit(&input(&["/s"], &["/s/X/d", "/s/X"]), &include_everything("/s/X/d")).unwrap_err();
+    assert!(err.contains("`/s/X`"), "{err}");
 }
 
 #[test]
@@ -210,16 +342,42 @@ fn including_a_source_whose_own_path_matches_a_name_pattern_re_includes_its_cont
     // The source root is exempt from the patterns, but `node_modules` matches every path inside
     // it, so nothing in the folder would be backed up until it is re-included.
     let i = input(&["/s/a/node_modules"], &["node_modules"]);
-    let o = edit(&i, &include("/s/a/node_modules", None)).unwrap();
+    let o = edit(&i, &include("/s/a/node_modules")).unwrap();
     assert_eq!(o.added_rules, ["!/s/a/node_modules"]);
+    assert_tree_comment(&o, "/s/a/node_modules");
     assert!(included_after(&i, &o, "/s/a/node_modules/x.js"));
+}
+
+#[test]
+fn the_tree_comment_says_whether_a_folder_or_a_file_comes_back() {
+    // Whether the item is a folder is read from the disk, so this needs real ones.
+    let base = scratch("note");
+    std::fs::create_dir_all(base.join("kept_dir")).unwrap();
+    std::fs::write(base.join("f.tmp"), "x").unwrap();
+    let root = canon(base.to_str().unwrap());
+    let i = TreeRulesInput { style: PathStyle::NATIVE, ..input(&[&root], &["kept_dir", "*.tmp"]) };
+    let comment = |o: &EditOutcome| o.excludes[o.excludes.len() - 2].clone();
+
+    let o = edit(&i, &include(&format!("{root}/kept_dir"))).unwrap();
+    assert!(comment(&o).ends_with("and everything inside it"), "{}", comment(&o));
+    let o = edit(&i, &include(&format!("{root}/f.tmp"))).unwrap();
+    assert!(comment(&o).ends_with("only this item"), "{}", comment(&o));
+    let o = edit(&i, &include_everything(&format!("{root}/kept_dir"))).unwrap();
+    assert!(comment(&o).ends_with("that other rules exclude"), "{}", comment(&o));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn an_action_still_carrying_the_old_scope_field_is_read_without_it() {
+    let a: EditAction = serde_json::from_str(r#"{"kind":"include","path":"/s/a","scope":"item"}"#).unwrap();
+    assert_eq!((a.kind.as_str(), a.path.as_str(), a.pattern), ("include", "/s/a", None));
 }
 
 #[test]
 fn already_included_things_are_refused() {
     let i = input(&["/s"], &["node_modules"]);
-    assert!(edit(&i, &include("/s/a", None)).unwrap_err().contains("already included"));
-    assert!(edit(&i, &include("/s", None)).unwrap_err().contains("already included"));
+    assert!(edit(&i, &include("/s/a")).unwrap_err().contains("already included"));
+    assert!(edit(&i, &include("/s")).unwrap_err().contains("already included"));
 }
 
 #[test]
@@ -235,7 +393,7 @@ fn an_exclude_file_pattern_that_would_re_exclude_it_is_refused_with_its_line() {
             Err(std::io::Error::other("missing"))
         }
     };
-    let err = apply_edit(&i, &include("/s/a/keep.txt", None), &MockProbe::default(), &read, &no_env).unwrap_err();
+    let err = apply_edit(&i, &include("/s/a/keep.txt"), &MockProbe::default(), &read, &no_env).unwrap_err();
     assert!(err.contains("line 2 of /rules.txt"), "{err}");
     assert!(err.contains("applied after the plan's own patterns"), "{err}");
 }
@@ -245,7 +403,7 @@ fn a_case_insensitive_file_rule_cannot_be_cancelled() {
     let mut i = input(&["/s"], &[]);
     i.exclude_files = vec![crate::commands::cache::ExcludeFile { path: "/ci.txt".into(), ignore_case: true }];
     let read = |_: &str| Ok("Thumbs.db\n".to_string());
-    let err = apply_edit(&i, &include("/s/x/thumbs.db", None), &MockProbe::default(), &read, &no_env).unwrap_err();
+    let err = apply_edit(&i, &include("/s/x/thumbs.db"), &MockProbe::default(), &read, &no_env).unwrap_err();
     assert!(err.contains("case-insensitive") || err.contains("line 1"), "{err}");
 }
 
@@ -255,7 +413,7 @@ fn a_marker_file_exclusion_cannot_be_overridden_by_patterns() {
     i.exclude_if_present = vec![".nobackup".into()];
     let mut probe = MockProbe::default();
     probe.markers.insert(("/s/b".into(), ".nobackup".into()));
-    let err = apply_edit(&i, &include("/s/b/data.bin", None), &probe, &no_read, &no_env).unwrap_err();
+    let err = apply_edit(&i, &include("/s/b/data.bin"), &probe, &no_read, &no_env).unwrap_err();
     assert!(err.contains(".nobackup"), "{err}");
 }
 
@@ -338,7 +496,7 @@ fn windows_excludes_a_folder_with_a_bracket_using_a_character_class() {
 #[test]
 fn windows_including_inside_an_excluded_folder_carves_it_out() {
     let i = win_input(&["C:\\Users\\me\\app"], &["node_modules"]);
-    let o = edit(&i, &include("C:\\Users\\me\\app\\node_modules\\lib\\index.js", None)).unwrap();
+    let o = edit(&i, &include("C:\\Users\\me\\app\\node_modules\\lib\\index.js")).unwrap();
     assert_eq!(
         o.added_rules,
         [
@@ -351,12 +509,32 @@ fn windows_including_inside_an_excluded_folder_carves_it_out() {
     );
     assert!(included_after(&i, &o, "C:/Users/me/app/node_modules/lib/index.js"));
     assert!(!included_after(&i, &o, "C:/Users/me/app/node_modules/lib/other.js"));
+    assert_tree_comment(&o, "C:/Users/me/app/node_modules/lib/index.js");
+}
+
+#[test]
+fn windows_re_includes_and_deletes_exact_lines_in_the_escaped_spelling() {
+    // Excluded by a broad rule: a `!` re-include with the bracket written as a character class.
+    let i = win_input(&["C:/s"], &["*.txt"]);
+    let o = edit(&i, &include("C:/s/we[ird]/f.txt")).unwrap();
+    assert_eq!(patterns(&o.excludes), ["*.txt", "!C:/s/we[[]ird]/f.txt"]);
+    assert_tree_comment(&o, "C:/s/we[ird]/f.txt");
+    assert!(included_after(&i, &o, "C:/s/we[ird]/f.txt"));
+    assert!(!included_after(&i, &o, "C:/s/weird/f.txt"));
+
+    // Excluded by its own exact line in that spelling: the line is deleted, whichever way the
+    // clicked path is spelled.
+    let i = win_input(&["C:\\s"], &["C:/s/we[[]ird]/f.txt"]);
+    let o = edit(&i, &include("C:\\s\\we[ird]\\f.txt")).unwrap();
+    assert!(o.excludes.is_empty(), "{:?}", o.excludes);
+    assert_eq!(o.removed_rules, ["C:/s/we[[]ird]/f.txt"]);
+    assert_tree_comment(&o, "C:/s/we[ird]/f.txt");
 }
 
 #[test]
 fn windows_adds_and_removes_sources_in_the_native_spelling() {
     let i = win_input(&["D:\\data\\a", "D:\\data\\b"], &[]);
-    let o = edit(&i, &include("D:\\data", None)).unwrap();
+    let o = edit(&i, &include("D:\\data")).unwrap();
     assert_eq!(o.added_sources, ["D:\\data"]);
     assert_eq!(o.removed_sources, ["D:\\data\\a", "D:\\data\\b"]);
     assert_eq!(o.sources, ["D:\\data"]);
@@ -598,7 +776,7 @@ fn restic_confirms_every_edit_the_engine_offers() {
             let pattern = if rng.gen_range(0..2) == 0 { esc(&target) } else { esc(&name) };
             exclude(&target, &pattern)
         } else {
-            include(&target, if rng.gen_range(0..3) == 0 { Some("folder") } else { None })
+            include(&target)
         };
         let kind = if target_included { "exclude" } else { "include" };
 
