@@ -9,11 +9,11 @@ import {
   toCanonical,
   toNative,
   displayState,
-  boxClick,
   flattenRows,
   hiddenNoteText,
   hiddenSummary,
   leftClick,
+  leftClickLabel,
   menuEntries,
   pinnedPaths,
   reasonLines,
@@ -282,24 +282,6 @@ describe("hidden files", () => {
   });
 });
 
-describe("boxClick", () => {
-  it("removes a source in one click, adds an item outside every source in one click", () => {
-    expect(boxClick(true, verdict())).toBe("removeSource");
-    expect(boxClick(false, verdict({ included: false, reason: { kind: "outsideSources" } }))).toBe("addSource");
-    // A folder above a source is outside every source too — adding it asks first, but via the same path.
-    expect(boxClick(false, verdict({ included: false, containsSources: true, reason: { kind: "outsideSources" } }))).toBe(
-      "addSource",
-    );
-  });
-
-  it("asks for a scope inside a source: excluding an included item, including an excluded one", () => {
-    expect(boxClick(false, verdict())).toBe("dialog");
-    expect(boxClick(false, verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" }))).toBe("dialog");
-    expect(boxClick(false, verdict({ included: false, reason: { kind: "marker", spec: "x" } }))).toBe("dialog");
-    expect(boxClick(false, undefined)).toBe("dialog");
-  });
-});
-
 describe("leftClick", () => {
   const outside = verdict({ included: false, reason: { kind: "outsideSources" } });
   const excludedInside = verdict({ included: false, reason: { kind: "pattern", ruleId: 1 }, at: "/s/node_modules" });
@@ -324,6 +306,15 @@ describe("leftClick", () => {
   it("excludes an included item, and an item whose verdict has not arrived", () => {
     expect(leftClick(false, verdict())).toBe("exclude");
     expect(leftClick(false, undefined)).toBe("exclude");
+  });
+});
+
+describe("leftClickLabel", () => {
+  it("words each click for the box tooltip, naming a folder or a file", () => {
+    expect(leftClickLabel("exclude", "dir")).toBe("Exclude");
+    expect(leftClickLabel("include", "file")).toBe("Include");
+    expect(leftClickLabel("removeSource", "dir")).toBe("Stop backing up this folder");
+    expect(leftClickLabel("addSource", "file")).toBe("Back up this file");
   });
 });
 

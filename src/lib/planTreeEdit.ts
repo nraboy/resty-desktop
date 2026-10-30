@@ -3,7 +3,7 @@
 // by the Rust engine (commands/plan_edit.rs); the patterns offered here are plain restic
 // patterns and are only ever applied through that verification.
 
-import { baseName, isInside, joinPath, rootOf, type SourceKind } from "./planTree";
+import { baseName, isInside, joinPath, rootOf, type MenuAction, type SourceKind } from "./planTree";
 
 /** The result of `tree_plan_edit`: the plan's sources and patterns after the edit. */
 export interface EditOutcome {
@@ -26,8 +26,32 @@ export interface EditAction {
   kind: "exclude" | "excludeItem" | "include" | "includeEverything";
   path: string;
   pattern?: string;
-  /** @deprecated The backend ignores it; goes with its last callers (the include dialog). */
-  scope?: "item" | "folder";
+}
+
+/** The edit the backend should compute for a menu action; null for "Exclude by pattern…", which
+ * is a dialog (the pattern is chosen there) rather than an edit. Taking a source away is an
+ * exclude of its exact path, as the dialog's old "remove" did. */
+export function editActionFor(action: MenuAction, path: string, windows: boolean): EditAction | null {
+  switch (action) {
+    case "exclude":
+      return { kind: "excludeItem", path };
+    case "include":
+    case "addSource":
+      return { kind: "include", path };
+    case "includeEverything":
+      return { kind: "includeEverything", path };
+    case "removeSource":
+      return { kind: "exclude", path, pattern: escapeGlob(path, windows) };
+    case "excludeByPattern":
+      return null;
+  }
+}
+
+/** Should an add-source edit be shown to the user before it is applied? It should whenever it
+ * would swallow existing sources or change the exclude list — add patterns or delete some (it can
+ * delete without adding) — so a click never changes rules unseen. */
+export function needsConfirmation(o: EditOutcome): boolean {
+  return o.removedSources.length > 0 || o.addedRules.length > 0 || o.removedRules.length > 0;
 }
 
 export interface MatchPreview {

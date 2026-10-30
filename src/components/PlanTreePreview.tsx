@@ -13,21 +13,23 @@ import {
 import {
   ancestorsOf,
   baseName,
-  boxClick,
   displayState,
   flattenRows,
   hiddenSummary,
   joinPath,
+  leftClick,
+  leftClickLabel,
+  menuEntries,
   pinnedPaths,
   reasonLines,
   toCanonical,
   toNative,
   topLevelSources,
   visibleWindow,
-  type BoxClick,
   type DisplayState,
   type ListEntry,
   type ListFilesResult,
+  type MenuAction,
   type NodeInfo,
   type NodeVerdict,
   type RuleOrigin,
@@ -37,9 +39,10 @@ import {
   type TreeEnv,
   type TreeRulesInput,
 } from "../lib/planTree";
-import { escapeGlob, type EditOutcome } from "../lib/planTreeEdit";
+import { editActionFor, hasExactRule, needsConfirmation, type EditOutcome } from "../lib/planTreeEdit";
 import { isWindows } from "../lib/utils";
 import { CARD } from "./plan/types";
+import ContextMenu from "./ContextMenu";
 import { ChevronDownIcon, ChevronRightIcon, FileIcon, FolderIcon, LinkIcon, WarningIcon } from "./icons";
 import PlanTreeEditDialog, { type EditTarget } from "./PlanTreeEditDialog";
 import PlanTreeExportDialog from "./PlanTreeExportDialog";
@@ -92,22 +95,17 @@ function storedHeight(): number {
   }
 }
 
-function boxTitle(click: BoxClick, included: boolean | undefined, kind: SourceKind): string {
-  const what = kind === "dir" ? "folder" : "file";
-  if (click === "removeSource") return `Stop backing up this ${what}`;
-  if (click === "addSource") return `Back up this ${what}`;
-  return included ? "Exclude…" : "Include…";
-}
-
 /**
  * The plan's file tree: what to back up, and a preview of exactly what that includes. It starts
  * at the whole filesystem (`/`, or the drives on Windows) and the plan's sources are the folders
  * and files you pick in it. Each row is marked included / partly included / excluded by restic's
  * own matching rules (the Rust engine in plan_rules.rs), with a tooltip saying which rule decided.
  *
- * Clicking a box edits the plan: a folder outside every source becomes one in a single click (and
- * a source goes away the same way); inside a source a click opens a dialog to pick the pattern.
- * Every edit is computed and verified by the backend and can be undone.
+ * Clicking a box edits the plan in one step (`leftClick` decides which): a source goes away, an item
+ * outside every source becomes one, inside a source an included item is excluded and an excluded one
+ * included. Right-clicking a row (or the Menu key / Shift+F10 on its box) opens a menu with those and
+ * the choices that need a decision (`menuEntries`): exclude by pattern, include everything inside a
+ * folder. Every edit is computed and verified by the backend and can be undone.
  *
  * Nothing is persisted. Listings and verdicts live in refs for the lifetime of this component;
  * only the visible window of rows is rendered, so a folder with thousands of entries stays
@@ -130,6 +128,8 @@ export default function PlanTreePreview({
   const [showHidden, setShowHidden] = useState(false);
   const [problems, setProblems] = useState<RuleProblem[]>([]);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  /** The row menu: where it opens and which row it is for (its entries are worked out on render). */
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string; kind: SourceKind } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -511,46 +511,39 @@ export default function PlanTreePreview({
   // ── editing ───────────────────────────────────────────────────────────────
 
   const openEdit = (path: string, kind: SourceKind) => {
-    setEditTarget({
-      path,
-      name: baseName(path),
-      kind,
-      verdict: verdicts.current.get(path),
-      isSource: sourcesNow.has(path),
-    });
+    setEditTarget({ path, name: baseName(path), kind, verdict: verdicts.current.get(path) });
+  };
+
+  /** A row listed in a path-list file is changed in the file, not here: say where. */
+  const blockedByListFile = (path: string): boolean => {
+    const origin = listOrigin.get(path);
+    if (!origin || sourcesNow.has(path)) return false;
+    setActionError(
+      `${baseName(path)} is on line ${origin.line} of ${origin.file}. To stop backing it up, remove or change that line in the file (then Refresh).`,
+    );
+    return true;
   };
 
   /**
-   * A click on a row's box. Sources and items outside every source change in one step (the edit is
-   * computed and verified first, and can be undone); anything that needs a choice, or that would
-   * swallow existing sources, goes through the dialog, which shows exactly what will change.
+   * Does what a click on a row's box, or an entry of its menu, asks for. Most actions change the
+   * plan in one step (the edit is computed and verified first, and can be undone); "Exclude by
+   * pattern…" opens its dialog, and so does adding a source that would swallow existing sources or
+   * change the exclude list, which lists exactly what will change — that is the only confirmation.
    */
-  const onBox = async (path: string, kind: SourceKind) => {
+  const run = async (path: string, kind: SourceKind, action: MenuAction) => {
     // Wait for the verdicts to catch up with the last edit, or the click would act on stale state.
     if (!onApplyEdit || !settled || busy) return;
-    const origin = listOrigin.get(path);
-    if (origin && !sourcesNow.has(path)) {
-      // Listed in a path-list file: the file is the source of truth, so the change is made there.
-      setActionError(
-        `${baseName(path)} is on line ${origin.line} of ${origin.file}. To stop backing it up, remove or change that line in the file (then Refresh).`,
-      );
-      return;
-    }
-    const click = boxClick(sourcesNow.has(path), verdicts.current.get(path));
-    if (click === "dialog") {
+    if (blockedByListFile(path)) return;
+    const edit = editActionFor(action, path, windows);
+    if (!edit) {
       openEdit(path, kind);
       return;
     }
     setActionError(null);
     setBusy(true);
     try {
-      const outcome = await treePlanEdit(
-        fullRules,
-        click === "removeSource"
-          ? { kind: "exclude", path, pattern: escapeGlob(path, windows) }
-          : { kind: "include", path, scope: "item" },
-      );
-      if (click === "addSource" && (outcome.removedSources.length > 0 || outcome.addedRules.length > 0)) {
+      const outcome = await treePlanEdit(fullRules, edit);
+      if (action === "addSource" && needsConfirmation(outcome)) {
         openEdit(path, kind);
       } else {
         onApplyEdit(outcome);
@@ -561,6 +554,26 @@ export default function PlanTreePreview({
       setBusy(false);
     }
   };
+
+  /** Opens the row menu. Like a click, it waits for the verdicts to settle (its entries come from
+   * them) and does nothing for a row that isn't editable yet or lives in a path-list file. */
+  const openMenu = (x: number, y: number, path: string, kind: SourceKind, state: DisplayState) => {
+    if (!onApplyEdit || state === "pending" || !settled || busy) return;
+    if (blockedByListFile(path)) return;
+    setMenu({ x, y, path, kind });
+  };
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  // Worked out on every render so each entry acts on the latest rules, not those at the time it opened.
+  const menuItems = menu
+    ? menuEntries({
+        isSource: shownSourceSet.has(menu.path),
+        verdict: verdicts.current.get(menu.path),
+        state: menu.kind === "missing" ? "excluded" : displayState(menu.kind, verdicts.current.get(menu.path), scans.current.get(menu.path)),
+        kind: menu.kind,
+        exactRule: hasExactRule(rules.excludes, menu.path, windows),
+      }).map((e) => ({ label: e.label, onClick: () => run(menu.path, menu.kind, e.action) }))
+    : [];
 
   const reload = () => {
     nodes.current.clear();
@@ -784,7 +797,10 @@ export default function PlanTreePreview({
                       : `Matched by \`${fromList.pattern}\` on line ${fromList.line} of ${fromList.file}.`,
                   );
                 }
-                const click = boxClick(isSource, verdict);
+                const click = leftClick(isSource, verdict);
+                const boxLabel = fromList
+                  ? "From a path-list file — edit the file to change it"
+                  : leftClickLabel(click, row.kind);
                 return (
                   <div
                     key={row.path}
@@ -794,6 +810,11 @@ export default function PlanTreePreview({
                     aria-label={`${row.name}: ${missing ? "missing" : STATE_LABEL[state]}${isSource ? " (backup source)" : fromList ? " (from a path-list file)" : ""}`}
                     className="absolute left-0 right-0 flex items-center gap-1.5 hover:bg-gray-800/40"
                     style={{ top, height: ROW_H, paddingLeft: indent }}
+                    onContextMenu={(e) => {
+                      // The app suppresses the browser's menu everywhere; this row gets its own.
+                      e.preventDefault();
+                      openMenu(e.clientX, e.clientY, row.path, row.kind, state);
+                    }}
                   >
                     {isDir ? (
                       <button
@@ -816,10 +837,17 @@ export default function PlanTreePreview({
                     {onApplyEdit && state !== "pending" ? (
                       <button
                         type="button"
-                        onClick={() => onBox(row.path, row.kind)}
+                        onClick={() => run(row.path, row.kind, click)}
+                        onKeyDown={(e) => {
+                          // The menu key / Shift+F10: the same menu a right-click opens, under the box.
+                          if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+                          e.preventDefault();
+                          const r = e.currentTarget.getBoundingClientRect();
+                          openMenu(r.left, r.bottom, row.path, row.kind, state);
+                        }}
                         className="rounded-[3px] hover:ring-2 hover:ring-blue-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 flex-shrink-0"
-                        title={fromList ? "From a path-list file — edit the file to change it" : boxTitle(click, verdict?.included, row.kind)}
-                        aria-label={`${row.name}: ${(fromList ? "from a path-list file" : boxTitle(click, verdict?.included, row.kind)).toLowerCase()}`}
+                        title={boxLabel}
+                        aria-label={`${row.name}: ${boxLabel.toLowerCase()}`}
                       >
                         <StateBox state={state} />
                       </button>
@@ -873,7 +901,8 @@ export default function PlanTreePreview({
           </div>
         </>
       )}
-      <p className="text-xs text-gray-500 mt-2">
+      <p className="text-xs text-gray-500 mt-2">Click to include or exclude · Right-click for more options</p>
+      <p className="text-xs text-gray-500 mt-0.5">
         Computed with the same rules restic applies. Hover a name to see why it is or isn&apos;t backed up.
       </p>
 
@@ -881,6 +910,7 @@ export default function PlanTreePreview({
         <PlanTreeEditDialog target={editTarget} rules={fullRules} onClose={() => setEditTarget(null)} onApply={onApplyEdit} />
       )}
       <PlanTreeExportDialog open={exportOpen} rules={fullRules} onClose={() => setExportOpen(false)} />
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={closeMenu} />}
     </div>
   );
 }

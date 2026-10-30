@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { escapeGlob, hasExactRule, scopeOptions, summarizeEdit, type EditOutcome } from "./planTreeEdit";
+import { editActionFor, escapeGlob, hasExactRule, needsConfirmation, scopeOptions, summarizeEdit, type EditOutcome } from "./planTreeEdit";
 
 describe("escapeGlob", () => {
   it("escapes exactly the glob metacharacters", () => {
@@ -83,6 +83,40 @@ describe("summarizeEdit", () => {
     expect(summarizeEdit({ ...o, broughtBack: null })).toBe("added pattern");
     expect(summarizeEdit({ ...o, broughtBack: undefined })).toBe("added pattern");
     expect(summarizeEdit({ ...o, broughtBack: { count: 0, capped: false } })).toBe("added pattern");
+  });
+});
+
+describe("editActionFor", () => {
+  it("maps each menu action to the edit the backend computes", () => {
+    expect(editActionFor("exclude", "/s/a", false)).toEqual({ kind: "excludeItem", path: "/s/a" });
+    expect(editActionFor("include", "/s/a", false)).toEqual({ kind: "include", path: "/s/a" });
+    expect(editActionFor("addSource", "/s/a", false)).toEqual({ kind: "include", path: "/s/a" });
+    expect(editActionFor("includeEverything", "/s/a", false)).toEqual({ kind: "includeEverything", path: "/s/a" });
+  });
+
+  it("takes a source away by excluding its exact path, glob characters escaped", () => {
+    expect(editActionFor("removeSource", "/s/a", false)).toEqual({ kind: "exclude", path: "/s/a", pattern: "/s/a" });
+    expect(editActionFor("removeSource", "/s/a[1]", false)).toEqual({ kind: "exclude", path: "/s/a[1]", pattern: "/s/a\\[1\\]" });
+    expect(editActionFor("removeSource", "C:/s/a[1]", true)).toEqual({ kind: "exclude", path: "C:/s/a[1]", pattern: "C:/s/a[[]1]" });
+  });
+
+  it("is not an edit for \"Exclude by pattern…\", which opens a dialog", () => {
+    expect(editActionFor("excludeByPattern", "/s/a", false)).toBeNull();
+  });
+});
+
+describe("needsConfirmation", () => {
+  const none: EditOutcome = { sources: [], excludes: [], addedRules: [], removedRules: [], addedSources: [], removedSources: [] };
+
+  it("is false for a plain add of a source", () => {
+    expect(needsConfirmation({ ...none, addedSources: ["/n"] })).toBe(false);
+  });
+
+  it("is true when sources would be swallowed or the exclude list changes either way", () => {
+    expect(needsConfirmation({ ...none, addedSources: ["/n"], removedSources: ["/n/a"] })).toBe(true);
+    expect(needsConfirmation({ ...none, addedSources: ["/n"], addedRules: ["!/n/x"] })).toBe(true);
+    // Rules deleted with none added: still a change to the user's list, so still shown first.
+    expect(needsConfirmation({ ...none, addedSources: ["/n"], removedRules: ["/n/x"] })).toBe(true);
   });
 });
 

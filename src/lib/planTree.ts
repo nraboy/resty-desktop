@@ -400,17 +400,6 @@ export function pinnedPaths(sources: string[]): Set<string> {
   return out;
 }
 
-/** What a click on a row's box does. A source toggles off in one click; an item outside every
- * source becomes one in one click; anything inside a source needs a choice of scope (a pattern
- * to write, or what to carve out), so it opens the dialog. */
-export type BoxClick = "removeSource" | "addSource" | "dialog";
-
-export function boxClick(isSource: boolean, verdict: NodeVerdict | undefined): BoxClick {
-  if (isSource) return "removeSource";
-  if (!verdict || verdict.included) return "dialog";
-  return verdict.reason?.kind === "outsideSources" ? "addSource" : "dialog";
-}
-
 /** What a left-click on a row's box does. */
 export type LeftClick = "removeSource" | "addSource" | "exclude" | "include";
 
@@ -421,6 +410,21 @@ export function leftClick(isSource: boolean, verdict: NodeVerdict | undefined): 
   if (isSource) return "removeSource";
   if (!verdict || verdict.included) return "exclude";
   return verdict.reason?.kind === "outsideSources" ? "addSource" : "include";
+}
+
+/** The wording for a left-click's action: the box's tooltip and the menu's first entry. */
+export function leftClickLabel(click: LeftClick, kind: SourceKind): string {
+  const what = kind === "dir" ? "folder" : "file";
+  switch (click) {
+    case "removeSource":
+      return `Stop backing up this ${what}`;
+    case "addSource":
+      return `Back up this ${what}`;
+    case "include":
+      return "Include";
+    case "exclude":
+      return "Exclude";
+  }
 }
 
 /** Everything the right-click menu can do: the left-click's action, plus the two that need a
@@ -445,14 +449,13 @@ export function menuEntries(a: {
   exactRule: boolean;
 }): MenuEntry[] {
   const first = leftClick(a.isSource, a.verdict);
-  const what = a.kind === "dir" ? "folder" : "file";
+  const head: MenuEntry = { action: first, label: leftClickLabel(first, a.kind) };
   switch (first) {
     case "removeSource":
-      return [{ action: first, label: `Stop backing up this ${what}` }];
     case "addSource":
-      return [{ action: first, label: `Back up this ${what}` }];
+      return [head];
     case "include": {
-      const out: MenuEntry[] = [{ action: "include", label: "Include" }];
+      const out: MenuEntry[] = [head];
       // The plain click would only delete the exact line; this keeps it and re-includes with `!P`.
       if (a.kind === "dir" && a.exactRule) {
         out.push({ action: "includeEverything", label: "Include, plus everything inside it that other rules exclude" });
@@ -460,10 +463,7 @@ export function menuEntries(a: {
       return out;
     }
     case "exclude": {
-      const out: MenuEntry[] = [
-        { action: "exclude", label: "Exclude" },
-        { action: "excludeByPattern", label: "Exclude by pattern…" },
-      ];
+      const out: MenuEntry[] = [head, { action: "excludeByPattern", label: "Exclude by pattern…" }];
       if (a.state === "partial") out.push({ action: "includeEverything", label: "Include everything inside it" });
       return out;
     }

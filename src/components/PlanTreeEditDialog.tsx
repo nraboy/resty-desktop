@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { treeCountMatches, treePlanEdit } from "../lib/invoke";
 import { baseName, type NodeVerdict, type SourceKind, type TreeRulesInput } from "../lib/planTree";
-import { escapeGlob, scopeOptions, type EditOutcome, type MatchPreview } from "../lib/planTreeEdit";
+import { scopeOptions, type EditOutcome, type MatchPreview } from "../lib/planTreeEdit";
 import { isWindows } from "../lib/utils";
 import Button from "./Button";
 import Modal from "./Modal";
@@ -11,8 +11,6 @@ export interface EditTarget {
   name: string;
   kind: SourceKind;
   verdict?: NodeVerdict;
-  /** The path is one of the plan's source folders/files. */
-  isSource: boolean;
 }
 
 interface Props {
@@ -22,10 +20,11 @@ interface Props {
   onApply: (outcome: EditOutcome) => void;
 }
 
-type Mode = "removeSource" | "exclude" | "include";
+/** `exclude` picks a pattern (reached from the tree menu's "Exclude by pattern…"); `include` is
+ * the confirmation of adding a folder or file as a source. */
+type Mode = "exclude" | "include";
 
 function modeFor(t: EditTarget): Mode {
-  if (t.isSource) return "removeSource";
   return t.verdict?.included ? "exclude" : "include";
 }
 
@@ -41,10 +40,13 @@ function PatternList({ rules }: { rules: string[] }) {
 }
 
 /**
- * The dialog behind a click on a row's box. Excluding offers the pattern scopes (this exact item,
- * a folder's contents, the name anywhere, …) with an editable pattern and a live "would leave out
- * N items"; including shows exactly which sources/patterns will be added — computed and verified
- * by the rule engine — or why it can't be done. Nothing is applied until the user confirms.
+ * The two dialogs the tree still needs; a plain click on a row's box needs neither. Excluding by
+ * pattern (from the row's menu) offers the pattern scopes (this exact item, a folder's contents,
+ * the name anywhere, …) with an editable pattern and a live "would leave out N items". Backing up
+ * a folder or file that isn't under a source yet shows exactly which sources and patterns will be
+ * added or replaced — computed and verified by the rule engine — or why it can't be done, when
+ * the click would swallow existing sources or change the exclude list. Nothing is applied until
+ * the user confirms.
  */
 export default function PlanTreeEditDialog({ target, rules, onClose, onApply }: Props) {
   if (!target) return null;
@@ -66,12 +68,8 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
   const [outcome, setOutcome] = useState<EditOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [includeScope, setIncludeScope] = useState<"item" | "folder">("item");
   const rulesRef = useRef(rules);
   rulesRef.current = rules;
-
-  const ancestorExcluded = !!target.verdict?.at && target.verdict.at !== target.path;
-  const ancestor = target.verdict?.at ?? "";
 
   // Excluding: a live count of what the pattern would leave out.
   useEffect(() => {
@@ -86,23 +84,19 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
     return () => clearTimeout(t);
   }, [mode, pattern]);
 
-  // Including / removing a source: compute the edit up front so the dialog can show it.
+  // Adding a source: compute the edit up front so the dialog can show it.
   useEffect(() => {
     if (mode === "exclude") return;
     setOutcome(null);
     setError(null);
     let cancelled = false;
-    const action =
-      mode === "removeSource"
-        ? ({ kind: "exclude", path: target.path, pattern: escapeGlob(target.path, windows) } as const)
-        : ({ kind: "include", path: target.path, scope: includeScope } as const);
-    treePlanEdit(rulesRef.current, action)
+    treePlanEdit(rulesRef.current, { kind: "include", path: target.path })
       .then((o) => !cancelled && setOutcome(o))
       .catch((e) => !cancelled && setError(String(e)));
     return () => {
       cancelled = true;
     };
-  }, [mode, target.path, includeScope, windows]);
+  }, [mode, target.path]);
 
   const apply = async () => {
     setBusy(true);
@@ -122,16 +116,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
     }
   };
 
-  // An item outside every source being added (it holds existing sources, so the click asked first).
-  const addingSource = mode === "include" && target.verdict?.reason?.kind === "outsideSources";
-  const title =
-    mode === "exclude"
-      ? `Exclude “${target.name}”`
-      : mode === "removeSource"
-        ? "Stop backing up this item"
-        : addingSource
-          ? `Back up “${target.name}”`
-          : `Include “${target.name}”`;
+  const title = mode === "exclude" ? `Exclude “${target.name}”` : `Back up “${target.name}”`;
   const canApply =
     mode === "exclude" ? pattern.trim() !== "" && !busy : !!outcome && !error && !busy;
 
@@ -198,36 +183,9 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
           </>
         )}
 
-        {mode === "include" && (
-          <>
-            {ancestorExcluded && (
-              <div role="radiogroup" aria-label="What to include" className="space-y-1.5">
-                <label className="flex items-start gap-2 text-sm text-gray-300">
-                  <input type="radio" name="iscope" className="mt-1" checked={includeScope === "item"} onChange={() => setIncludeScope("item")} />
-                  <span>
-                    Only “{target.name}” — keep the rest of <span className="font-mono">{baseName(ancestor)}</span> excluded
-                  </span>
-                </label>
-                <label className="flex items-start gap-2 text-sm text-gray-300">
-                  <input type="radio" name="iscope" className="mt-1" checked={includeScope === "folder"} onChange={() => setIncludeScope("folder")} />
-                  <span>
-                    The whole folder <span className="font-mono">{baseName(ancestor)}</span> and everything in it
-                  </span>
-                </label>
-              </div>
-            )}
-            {!error && !outcome && <p className="text-xs text-gray-500">Working out the change…</p>}
-          </>
-        )}
+        {mode === "include" && !error && !outcome && <p className="text-xs text-gray-500">Working out the change…</p>}
 
-        {mode === "removeSource" && !error && !outcome && <p className="text-xs text-gray-500">Working out the change…</p>}
-        {mode === "removeSource" && outcome && (
-          <p className="text-sm text-gray-300">
-            This folder or file stops being backed up. Nothing is deleted from disk or from existing snapshots.
-          </p>
-        )}
-
-        {mode !== "exclude" && outcome && (
+        {mode === "include" && outcome && (
           <div className="text-xs text-gray-500 space-y-2">
             {outcome.addedSources.length > 0 && (
               <div>
@@ -237,7 +195,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
             )}
             {outcome.removedSources.length > 0 && (
               <div>
-                {mode === "removeSource" ? "Removes the source:" : "Replaces the sources it contains:"}
+                Replaces the sources it contains:
                 <PatternList rules={outcome.removedSources} />
               </div>
             )}
@@ -245,6 +203,12 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
               <div>
                 Adds {outcome.addedRules.length === 1 ? "this pattern" : "these patterns"} to the end of your exclude list:
                 <PatternList rules={outcome.addedRules} />
+              </div>
+            )}
+            {outcome.removedRules.length > 0 && (
+              <div>
+                Removes {outcome.removedRules.length === 1 ? "this pattern" : "these patterns"} from your exclude list:
+                <PatternList rules={outcome.removedRules} />
               </div>
             )}
           </div>
@@ -255,7 +219,7 @@ function Body({ target, rules, onClose, onApply }: Omit<Props, "target"> & { tar
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={apply} loading={busy} disabled={!canApply}>
-            {mode === "exclude" ? "Exclude" : mode === "removeSource" ? "Remove" : addingSource ? "Back up" : "Include"}
+            {mode === "exclude" ? "Exclude" : "Back up"}
           </Button>
         </div>
       </div>
