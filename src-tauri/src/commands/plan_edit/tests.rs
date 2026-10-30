@@ -532,6 +532,22 @@ fn windows_re_includes_and_deletes_exact_lines_in_the_escaped_spelling() {
 }
 
 #[test]
+fn windows_include_everything_re_includes_the_folder_in_the_escaped_spelling() {
+    // A partly included folder: `!` plus the bracket as a character class brings back what is
+    // inside it; the exact lines stay, and the look-alike `wei` (which an unescaped `we[ird]`
+    // would match) keeps its own exclusion.
+    let i = win_input(&["C:\\s"], &["C:/s/we[[]ird]/x.txt", "C:/s/wei/x.txt"]);
+    let o = edit(&i, &include_everything("C:\\s\\we[ird]")).unwrap();
+    assert_eq!(patterns(&o.excludes), ["C:/s/we[[]ird]/x.txt", "C:/s/wei/x.txt", "!C:/s/we[[]ird]"]);
+    assert_eq!(o.added_rules, ["!C:/s/we[[]ird]"]);
+    assert!(o.removed_rules.is_empty());
+    assert_tree_comment(&o, "C:/s/we[ird]");
+    assert!(included_after(&i, &o, "C:/s/we[ird]"));
+    assert!(included_after(&i, &o, "C:/s/we[ird]/x.txt"));
+    assert!(!included_after(&i, &o, "C:/s/wei/x.txt"));
+}
+
+#[test]
 fn windows_adds_and_removes_sources_in_the_native_spelling() {
     let i = win_input(&["D:\\data\\a", "D:\\data\\b"], &[]);
     let o = edit(&i, &include("D:\\data")).unwrap();
