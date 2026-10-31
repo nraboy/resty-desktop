@@ -21,9 +21,11 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 - **Read-only repositories** — mark a repository backed by a genuinely read-only filesystem or mount as read-only; the app opens it with restic's own `--no-lock` for every read, and refuses writes (backup, prune, tag, delete, retention) outright rather than relying on restic to reject them
 - **Launch at login** — optionally have the OS start the app automatically at login (uses the native macOS LaunchAgent / Windows Registry Run entry / Linux XDG `.desktop` mechanism), gated on the system tray toggle since without the tray, closing the window quits the app
 - **Backend credentials** — optionally store credentials (e.g. S3 access keys, native B2 application keys, REST server username/password) per remote repository, encrypted with the master password; left blank, restic falls back to your system's own credential chain (`~/.aws/credentials`, an IAM role, etc.) exactly as before. Note: restic's own documentation recommends B2's S3-compatible API over its native backend for better error handling
-- **Backups** — define backup plans with source paths, tags, exclude patterns, and retention policies; run plans on demand or on a schedule
+- **Backup plans** — a tabbed editor (Files, Retention, Advanced, Tags) built around a file tree. It starts at the whole filesystem: click a folder to back it up, click inside it to leave something out or bring it back, with undo. Every row shows whether restic would include it and which rule decided, using a port of restic's own matching rules that is tested against the real restic. Plans can also use path-list files (`--files-from`), exclude-pattern files, `--exclude-if-present` markers and cache-directory exclusion, and "Use with restic CLI…" turns a plan into the exclude files and `restic backup` command that reproduce it by hand
+- **Retention** — keep-last/daily/weekly/monthly/yearly rules per plan, applied after each backup; an optional default policy in Settings pre-fills new plans, and a per-repository "prune after retention" switch leaves pruning to an explicit prune where deleting data costs money
+- **Run on demand or on a schedule** — start a plan from the plan list, or attach it to a schedule (below)
 - **Schedules** — attach backup plans to a cron schedule; runs happen in the background while the app is unlocked — with the system tray enabled, that includes while the window is closed
-- **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete with optional pruning
+- **Snapshots** — browse all snapshots in a repository, add or remove tags, and delete one or several at once with optional pruning
 - **Snapshot diff** — compare any two snapshots to see exactly what was added, removed, or modified, with per-entry restore directly from the diff view
 - **File browser** — navigate the file tree inside any snapshot and restore individual files, directories, or entire snapshots
 - **File search** — search by name or path across all files in a single indexed snapshot, or across every indexed snapshot in a repository at once; clicking a result opens the file browser at that location
@@ -31,6 +33,9 @@ A cross-platform desktop client for [Restic](https://restic.net/), the fast and 
 - **System tray** — optionally minimize to the system tray so scheduled backups continue running while the window is closed
 - **Themes** — dark, light, and system appearance modes
 - **Logs** — persistent history of every backup run with duration, file counts, bytes added, and snapshot ID
+- **Warnings, not false failures** — a backup that saved its snapshot but couldn't read some files (restic exit code 3) is recorded as completed with warnings, listing the unreadable files and any source folder that no longer exists
+- **Notifications and webhooks** — desktop notifications for backup start, success, warnings and failure (each can be muted), plus per-plan webhooks (generic JSON, Discord, Slack, Microsoft Teams, or your own template)
+- **Activity panel** — a live view of background work: scheduled backups, indexing, stats refreshes, and mirrors
 - **Import / Export** — export all repositories, backup plans, and schedules to a passphrase-protected file for backup or migration to another machine; import that file back, or import an existing [Backrest](https://github.com/garethgeorge/backrest) `config.json` to bring over its repos and plans
 
 ## Download

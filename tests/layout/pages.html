@@ -4,7 +4,8 @@ const s0 = M.snapshots[0].id, s1 = M.snapshots[1].id;
 const qs = new URLSearchParams(location.search);
 const ROUTES = (qs.get("routes") ? qs.get("routes").split(",") : [
   "/", "/snapshots/repo-1", "/snapshots/repo-1/search", `/snapshots/repo-1/${s0}/browse`, `/snapshots/repo-1/${s0}/search`,
-  `/snapshots/repo-1/diff/${s0}/${s1}`, "/backup-plans", "/backup-plans/plan-1", "/backup-plans/new", "/schedules", "/schedules/s1",
+  `/snapshots/repo-1/diff/${s0}/${s1}`, "/backup-plans", "/backup-plans/plan-1", "/backup-plans/new",
+  "/backup-plans/plan-1?tab=settings", "/backup-plans/new?tab=settings", "/schedules", "/schedules/s1",
   "/schedules/new", "/logs", "/settings",
 ]);
 const WIDTHS = (qs.get("widths") || "1024,1100,1152,1200,1279,1280,1366,1536,1600").split(",").map(Number);

@@ -1,147 +1,41 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { getDefaultRetention, listBackupPlans, listRepos, removeBackupPlan, saveBackupPlan } from "../lib/invoke";
+import type { Repository } from "../lib/types";
+import { parseRetention, retentionToFields } from "../lib/utils";
 import {
-  checkFullDiskAccess,
-  getDefaultRetention,
-  listBackupPlans,
-  openFullDiskAccessSettings,
-  saveBackupPlan,
-  removeBackupPlan,
-  listRepos,
-  previewWebhook,
-  testWebhook,
-} from "../lib/invoke";
-import type { FullDiskAccessStatus } from "../lib/invoke";
-import type { BackupPlan, ExcludeFile, PlanWebhook, Repository, WebhookPreview, WebhookProvider } from "../lib/types";
-import { MAX_PACK_SIZE_MIB, MIN_PACK_SIZE_MIB } from "../lib/config";
-import { EMPTY_RETENTION_FIELDS, isWindows, needsFullDiskAccess, parsePackSize, parseRetention, planReadPaths, retentionToFields } from "../lib/utils";
-import type { RetentionFields as RetentionFieldValues } from "../lib/utils";
-import ActionButton from "../components/ActionButton";
+  buildPlan,
+  emptyForm,
+  formFromPlan,
+  issueTab,
+  planLocation,
+  settingsIsCustom,
+  validatePlanForm,
+  type FormIssue,
+  type PlanFormState,
+  type PlanTab,
+  type SettingsSection,
+} from "../lib/planForm";
 import Button from "../components/Button";
-import Input from "../components/Input";
 import Modal from "../components/Modal";
-import RetentionFields from "../components/RetentionFields";
-import Tooltip from "../components/Tooltip";
-import { ChevronDownIcon, CheckIcon, PencilIcon, XIcon } from "../components/icons";
+import FilesTab from "../components/plan/FilesTab";
+import PlanFooter from "../components/plan/PlanFooter";
+import PlanHeader from "../components/plan/PlanHeader";
+import PlanTabs, { panelId, tabId, type TabInfo } from "../components/plan/PlanTabs";
+import SettingsTab from "../components/plan/SettingsTab";
+import type { FormUpdate } from "../components/plan/types";
 
-type ExcludeMode = "simple" | "expert";
-type SourceMode = "paths" | "files";
-
-/** Bordered two/three-way tab switch shared by the Sources and Exclude cards. */
-function SegmentedToggle<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex rounded-lg overflow-hidden border border-gray-700">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          className={`px-3 py-1 text-xs font-medium transition-colors ${value === o.value ? "bg-gray-700 text-gray-100" : "bg-gray-800 text-gray-500 hover:text-gray-300"}`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** Pre-filled body for a new custom-provider webhook — pinned by a Rust test
- *  (webhook.rs's DEFAULT_TEMPLATE) so the two can't drift apart. */
-const DEFAULT_WEBHOOK_TEMPLATE =
-  '{"event": "{eventName}", "plan": "{planName}", "repo": "{repoName}", "durationSeconds": {durationSeconds}}';
-
-/** Placeholders a custom template may reference — rendered by the backend, listed
- *  here only as the editing hint (interpolation itself is Rust-side). */
-const WEBHOOK_PLACEHOLDERS = [
-  "{eventName}",
-  "{repoName}",
-  "{planName}",
-  "{startedAt}",
-  "{durationSeconds}",
-  "{filesNew}",
-  "{filesChanged}",
-  "{bytesAdded}",
-  "{snapshotId}",
-  "{errorMessage}",
-  "{warningCount}",
-  "{missingSourceCount}",
-];
-
-const WEBHOOK_PROVIDER_LABELS: Record<WebhookProvider, string> = {
-  generic: "Generic JSON",
-  discord: "Discord",
-  slack: "Slack",
-  teams: "Teams",
-  custom: "Custom JSON",
-};
-
-/** Labels aligned with the Settings page's notification category wording. Webhook
- *  "Success" deliberately isn't split into changed/unchanged like Settings' two
- *  success categories are — the payload already carries filesNew/filesChanged for
- *  downstream filtering. Webhook "Failures" also deliberately excludes user-cancelled
- *  backups, unlike the Settings category of the same name — see the tooltips below. */
-const WEBHOOK_STAGE_LABELS: Record<"started" | "completed" | "failed", string> = {
-  started: "Backup started",
-  completed: "Success",
-  failed: "Failures",
-};
-
-const EXCLUDE_SUGGESTIONS = [
-  {
-    id: "dev",
-    label: "Development assets",
-    description: "node_modules, build output, caches, lockfiles",
-    patterns: [
-      "node_modules/",
-      ".git/",
-      "__pycache__/",
-      "*.pyc",
-      ".venv/",
-      "venv/",
-      "target/",
-      "vendor/",
-      "build/",
-      "dist/",
-      ".next/",
-      ".nuxt/",
-      ".gradle/",
-      ".cargo/registry/",
-    ],
-  },
-  {
-    id: "system",
-    label: "System files",
-    description: ".DS_Store, Thumbs.db, desktop.ini",
-    patterns: [".DS_Store", "Thumbs.db", "desktop.ini", "ehthumbs.db"],
-  },
-  {
-    id: "logs",
-    label: "Log files",
-    description: "*.log and rotated log variants",
-    patterns: ["*.log", "*.log.*", "logs/"],
-  },
-  {
-    id: "temp",
-    label: "Temporary files",
-    description: "*.tmp, swap files, backups",
-    patterns: ["*.tmp", "*.temp", "*.swp", "*.bak", "~*"],
-  },
-];
-
-
+/**
+ * Create / edit a backup plan. The page owns the form state (planForm.ts), loading and saving.
+ * It is a full-height column: the header (editable plan name, repository), the Files | Settings
+ * tab strip, the active tab's content — the only part that scrolls — and a footer with the
+ * Delete / Cancel / Save actions and the last error.
+ */
 export default function BackupPlanEditPage() {
   const { planId } = useParams<{ planId: string }>();
   const navigate = useNavigate();
   const isNew = planId === "new";
+  const [params, setParams] = useSearchParams();
 
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
@@ -149,57 +43,62 @@ export default function BackupPlanEditPage() {
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState("");
-
-  const [name, setName] = useState("");
-  const [repoId, setRepoId] = useState("");
-  const [paths, setPaths] = useState<string[]>([]);
-  const [sourceMode, setSourceMode] = useState<SourceMode>("paths");
-  const [filesFrom, setFilesFrom] = useState<string[]>([]);
-  const [excludeFiles, setExcludeFiles] = useState<ExcludeFile[]>([]);
-  const [tags, setTags] = useState<string[]>([]);
-  const [tagInput, setTagInput] = useState("");
-  const [excludeMode, setExcludeMode] = useState<ExcludeMode>("simple");
-  const [excludeItems, setExcludeItems] = useState<string[]>([]);
-  const [excludeInput, setExcludeInput] = useState("");
-  const [excludeText, setExcludeText] = useState("");
-  const [excludeIfPresent, setExcludeIfPresent] = useState<string[]>([]);
-  const [excludeIfPresentInput, setExcludeIfPresentInput] = useState("");
-  const [excludeCaches, setExcludeCaches] = useState(false);
-  const [retention, setRetention] = useState<RetentionFieldValues>(EMPTY_RETENTION_FIELDS);
-  // True when the fields were seeded from Settings' default retention policy (new plans only).
+  const [issue, setIssue] = useState<FormIssue | null>(null);
+  const [form, setForm] = useState<PlanFormState>(emptyForm);
+  // True when the retention fields were seeded from Settings' default policy (new plans only).
   const [retentionFromDefault, setRetentionFromDefault] = useState(false);
-  const [limitUpload, setLimitUpload] = useState("");
-  const [limitDownload, setLimitDownload] = useState("");
-  const [packSize, setPackSize] = useState("");
-  // Windows-only options. Always loaded and saved — even where their checkboxes are hidden
-  // (macOS/Linux) — so editing a plan imported from a Windows export never silently clears
-  // them; they're only *applied* by the backend on Windows.
-  const [excludeCloudFiles, setExcludeCloudFiles] = useState(false);
-  const [useFsSnapshot, setUseFsSnapshot] = useState(false);
-  const onWindows = isWindows();
-  const [webhooks, setWebhooks] = useState<PlanWebhook[]>([]);
-  // Add/Edit Webhook modal — all webhook configuration happens there; the card
-  // itself is a read-only list (URL, provider, trigger summary, edit/delete).
-  const [webhookModalOpen, setWebhookModalOpen] = useState(false);
-  const [editingWebhookId, setEditingWebhookId] = useState<string | null>(null);
-  const [draftUrl, setDraftUrl] = useState("");
-  const [draftProvider, setDraftProvider] = useState<WebhookProvider>("generic");
-  const [draftStages, setDraftStages] = useState({ started: false, completed: true, failed: true });
-  const [draftTemplate, setDraftTemplate] = useState(DEFAULT_WEBHOOK_TEMPLATE);
-  // One message slot for the whole modal — Save validation failures and Send Test
-  // results share it, so they render in one style and a new message always
-  // replaces (never stacks on) the previous one.
-  const [webhookNotice, setWebhookNotice] = useState<{ ok: boolean; message: string } | null>(null);
-  const [testingWebhook, setTestingWebhook] = useState(false);
-  const [webhookPreview, setWebhookPreview] = useState<WebhookPreview | null>(null);
-  const [webhookPreviewLoading, setWebhookPreviewLoading] = useState(false);
-  const [webhookPreviewError, setWebhookPreviewError] = useState("");
-  const previewSeqRef = useRef(0);
-  const [fdaStatus, setFdaStatus] = useState<FullDiskAccessStatus | null>(null);
+  // Bumped to make the Settings pane scroll to the URL's section again when it hasn't changed.
+  const [sectionRequest, setSectionRequest] = useState(0);
 
-  useEffect(() => {
-    checkFullDiskAccess().then(setFdaStatus).catch(() => {});
+  // Any edit acknowledges the last save's problem: its red dots go (the footer message stays
+  // until the next save, as it describes that attempt).
+  const update: FormUpdate = useCallback((patch) => {
+    setForm((prev) => ({ ...prev, ...(typeof patch === "function" ? patch(prev) : patch) }));
+    setIssue(null);
   }, []);
+
+  // Where the editor is lives in the URL (?tab=settings&section=webhooks) so it survives a
+  // reload and can be linked to; old ?tab=retention|advanced|tags links open Settings at the
+  // matching section. A tab is mounted the first time it is shown and then kept (hidden when
+  // inactive), so what was typed in it, and the file tree's state, survive a switch.
+  const { tab, section } = planLocation(params.get("tab"), params.get("section"));
+  const [visited, setVisited] = useState<Set<PlanTab>>(() => new Set([tab]));
+  useEffect(() => {
+    setVisited((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+  }, [tab]);
+
+  const go = useCallback(
+    (t: PlanTab, s?: SettingsSection) => {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("tab", t);
+          if (s) next.set("section", s);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
+
+  const selectTab = useCallback(
+    (t: PlanTab) => {
+      go(t);
+      // Opening the Files tab when that's where the problem was acknowledges it. (Opening
+      // Settings doesn't: the jump list's red dot still has to point at the section.)
+      setIssue((cur) => (cur?.where === t ? null : cur));
+    },
+    [go],
+  );
+
+  const jumpToSection = useCallback(
+    (s: SettingsSection) => {
+      go("settings", s);
+      setIssue((cur) => (cur?.where === s ? null : cur));
+    },
+    [go],
+  );
 
   useEffect(() => {
     const init = async () => {
@@ -211,36 +110,16 @@ export default function BackupPlanEditPage() {
         if (!isNew) {
           const plan = allPlans.find((p) => p.id === planId);
           if (plan) {
-            setName(plan.name);
             const repoStillExists = allRepos.some((r) => r.id === plan.repoId);
-            setRepoId(repoStillExists ? plan.repoId : "");
+            setForm(formFromPlan(plan, repoStillExists));
             if (!repoStillExists) {
               setError("The repository linked to this plan no longer exists. Please select a new one.");
             }
-            setPaths(plan.paths);
-            setFilesFrom(plan.filesFrom ?? []);
-            setExcludeFiles(plan.excludeFiles ?? []);
-            // Sources are either/or in the editor: open on the list-file tab only when
-            // that's all the plan has. A plan holding both (only possible via import) opens
-            // on Paths. Excludes are combinable, so they have no such state.
-            if ((plan.filesFrom ?? []).length > 0 && plan.paths.length === 0) setSourceMode("files");
-            setTags(plan.tags);
-            setExcludeItems(plan.excludes);
-            setExcludeText(plan.excludes.join("\n"));
-            setExcludeIfPresent(plan.excludeIfPresent);
-            setExcludeCaches(plan.excludeCaches);
-            setRetention(retentionToFields(plan.retention));
-            setLimitUpload(plan.limitUpload?.toString() ?? "");
-            setLimitDownload(plan.limitDownload?.toString() ?? "");
-            setPackSize(plan.packSize?.toString() ?? "");
-            setExcludeCloudFiles(plan.excludeCloudFiles ?? false);
-            setUseFsSnapshot(plan.useFsSnapshot ?? false);
-            setWebhooks(plan.webhooks ?? []);
           } else {
             setError("Backup plan not found.");
           }
         } else {
-          if (allRepos.length > 0) setRepoId(allRepos[0].id);
+          if (allRepos.length > 0) setForm((prev) => ({ ...prev, repoId: allRepos[0].id }));
           // New plans only: seed retention from Settings' default policy. A failed load prefills
           // nothing — the safe direction, since retention deletes snapshots.
           const def = await getDefaultRetention().catch(() => null);
@@ -248,7 +127,7 @@ export default function BackupPlanEditPage() {
             const fields = retentionToFields(def.policy);
             const parsed = parseRetention(fields);
             if ("value" in parsed && parsed.value) {
-              setRetention(fields);
+              setForm((prev) => ({ ...prev, retention: fields }));
               setRetentionFromDefault(true);
             }
           }
@@ -262,327 +141,31 @@ export default function BackupPlanEditPage() {
     init();
   }, [planId, isNew]);
 
-  const pickFolder = useCallback(async () => {
-    const selected = await open({ directory: true, multiple: true });
-    if (!selected) return;
-    const arr = Array.isArray(selected) ? selected : [selected];
-    setPaths((prev) => [...new Set([...prev, ...arr])]);
-  }, []);
-
-  const pickFile = useCallback(async () => {
-    const selected = await open({ multiple: true });
-    if (!selected) return;
-    const arr = Array.isArray(selected) ? selected : [selected];
-    setPaths((prev) => [...new Set([...prev, ...arr])]);
-  }, []);
-
-  const removePath = useCallback((p: string) => setPaths((prev) => prev.filter((x) => x !== p)), []);
-
-  const pickFilesFrom = useCallback(async () => {
-    const selected = await open({ multiple: true });
-    if (!selected) return;
-    const arr = Array.isArray(selected) ? selected : [selected];
-    setFilesFrom((prev) => [...new Set([...prev, ...arr])]);
-  }, []);
-
-  const removeFilesFrom = useCallback(
-    (p: string) => setFilesFrom((prev) => prev.filter((x) => x !== p)),
-    [],
-  );
-
-  const pickExcludeFiles = useCallback(async () => {
-    const selected = await open({ multiple: true });
-    if (!selected) return;
-    const arr = Array.isArray(selected) ? selected : [selected];
-    setExcludeFiles((prev) => {
-      const known = new Set(prev.map((f) => f.path));
-      const added = arr.filter((p) => !known.has(p)).map((path) => ({ path, ignoreCase: false }));
-      return [...prev, ...added];
-    });
-  }, []);
-
-  const removeExcludeFile = useCallback(
-    (p: string) => setExcludeFiles((prev) => prev.filter((x) => x.path !== p)),
-    [],
-  );
-
-  const toggleExcludeFileCase = useCallback(
-    (p: string) =>
-      setExcludeFiles((prev) =>
-        prev.map((x) => (x.path === p ? { ...x, ignoreCase: !x.ignoreCase } : x)),
-      ),
-    [],
-  );
-
-  const addTag = useCallback(() => {
-    const t = tagInput.trim();
-    if (t && !tags.includes(t)) {
-      setTags((prev) => [...prev, t]);
-      setTagInput("");
-    }
-  }, [tagInput, tags]);
-
-  const removeTag = useCallback((t: string) => setTags((prev) => prev.filter((x) => x !== t)), []);
-
-  const addExclude = useCallback(() => {
-    const v = excludeInput.trim();
-    if (v && !excludeItems.includes(v)) {
-      setExcludeItems((prev) => [...prev, v]);
-      setExcludeInput("");
-    }
-  }, [excludeInput, excludeItems]);
-
-  const removeExclude = useCallback(
-    (p: string) => setExcludeItems((prev) => prev.filter((x) => x !== p)),
-    [],
-  );
-
-  const addExcludeIfPresent = useCallback(() => {
-    const v = excludeIfPresentInput.trim();
-    if (v && !excludeIfPresent.includes(v)) {
-      setExcludeIfPresent((prev) => [...prev, v]);
-      setExcludeIfPresentInput("");
-    }
-  }, [excludeIfPresentInput, excludeIfPresent]);
-
-  const removeExcludeIfPresent = useCallback(
-    (p: string) => setExcludeIfPresent((prev) => prev.filter((x) => x !== p)),
-    [],
-  );
-
-  const switchExcludeMode = useCallback(
-    (mode: ExcludeMode) => {
-      if (mode === excludeMode) return;
-      if (mode === "expert") {
-        setExcludeText(excludeItems.join("\n"));
-      } else if (excludeMode === "expert") {
-        // Leaving expert: fold the textarea back into the list so `excludeItems` is the
-        // single source of truth whenever expert isn't active.
-        const parsed = excludeText
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l && !l.startsWith("#"));
-        setExcludeItems([...new Set(parsed)]);
-      }
-      setExcludeMode(mode);
-    },
-    [excludeMode, excludeItems, excludeText],
-  );
-
-  const toggleSuggestion = useCallback(
-    (patterns: string[]) => {
-      const allPresent = patterns.every((p) => excludeItems.includes(p));
-      if (allPresent) {
-        setExcludeItems((prev) => prev.filter((p) => !patterns.includes(p)));
-      } else {
-        setExcludeItems((prev) => [...new Set([...prev, ...patterns])]);
-      }
-    },
-    [excludeItems],
-  );
-
-  const openAddWebhookModal = useCallback(() => {
-    setEditingWebhookId(null);
-    setDraftUrl("");
-    setDraftProvider("generic");
-    setDraftStages({ started: false, completed: true, failed: true });
-    setDraftTemplate(DEFAULT_WEBHOOK_TEMPLATE);
-    setWebhookNotice(null);
-    setWebhookModalOpen(true);
-  }, []);
-
-  const openEditWebhookModal = useCallback((w: PlanWebhook) => {
-    setEditingWebhookId(w.id);
-    setDraftUrl(w.url);
-    setDraftProvider(w.provider);
-    setDraftStages({ ...w.stages });
-    // A legacy preset row has no template — switching it to Custom in the modal
-    // should start from the working default, not an empty textarea.
-    setDraftTemplate(w.template ?? DEFAULT_WEBHOOK_TEMPLATE);
-    setWebhookNotice(null);
-    setWebhookModalOpen(true);
-  }, []);
-
-  const closeWebhookModal = useCallback(() => {
-    setWebhookModalOpen(false);
-    setEditingWebhookId(null);
-  }, []);
-
-  const removeWebhook = useCallback((id: string) => {
-    setWebhooks((prev) => prev.filter((w) => w.id !== id));
-    if (editingWebhookId === id) closeWebhookModal();
-  }, [editingWebhookId, closeWebhookModal]);
-
-  const commitWebhook = useCallback(() => {
-    const url = draftUrl.trim();
-    if (!/^https?:\/\//.test(url)) {
-      setWebhookNotice({ ok: false, message: "Webhook URL must start with http:// or https://." });
-      return;
-    }
-    if (draftProvider === "custom" && !draftTemplate.trim()) {
-      setWebhookNotice({ ok: false, message: "Custom JSON webhooks need a JSON body template." });
-      return;
-    }
-    // The preview refetch is async — while it's in flight, webhookPreviewError still
-    // holds the *previous* draft's verdict, so committing now could either pass a
-    // just-broken template or block a just-fixed one. Wait for the fresh verdict.
-    if (draftProvider === "custom" && webhookPreviewLoading) {
-      setWebhookNotice({ ok: false, message: "Validating template — try saving again in a moment." });
-      return;
-    }
-    // preview_webhook already holds the parse verdict for the current draft — a
-    // custom template that doesn't render valid JSON can't be committed.
-    if (draftProvider === "custom" && webhookPreviewError) {
-      setWebhookNotice({ ok: false, message: webhookPreviewError });
-      return;
-    }
-    if (editingWebhookId) {
-      setWebhooks((prev) =>
-        prev.map((w) =>
-          w.id === editingWebhookId
-            ? {
-                ...w,
-                url,
-                provider: draftProvider,
-                stages: { ...draftStages },
-                template: draftProvider === "custom" ? draftTemplate : undefined,
-              }
-            : w,
-        ),
-      );
-    } else {
-      setWebhooks((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          url,
-          provider: draftProvider,
-          stages: { ...draftStages },
-          ...(draftProvider === "custom" ? { template: draftTemplate } : {}),
-        },
-      ]);
-    }
-    closeWebhookModal();
-  }, [draftUrl, draftProvider, draftStages, draftTemplate, editingWebhookId, webhookPreviewError, webhookPreviewLoading, closeWebhookModal]);
-
-  const toggleDraftStage = useCallback((stage: "started" | "completed" | "failed") => {
-    setDraftStages((prev) => ({ ...prev, [stage]: !prev[stage] }));
-    setWebhookNotice(null);
-  }, []);
-
-  const sendTestWebhook = useCallback(async () => {
-    setTestingWebhook(true);
-    setWebhookNotice(null);
-    try {
-      await testWebhook(draftUrl.trim(), draftProvider, draftProvider === "custom" ? draftTemplate : undefined);
-      setWebhookNotice({ ok: true, message: "Webhook delivered — check the target service." });
-    } catch (err: any) {
-      setWebhookNotice({ ok: false, message: String(err) });
-    } finally {
-      setTestingWebhook(false);
-    }
-  }, [draftUrl, draftProvider, draftTemplate]);
-
-  // The modal's payload preview — always rendered while the modal is open, re-fetched
-  // whenever the draft's provider/template changes so it always matches what would fire.
-  const previewTemplate = draftProvider === "custom" ? draftTemplate : undefined;
-  useEffect(() => {
-    if (!webhookModalOpen) {
-      setWebhookPreview(null);
-      setWebhookPreviewError("");
-      return;
-    }
-    const seq = ++previewSeqRef.current;
-    setWebhookPreviewLoading(true);
-    previewWebhook(draftProvider, previewTemplate)
-      .then((p) => {
-        if (seq !== previewSeqRef.current) return;
-        setWebhookPreview(p);
-        setWebhookPreviewError("");
-      })
-      .catch((err: any) => {
-        if (seq !== previewSeqRef.current) return;
-        setWebhookPreview(null);
-        setWebhookPreviewError(String(err));
-      })
-      .finally(() => {
-        if (seq === previewSeqRef.current) setWebhookPreviewLoading(false);
-      });
-  }, [webhookModalOpen, draftProvider, previewTemplate]);
-
-  // Sources are either/or: only the active tab's entries are saved and shown to the FDA check.
-  const activePaths = sourceMode === "paths" ? paths : [];
-  const activeFilesFrom = sourceMode === "files" ? filesFrom : [];
-
-  // A tag typed but not yet added still counts on save (state is left untouched, so a
-  // failed save leaves the form exactly as the user had it).
-  const pendingTag = tagInput.trim();
-  const effectiveTags = pendingTag && !tags.includes(pendingTag) ? [...tags, pendingTag] : tags;
-
   const handleSave = async () => {
-    if (!name.trim()) { setError("Plan name is required."); return; }
-    if (!repoId) { setError("Select a target repository."); return; }
-    if (sourceMode === "paths" && paths.length === 0) {
-      setError("Add at least one source path.");
+    const problem = validatePlanForm(form);
+    if (problem) {
+      setError(problem.message);
+      // Kept after the jump below: the dots stay until the user edits, saves again, or opens
+      // the place the problem is.
+      setIssue(problem);
+      if (problem.where === "header") {
+        document.getElementById(form.name.trim() ? "plan-repo" : "plan-name")?.focus();
+      } else if (problem.where === "files") {
+        go("files");
+      } else {
+        go("settings", problem.where);
+        // Scroll there even when the URL already names this section (the user may have
+        // scrolled away from it since).
+        setSectionRequest((n) => n + 1);
+      }
       return;
     }
-    if (sourceMode === "files" && filesFrom.length === 0) {
-      setError("Add at least one path-list file.");
-      return;
-    }
-    if (sourceMode === "files" && effectiveTags.length === 0) {
-      setError("Add at least one tag — a plan that uses path-list files needs one so its snapshots can be identified.");
-      return;
-    }
-    // The modal enforces this for every row it creates; this guard only catches rows
-    // that arrived from outside the UI (a hand-edited import bundle).
-    const badUrl = webhooks.find((w) => !/^https?:\/\//.test(w.url.trim()));
-    if (badUrl) {
-      setError(`Webhook "${badUrl.url}" must start with http:// or https://.`);
-      return;
-    }
-
-    const parsedPackSize = parsePackSize(packSize);
-    if ("error" in parsedPackSize) { setError(parsedPackSize.error); return; }
-
-    const toNum = (s: string) => {
-      if (s.trim() === "") return undefined;
-      const n = parseInt(s, 10);
-      return Number.isNaN(n) ? undefined : n;
-    };
-    const parsedRetention = parseRetention(retention);
-    if ("error" in parsedRetention) { setError(parsedRetention.error); return; }
 
     setSaving(true);
     setError("");
+    setIssue(null);
     try {
-      const excludes =
-        excludeMode === "expert"
-          ? excludeText
-              .split("\n")
-              .map((l) => l.trim())
-              .filter((l) => l && !l.startsWith("#"))
-          : excludeItems;
-      const plan: BackupPlan = {
-        id: isNew ? crypto.randomUUID() : planId!,
-        name: name.trim(),
-        repoId,
-        paths: activePaths,
-        tags: effectiveTags,
-        excludes,
-        excludeIfPresent,
-        excludeCaches,
-        retention: parsedRetention.value,
-        limitUpload: toNum(limitUpload),
-        limitDownload: toNum(limitDownload),
-        webhooks,
-        packSize: parsedPackSize.value,
-        excludeCloudFiles,
-        useFsSnapshot,
-        filesFrom: activeFilesFrom,
-        excludeFiles,
-      };
-      await saveBackupPlan(plan);
+      await saveBackupPlan(buildPlan(form, isNew ? crypto.randomUUID() : planId!));
       navigate("/backup-plans");
     } catch (err: any) {
       setError(String(err));
@@ -612,809 +195,72 @@ export default function BackupPlanEditPage() {
     );
   }
 
+  const alertTab = issue ? issueTab(issue.where) : null;
+  const tabInfo: Partial<Record<PlanTab, TabInfo>> = {
+    files: { alert: alertTab === "files" },
+    settings: { dot: settingsIsCustom(form), alert: alertTab === "settings" },
+  };
+  const alertSection: SettingsSection | null =
+    issue && issue.where !== "header" && issue.where !== "files" ? issue.where : null;
+
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-6 max-xl:flex-wrap max-xl:gap-y-3">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-100">
-            {isNew ? "New Backup Plan" : "Edit Backup Plan"}
-          </h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Define what to back up and which repository to use.
-          </p>
-        </div>
-      </div>
+    <div className="flex flex-col h-full">
+      <PlanHeader
+        name={form.name}
+        onName={(name) => update({ name })}
+        nameInvalid={issue?.where === "header" && issue.message === "Plan name is required."}
+        repoInvalid={issue?.where === "header" && issue.message === "Select a target repository."}
+        repos={repos}
+        repoId={form.repoId}
+        onRepo={(repoId) => {
+          update({ repoId });
+          setError("");
+        }}
+      />
 
-      {error && (
-        <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300">
-          {error}
-        </div>
-      )}
+      <PlanTabs active={tab} onChange={selectTab} info={tabInfo} />
 
-      {/* Name */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <Input
-          label="Plan Name"
-          placeholder="e.g. Daily Documents Backup"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </div>
-
-      {/* Target repository */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <label className="block text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
-          Target Repository
-        </label>
-        {repos.length === 0 ? (
-          <p className="text-sm text-gray-500">
-            No repositories configured.{" "}
-            <button
-              className="text-blue-400 hover:underline"
-              onClick={() => navigate("/")}
-            >
-              Add one first.
-            </button>
-          </p>
-        ) : (
-          <div className="relative">
-            <select
-              value={repoId}
-              onChange={(e) => { setRepoId(e.target.value); setError(""); }}
-              className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-8"
-            >
-              <option value="" disabled>Select a repository…</option>
-              {repos
-                // A backup plan can never target a read-only repo — except the plan's
-                // already-selected repo, kept visible-but-disabled below so an existing
-                // plan whose repo has since become read-only isn't silently dropped.
-                .filter((r) => !r.readOnly || r.id === repoId)
-                .map((r) => (
-                  <option key={r.id} value={r.id} disabled={r.readOnly}>
-                    {r.name} — {r.path}{r.readOnly ? " (read-only)" : ""}
-                  </option>
-                ))}
-            </select>
-            <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-500">
-              <ChevronDownIcon className="w-4 h-4" />
-            </div>
+      <div className="flex-1 min-h-0">
+        {visited.has("files") && (
+          <div
+            id={panelId("files")}
+            role="tabpanel"
+            aria-labelledby={tabId("files")}
+            hidden={tab !== "files"}
+            className="h-full overflow-y-auto px-6 pt-4 pb-6"
+          >
+            <FilesTab form={form} update={update} active={tab === "files"} />
           </div>
         )}
-        {repos.find((r) => r.id === repoId)?.appendOnly && (
-          <p className="text-sm text-amber-400 mt-2">
-            This repository is on an append-only server, so retention rules can't be applied to it —
-            the server refuses to delete snapshots. Backups still run; old snapshots are kept.
-          </p>
-        )}
-        {repos.find((r) => r.id === repoId)?.readOnly && (
-          <p className="text-sm text-amber-400 mt-2">
-            This plan's repository is marked read-only — backups can't run until you either
-            select a different repository or clear the read-only flag on Repositories.
-          </p>
-        )}
-      </div>
-
-      {/* Sources: source paths OR path-list files (--files-from) */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-gray-300">Sources</h2>
-          <SegmentedToggle<SourceMode>
-            value={sourceMode}
-            onChange={setSourceMode}
-            options={[
-              { value: "paths", label: "Paths" },
-              { value: "files", label: "List files" },
-            ]}
-          />
-        </div>
-
-        {paths.length > 0 && filesFrom.length > 0 && (
-          <p className="text-xs text-amber-400 mb-3">
-            Source paths and path-list files are both set. Only the active tab's entries are kept
-            when you save.
-          </p>
-        )}
-
-        {sourceMode === "paths" ? (
-          <>
-            <div className="flex justify-end gap-2 mb-3">
-              <Button variant="ghost" size="sm" onClick={pickFile}>+ Files</Button>
-              <Button variant="secondary" size="sm" onClick={pickFolder}>+ Folder</Button>
-            </div>
-
-            {paths.length === 0 ? (
-              <p className="text-sm text-gray-500 text-center py-4">
-                No paths selected. Add a file or folder to back up.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
-                {paths.map((p) => (
-                  <li
-                    key={p}
-                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
-                  >
-                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
-                    <button
-                      onClick={() => removePath(p)}
-                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        ) : (
-          <>
-            <p className="text-xs text-gray-500 mb-3">
-              Text files listing what to back up, one path per line, passed to restic as{" "}
-              <code className="text-gray-400">--files-from</code>. Lines starting with{" "}
-              <code className="text-gray-400">#</code> are comments and glob patterns are
-              expanded. Use absolute paths inside the file. restic reads it at backup time, so
-              edits apply to the next run, and a missing file fails the backup.
-            </p>
-            <div className="flex justify-end mb-3">
-              <Button variant="secondary" size="sm" onClick={pickFilesFrom}>+ File</Button>
-            </div>
-
-            {filesFrom.length === 0 ? (
-              <p className="text-sm text-gray-500 text-center py-4">
-                No path-list files. Add a text file listing the paths to back up.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
-                {filesFrom.map((p) => (
-                  <li
-                    key={p}
-                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
-                  >
-                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
-                    <button
-                      onClick={() => removeFilesFrom(p)}
-                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {effectiveTags.length === 0 && (
-              <p className="text-xs text-amber-400 mt-3">
-                Plans that use path-list files need at least one tag (below), since their
-                snapshots' paths come from the list files and can't be matched any other way.
-              </p>
-            )}
-          </>
-        )}
-
-        {planReadPaths({ paths: activePaths, filesFrom: activeFilesFrom, excludeFiles }).some(needsFullDiskAccess) && (fdaStatus?.supported && !fdaStatus.granted) && (
-          <div className="mt-3 p-3 bg-amber-900/40 border border-amber-700/50 rounded-lg text-xs text-amber-300">
-            <span className="font-medium">Full Disk Access may be required.</span>{" "}
-            One or more paths (e.g. <code className="text-amber-300">~/Library</code>, system directories) are protected by macOS and cannot be read without Full Disk Access. Go to{" "}
-            <span className="font-medium">System Settings → Privacy &amp; Security → Full Disk Access</span>{" "}
-            and add Resty Desktop to avoid permission errors.
-            <button
-              type="button"
-              onClick={() => openFullDiskAccessSettings().catch(() => {})}
-              className="mt-2 flex items-center gap-1 text-amber-300 hover:text-amber-400 underline underline-offset-2 transition-colors"
-            >
-              Open Full Disk Access Settings
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Tags */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <h2 className="text-sm font-medium text-gray-300 mb-3">Tags (optional)</h2>
-        <div className="flex gap-2 mb-2">
-          <Input
-            placeholder="Add tag…"
-            value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addTag()}
-            className="flex-1"
-          />
-          <Button variant="secondary" size="sm" onClick={addTag}>Add</Button>
-        </div>
-        {tags.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2">
-            {tags.map((t) => (
-              <span
-                key={t}
-                className="inline-flex items-center gap-1 text-xs bg-blue-900/40 text-blue-300 border border-blue-700/50 px-2 py-0.5 rounded-full"
-              >
-                {t}
-                <button
-                  onClick={() => removeTag(t)}
-                  className="text-blue-400 hover:text-gray-50 transition-colors"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Exclude patterns */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-gray-300">Exclude Patterns (optional)</h2>
-          <SegmentedToggle<ExcludeMode>
-            value={excludeMode}
-            onChange={switchExcludeMode}
-            options={[
-              { value: "simple", label: "Simple" },
-              { value: "expert", label: "Expert" },
-            ]}
-          />
-        </div>
-
-        {excludeMode === "simple" ? (
-          <>
-            {/* Suggestions */}
-            <div className="mb-3">
-              <p className="text-xs text-gray-500 mb-2">Quick suggestions</p>
-              <div className="flex flex-wrap gap-2">
-                {EXCLUDE_SUGGESTIONS.map((s) => {
-                  const active = s.patterns.every((p) => excludeItems.includes(p));
-                  return (
-                    <button
-                      key={s.id}
-                      type="button"
-                      title={s.description}
-                      onClick={() => toggleSuggestion(s.patterns)}
-                      className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                        active
-                          ? "bg-blue-900/50 border-blue-600 text-blue-300"
-                          : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-300"
-                      }`}
-                    >
-                      {active && (
-                        <span className="text-blue-400 flex-shrink-0">
-                          <CheckIcon className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                      {s.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Manual add */}
-            <div className="flex gap-2 mb-2">
-              <Input
-                placeholder="e.g. *.log or node_modules/"
-                value={excludeInput}
-                onChange={(e) => setExcludeInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addExclude())}
-                className="flex-1"
-              />
-              <Button variant="secondary" size="sm" onClick={addExclude}>
-                Add
-              </Button>
-            </div>
-
-            {excludeItems.length > 0 && (
-              <ul className="space-y-1.5 mt-2">
-                {excludeItems.map((p) => (
-                  <li
-                    key={p}
-                    className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
-                  >
-                    <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
-                    <button
-                      onClick={() => removeExclude(p)}
-                      className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {excludeItems.length === 0 && (
-              <p className="text-sm text-gray-500 text-center py-3">
-                No exclusions. Files and folders added above will be skipped during backup.
-              </p>
-            )}
-          </>
-        ) : (
-          <>
-            <p className="text-xs text-gray-500 mb-3">
-              One pattern per line — same syntax as .gitignore. Lines starting with{" "}
-              <code className="text-gray-400">#</code> are comments.
-            </p>
-            <textarea
-              value={excludeText}
-              onChange={(e) => setExcludeText(e.target.value)}
-              placeholder={"*.log\nnode_modules/\n# ignore temp files\n*.tmp"}
-              rows={6}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-y"
-              spellCheck={false}
+        {visited.has("settings") && (
+          <div
+            id={panelId("settings")}
+            role="tabpanel"
+            aria-labelledby={tabId("settings")}
+            hidden={tab !== "settings"}
+            className="h-full"
+          >
+            <SettingsTab
+              form={form}
+              update={update}
+              seededFromDefault={retentionFromDefault}
+              requested={section}
+              requestKey={sectionRequest}
+              onJump={jumpToSection}
+              alertSection={alertSection}
             />
-          </>
-        )}
-
-        <div className="mt-4 pt-4 border-t border-gray-800">
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="text-sm font-medium text-gray-300">Exclude Pattern Files</h3>
-            <Button variant="secondary" size="sm" onClick={pickExcludeFiles}>+ File</Button>
-          </div>
-          <p className="text-xs text-gray-500 mb-3">
-            Text files of exclude patterns, one per line, with the same syntax as Expert mode
-            (passed as <code className="text-gray-400">--exclude-file</code>). Applied together
-            with the patterns above. Tick <span className="text-gray-400">Ignore case</span> to
-            match regardless of capitalization (
-            <code className="text-gray-400">--iexclude-file</code>).
-          </p>
-
-          {excludeFiles.length === 0 ? (
-            <p className="text-sm text-gray-500 text-center py-3">No exclude pattern files.</p>
-          ) : (
-            <ul className="space-y-1.5">
-              {excludeFiles.map((f) => (
-                <li
-                  key={f.path}
-                  className="flex items-center justify-between gap-3 bg-gray-800 rounded-lg px-3 py-2"
-                >
-                  <span className="text-xs font-mono text-gray-300 truncate flex-1">{f.path}</span>
-                  <label className="flex items-center gap-1.5 text-xs text-gray-400 flex-shrink-0 whitespace-nowrap">
-                    <input
-                      type="checkbox"
-                      checked={f.ignoreCase}
-                      onChange={() => toggleExcludeFileCase(f.path)}
-                      className="rounded bg-gray-700 border-gray-600"
-                    />
-                    Ignore case
-                  </label>
-                  <button
-                    onClick={() => removeExcludeFile(f.path)}
-                    className="text-gray-500 hover:text-red-300 transition-colors flex-shrink-0"
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-
-      {/* Exclude if present */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Exclude If Present (optional)</h2>
-        <p className="text-xs text-gray-500 mb-3">
-          If a directory contains a file with one of these names, its contents are skipped —
-          the marker file itself is still backed up. Useful for marking temporary/scratch data
-          (e.g. a <code className="text-gray-400">.nobackup</code> file) instead of listing every
-          such directory as its own exclusion above. Also accepts restic's{" "}
-          <code className="text-gray-400">name:header</code> syntax to match only when the
-          marker file starts with given content.
-        </p>
-
-        <div className="flex gap-2 mb-2">
-          <Input
-            placeholder=".nobackup"
-            value={excludeIfPresentInput}
-            onChange={(e) => setExcludeIfPresentInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addExcludeIfPresent())}
-            className="flex-1"
-          />
-          <Button variant="secondary" size="sm" onClick={addExcludeIfPresent}>
-            Add
-          </Button>
-        </div>
-
-        {(() => {
-          const v = excludeIfPresentInput.trim();
-          if (!v) return null;
-          if (v.includes("/") || v.includes("\\")) {
-            return (
-              <p className="text-xs text-amber-400 mb-2">
-                Marker files are matched by name only — remove the path (e.g. use{" "}
-                <code className="text-amber-400">.nobackup</code> instead of{" "}
-                <code className="text-amber-400">data/.nobackup</code>).
-              </p>
-            );
-          }
-          if (v.startsWith("#")) {
-            return (
-              <p className="text-xs text-amber-400 mb-2">
-                Filenames starting with <code className="text-amber-400">#</code> are ignored,
-                same as a comment in Exclude Patterns.
-              </p>
-            );
-          }
-          return null;
-        })()}
-
-        {excludeIfPresent.length > 0 && (
-          <ul className="space-y-1.5 mt-2">
-            {excludeIfPresent.map((p) => (
-              <li
-                key={p}
-                className="flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2"
-              >
-                <span className="text-xs font-mono text-gray-300 truncate">{p}</span>
-                <button
-                  onClick={() => removeExcludeIfPresent(p)}
-                  className="text-gray-500 hover:text-red-300 transition-colors ml-2 flex-shrink-0"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {excludeIfPresent.length === 0 && (
-          <p className="text-sm text-gray-500 text-center py-3">
-            No marker files. Directories containing a file added above will have their contents skipped.
-          </p>
-        )}
-
-        <label className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-800">
-          <input
-            type="checkbox"
-            checked={excludeCaches}
-            onChange={(e) => setExcludeCaches(e.target.checked)}
-            className="rounded bg-gray-700 border-gray-600"
-          />
-          <span className="text-sm text-gray-300">
-            Also exclude cache directories (<code className="text-gray-400">CACHEDIR.TAG</code>)
-          </span>
-        </label>
-      </div>
-
-      {/* Retention policy */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Retention Policy (optional)</h2>
-        <p className="text-xs text-gray-500 mb-4">
-          After each backup, snapshots outside this policy are forgotten (and pruned, unless the repository defers pruning). Leave all fields blank to skip retention.
-        </p>
-        <RetentionFields value={retention} onChange={setRetention} />
-        {retentionFromDefault && Object.values(retention).some((v) => v.trim() !== "") && (
-          <p className="mt-3 text-xs text-gray-500">
-            Pre-filled from your default retention policy in Settings. Clear the fields to skip retention.
-          </p>
-        )}
-      </div>
-
-      {/* Bandwidth limits */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Bandwidth Limits (optional)</h2>
-        <p className="text-xs text-gray-500 mb-4">
-          Limits are in KiB/s. Leave blank for unlimited. These settings only affect remote repositories (S3, SFTP, etc.) — they have no effect on local repos.
-        </p>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-          {[
-            { label: "Upload limit", value: limitUpload, set: setLimitUpload },
-            { label: "Download limit", value: limitDownload, set: setLimitDownload },
-          ].map(({ label, value, set }) => (
-            <div key={label} className="flex items-center gap-3">
-              <label className="text-xs text-gray-400 w-28 flex-shrink-0">{label}</label>
-              <input
-                type="number"
-                min="0"
-                value={value}
-                onChange={(e) => set(e.target.value)}
-                placeholder="—"
-                className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-              />
-              <span className="text-xs text-gray-500">KiB/s</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Advanced restic options */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
-        <h2 className="text-sm font-medium text-gray-300 mb-1">Advanced (optional)</h2>
-        <p className="text-xs text-gray-500 mb-4">
-          Extra <code className="text-gray-400">restic backup</code> options for this plan.
-        </p>
-
-        <div className="flex items-center gap-3">
-          <label htmlFor="pack-size" className="text-xs text-gray-400 w-28 flex-shrink-0">Pack size</label>
-          <input
-            id="pack-size"
-            type="number"
-            min={MIN_PACK_SIZE_MIB}
-            max={MAX_PACK_SIZE_MIB}
-            step="1"
-            value={packSize}
-            onChange={(e) => setPackSize(e.target.value)}
-            placeholder="16"
-            className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-          />
-          <span className="text-xs text-gray-500">MiB</span>
-        </div>
-        <p className="text-xs text-gray-500 mt-2">
-          Size of the data files restic writes ({MIN_PACK_SIZE_MIB}–{MAX_PACK_SIZE_MIB}). Larger packs (e.g. 64) mean
-          fewer objects on cloud storage. Leave blank for restic&apos;s default (16 MiB). Applies to
-          backups from this plan only — prune and mirror use restic&apos;s default.
-        </p>
-
-        {onWindows && (
-          <div className="mt-3 pt-3 border-t border-gray-800 space-y-3">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={excludeCloudFiles}
-                onChange={(e) => setExcludeCloudFiles(e.target.checked)}
-                className="rounded bg-gray-700 border-gray-600"
-              />
-              <span className="text-sm text-gray-300">
-                Skip cloud-only placeholder files, e.g. OneDrive (<code className="text-gray-400">--exclude-cloud-files</code>)
-              </span>
-            </label>
-            <div>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={useFsSnapshot}
-                  onChange={(e) => setUseFsSnapshot(e.target.checked)}
-                  className="rounded bg-gray-700 border-gray-600"
-                />
-                <span className="text-sm text-gray-300">
-                  Use a Volume Shadow Copy (VSS) snapshot (<code className="text-gray-400">--use-fs-snapshot</code>)
-                </span>
-              </label>
-              <p className="text-xs text-amber-400 mt-1 ml-6">
-                Requires running Resty Desktop as Administrator. Without it, restic can&apos;t create the snapshot.
-              </p>
-            </div>
           </div>
         )}
-
-        {!onWindows && (excludeCloudFiles || useFsSnapshot) && (
-          <p className="text-xs text-gray-500 mt-3 pt-3 border-t border-gray-800">
-            This plan has Windows-only options enabled (
-            {[excludeCloudFiles && "skip cloud-only files", useFsSnapshot && "VSS snapshot"].filter(Boolean).join(", ")}
-            ). They&apos;re kept but ignored when backing up on this computer.
-          </p>
-        )}
       </div>
 
-      {/* Webhooks */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="text-sm font-medium text-gray-300">Webhooks (optional)</h2>
-          <Button variant="secondary" size="sm" onClick={openAddWebhookModal}>+ Add Webhook</Button>
-        </div>
-
-        {webhooks.length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-3">
-            No webhooks. Add a URL to be notified via Discord, Slack, or any HTTP endpoint.
-          </p>
-        ) : (
-          <ul className="space-y-3 mt-2">
-            {webhooks.map((w) => {
-              const selectedStages = (["started", "completed", "failed"] as const).filter(
-                (s) => w.stages[s],
-              );
-              return (
-                <li
-                  key={w.id}
-                  // Same row shape as RepositoriesPage's repo cards, one nesting
-                  // level down (the card itself is already gray-900).
-                  className="flex items-center justify-between p-4 rounded-xl border bg-gray-800 border-gray-700 hover:border-gray-600 transition-colors"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-gray-100 truncate">{w.url}</p>
-                      <span className="text-[10px] uppercase tracking-wide font-medium px-1.5 py-0.5 rounded bg-gray-900 border border-gray-700 text-gray-400 flex-shrink-0">
-                        {WEBHOOK_PROVIDER_LABELS[w.provider]}
-                      </span>
-                    </div>
-                    {selectedStages.length > 0 ? (
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        On {selectedStages.map((s) => WEBHOOK_STAGE_LABELS[s]).join(", ")}
-                      </p>
-                    ) : (
-                      <p className="text-xs text-amber-400 mt-0.5">
-                        No stages selected — never fires.
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-                    <ActionButton
-                      label="Edit"
-                      title="Edit webhook"
-                      tone="blue"
-                      onClick={() => openEditWebhookModal(w)}
-                      icon={<PencilIcon className="w-4 h-4" />}
-                    />
-                    <ActionButton
-                      label="Remove"
-                      title="Remove webhook"
-                      tone="red"
-                      onClick={() => removeWebhook(w.id)}
-                      icon={<XIcon className="w-4 h-4" />}
-                    />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="flex items-center justify-between">
-        <div className="flex gap-3">
-          <Button onClick={handleSave} loading={saving}>
-            {isNew ? "Create Plan" : "Save Changes"}
-          </Button>
-          <Button variant="secondary" onClick={() => navigate("/backup-plans")} disabled={saving}>
-            Cancel
-          </Button>
-        </div>
-
-        {!isNew && (
-          <Button variant="danger" onClick={() => setConfirmDelete(true)}>
-            Delete Plan
-          </Button>
-        )}
-      </div>
-
-      <Modal
-        title={editingWebhookId ? "Edit Webhook" : "Add Webhook"}
-        open={webhookModalOpen}
-        onClose={closeWebhookModal}
-        maxWidth="max-w-lg"
-      >
-        <div className="space-y-4">
-          <Input
-            label="Endpoint URL"
-            placeholder="https://discord.com/api/webhooks/…"
-            value={draftUrl}
-            onChange={(e) => { setDraftUrl(e.target.value); setWebhookNotice(null); }}
-          />
-
-          <div>
-            <label className="block text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
-              Payload Format
-            </label>
-            <select
-              value={draftProvider}
-              onChange={(e) => { setDraftProvider(e.target.value as WebhookProvider); setWebhookNotice(null); }}
-              className="w-full appearance-none bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="generic">Generic JSON</option>
-              <option value="discord">Discord</option>
-              <option value="slack">Slack</option>
-              <option value="teams">Teams</option>
-              <option value="custom">Custom JSON</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
-              Trigger Stages
-            </label>
-            <div className="flex flex-wrap gap-4">
-              {(["started", "completed", "failed"] as const).map((stage) => (
-                <label
-                  key={stage}
-                  className="flex items-center gap-1.5 text-xs text-gray-400"
-                >
-                  <input
-                    type="checkbox"
-                    checked={draftStages[stage]}
-                    onChange={() => toggleDraftStage(stage)}
-                    className="rounded bg-gray-700 border-gray-600"
-                  />
-                  {stage === "completed" || stage === "failed" ? (
-                    <Tooltip
-                      content={
-                        stage === "completed"
-                          ? "Fires for both changed and unchanged runs — unlike Settings' notifications, this isn't split into two categories. The payload includes file counts if you need to filter downstream."
-                          : "Unlike Settings' Failures notification, this does not fire for a backup you cancelled yourself."
-                      }
-                    >
-                      <span className="underline decoration-dotted underline-offset-2">
-                        {WEBHOOK_STAGE_LABELS[stage]}
-                      </span>
-                    </Tooltip>
-                  ) : (
-                    WEBHOOK_STAGE_LABELS[stage]
-                  )}
-                </label>
-              ))}
-            </div>
-          </div>
-
-          {draftProvider === "custom" && (
-            <div>
-              <p className="text-xs text-gray-500 mb-1">
-                JSON body sent on each trigger — placeholders:{" "}
-                {WEBHOOK_PLACEHOLDERS.join(" ")}
-              </p>
-              <textarea
-                value={draftTemplate}
-                onChange={(e) => { setDraftTemplate(e.target.value); setWebhookNotice(null); }}
-                rows={4}
-                placeholder={DEFAULT_WEBHOOK_TEMPLATE}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-y"
-                spellCheck={false}
-              />
-            </div>
-          )}
-
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Request body preview</p>
-            {webhookPreviewLoading && (
-              <p className="text-xs text-gray-500">Rendering payload…</p>
-            )}
-            {!webhookPreviewLoading && webhookPreviewError && (
-              <p className="text-xs text-red-300">{webhookPreviewError}</p>
-            )}
-            {!webhookPreviewLoading && webhookPreview && (
-              <>
-                {webhookPreview.unknownPlaceholders.length > 0 && (
-                  <p className="text-xs text-amber-400 mb-2">
-                    Unknown placeholders (sent literally):{" "}
-                    {webhookPreview.unknownPlaceholders.join(" ")}
-                  </p>
-                )}
-                {(["started", "completed", "failed"] as const)
-                  .filter((stage) => draftStages[stage])
-                  .map((stage) => (
-                    <div key={stage} className="mb-2 last:mb-0">
-                      <p className="text-xs text-gray-500 mb-1">{WEBHOOK_STAGE_LABELS[stage]}</p>
-                      <pre className="text-xs font-mono bg-gray-950 border border-gray-700 rounded-lg p-3 overflow-x-auto text-gray-300 whitespace-pre-wrap">
-                        {webhookPreview[stage]}
-                      </pre>
-                    </div>
-                  ))}
-                {!(draftStages.started || draftStages.completed || draftStages.failed) && (
-                  <p className="text-xs text-gray-500">
-                    No stages selected — this webhook never fires.
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-
-          {webhookNotice && (
-            <div
-              className={`text-sm rounded-lg px-3 py-2 border ${
-                webhookNotice.ok
-                  ? "bg-green-900/40 text-green-300 border-green-700"
-                  : "bg-red-900/40 text-red-300 border-red-700"
-              }`}
-            >
-              {webhookNotice.message}
-            </div>
-          )}
-
-          <div className="flex items-center justify-between">
-            <Button
-              variant="secondary"
-              loading={testingWebhook}
-              onClick={sendTestWebhook}
-            >
-              Send Test
-            </Button>
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={closeWebhookModal}>Cancel</Button>
-              <Button onClick={commitWebhook}>
-                {editingWebhookId ? "Save Changes" : "Add Webhook"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </Modal>
+      <PlanFooter
+        isNew={isNew}
+        saving={saving}
+        error={error}
+        onSave={handleSave}
+        onCancel={() => navigate("/backup-plans")}
+        onDelete={() => setConfirmDelete(true)}
+      />
 
       <Modal
         title="Delete Backup Plan"
@@ -1423,7 +269,7 @@ export default function BackupPlanEditPage() {
       >
         <p className="text-sm text-gray-300 mb-5">
           Are you sure you want to delete{" "}
-          <span className="font-semibold text-gray-50">{name || "this plan"}</span>?
+          <span className="font-semibold text-gray-50">{form.name || "this plan"}</span>?
           This only removes the plan definition — existing snapshots are not affected.
         </p>
         <div className="flex justify-end gap-2">

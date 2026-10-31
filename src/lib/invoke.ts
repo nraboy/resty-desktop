@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ActiveIndexBatchStatus, AppendOnlyProbe, AutoUnlockResult, BackupHistoryEntry, BackupOutcome, BackupPlan, BackupWarning, CheckResult, DbSize, DefaultRetention, DiffResult, ExportSummary, FileEntry, ImportPreview, IndexProgress, NewRepoInput, NotificationSettings, PlanLastRun, Repository, RepoFileHit, ResticStats, RetentionPolicy, Schedule, Snapshot, SnapshotStats, WebhookPreview, WebhookProvider } from "./types";
+import type { Classification, ListFilesResult, TreeEnv, TreeListing, TreeRulesInput } from "./planTree";
+import type { EditAction, EditOutcome, ExportOut, MatchPreview } from "./planTreeEdit";
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -429,3 +431,58 @@ export const previewBackrestImport = (filePath: string): Promise<ImportPreview> 
 
 export const importBackrestConfig = (filePath: string): Promise<ExportSummary> =>
   invoke("import_backrest_config", { filePath });
+
+// ── plan tree preview (plan_tree.rs) ───────────────────────────────────────
+
+export const treeSupported = (): Promise<boolean> =>
+  invoke("tree_supported");
+
+/** Where the tree starts (`/`, or one root per drive on Windows) and the home folder. */
+export const treeEnv = (): Promise<TreeEnv> =>
+  invoke("tree_env");
+
+/** The sources a plan's path-list files (`--files-from`) add, expanded like restic reads them. */
+export const treeListFiles = (files: string[]): Promise<ListFilesResult> =>
+  invoke("tree_list_files", { files });
+
+/** `dir` / `file` / `symlink` / `other` / `missing` for each path (`follow`: a symlink reports its target). */
+export const treeKinds = (paths: string[], follow = false): Promise<string[]> =>
+  invoke("tree_kinds", { paths, follow });
+
+export const treeListDir = (path: string, limit?: number): Promise<TreeListing> =>
+  invoke("tree_list_dir", { path, limit });
+
+export const treeClassify = (rules: TreeRulesInput, paths: string[]): Promise<Classification> =>
+  invoke("tree_classify", { rules, paths });
+
+/** Starts scanning folders (each assumed included) for excluded items; results arrive as `tree:scan` events. */
+export const treeScanStart = (
+  rules: TreeRulesInput,
+  dirs: string[],
+  budgetMs?: number,
+  maxEntries?: number,
+): Promise<number> => invoke("tree_scan_start", { rules, dirs, budgetMs, maxEntries });
+
+export const treeScanCancel = (): Promise<void> =>
+  invoke("tree_scan_cancel");
+
+/** Applies a click (include/exclude) to the plan: the new sources and patterns, verified by the rule engine, or an error saying why not. */
+export const treePlanEdit = (rules: TreeRulesInput, action: EditAction): Promise<EditOutcome> =>
+  invoke("tree_plan_edit", { rules, action });
+
+/** How many currently-included items a pattern would leave out. */
+export const treeCountMatches = (rules: TreeRulesInput, pattern: string, budgetMs?: number): Promise<MatchPreview> =>
+  invoke("tree_count_matches", { rules, pattern, budgetMs });
+
+/** The exclude file(s) and restic command line that reproduce this plan's include/exclude behaviour on the CLI. */
+export const treeExport = (rules: TreeRulesInput): Promise<ExportOut> =>
+  invoke("tree_export", { rules });
+
+export const treeExportWrite = (
+  dir: string,
+  excludeFileName: string,
+  excludeFile: string,
+  iexcludeFileName?: string | null,
+  iexcludeFile?: string | null,
+): Promise<string[]> =>
+  invoke("tree_export_write", { dir, excludeFileName, excludeFile, iexcludeFileName, iexcludeFile });

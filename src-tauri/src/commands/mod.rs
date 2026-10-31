@@ -6,6 +6,10 @@ pub mod cache;
 pub mod crypto;
 pub mod keychain;
 pub mod notify;
+pub mod plan_edit;
+pub mod plan_listfiles;
+pub mod plan_rules;
+pub mod plan_tree;
 pub mod portal;
 pub mod repo;
 pub mod repo_locks;
@@ -57,3 +61,6 @@ impl NoConsole for std::process::Command {
         self
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
